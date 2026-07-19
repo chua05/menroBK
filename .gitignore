@@ -1,0 +1,21 @@
+node_modules
+.env
+src/config/serviceAccountKey.json
+
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Firebase Admin private credentials
+serviceAccountKey.json
+
+# Local Postman data that may contain tokens
+.postman/
+postman/globals/
+
+# Logs
+*.log
