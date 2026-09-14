@@ -1,64 +1,125 @@
-const { auth, db } = require("../config/firebase");
+const {
+  auth,
+  db,
+} = require("../config/firebase");
 
 
+// =====================================================
+// CREATE / VERIFY USER PROFILE
+// =====================================================
 
-// CREATE USER PROFILE
-const createUserProfile = async (user) => {
+const createUserProfile = async (
+  user
+) => {
 
-  const userRef = db.collection("users").doc(user.uid);
+  const userRef =
+    db
+      .collection("users")
+      .doc(user.uid);
 
-  const doc = await userRef.get();
+
+  const doc =
+    await userRef.get();
+
+
+  const now =
+    new Date();
 
 
   if (!doc.exists) {
 
     await userRef.set({
 
-      uid: user.uid,
+      uid:
+        user.uid,
 
-      fullName: user.name || user.displayName || "",
+      fullName:
+        user.name ||
+        user.displayName ||
+        user.fullName ||
+        "",
 
-      email: user.email,
+      email:
+        user.email || "",
 
-      role: "participant",
+      username:
+        user.username || "",
 
-      organization: "",
+      role:
+        "participant",
 
-      contactNumber: "",
+      organization:
+        "",
 
-      status: "active",
+      contactNumber:
+        "",
 
-      photoURL: user.picture || "",
+      barangay:
+        "",
 
-      createdAt: new Date(),
+      status:
+        "active",
 
-      updatedAt: new Date()
+      photoURL:
+        user.picture ||
+        user.photoURL ||
+        "",
+
+      createdAt:
+        now,
+
+      updatedAt:
+        now,
+
+      lastLoginAt:
+        now,
+
+    });
+
+  }
+
+  else {
+
+    await userRef.update({
+
+      lastLoginAt:
+        now,
+
+      updatedAt:
+        now,
 
     });
 
   }
 
 
-  return (await userRef.get()).data();
+  return (
+    await userRef.get()
+  ).data();
 
 };
 
 
-
-
+// =====================================================
 // GET PROFILE
+// =====================================================
 
-const getUserProfile = async (uid) => {
+const getUserProfile = async (
+  uid
+) => {
 
-  const doc = await db
-    .collection("users")
-    .doc(uid)
-    .get();
+  const doc =
+    await db
+      .collection("users")
+      .doc(uid)
+      .get();
 
 
   if (!doc.exists) {
 
-    throw new Error("User not found");
+    throw new Error(
+      "User not found"
+    );
 
   }
 
@@ -68,22 +129,88 @@ const getUserProfile = async (uid) => {
 };
 
 
-
-
+// =====================================================
 // UPDATE PROFILE
+// =====================================================
 
-const updateUserProfile = async (uid, data) => {
+const updateUserProfile = async (
+  uid,
+  data
+) => {
+
+  const allowedUpdates = {};
+
+
+  if (
+    data.fullName !== undefined
+  ) {
+
+    allowedUpdates.fullName =
+      data.fullName;
+
+  }
+
+
+  if (
+    data.username !== undefined
+  ) {
+
+    allowedUpdates.username =
+      data.username;
+
+  }
+
+
+  if (
+    data.contactNumber !== undefined
+  ) {
+
+    allowedUpdates.contactNumber =
+      data.contactNumber;
+
+  }
+
+
+  if (
+    data.organization !== undefined
+  ) {
+
+    allowedUpdates.organization =
+      data.organization;
+
+  }
+
+
+  if (
+    data.barangay !== undefined
+  ) {
+
+    allowedUpdates.barangay =
+      data.barangay;
+
+  }
+
+
+  if (
+    data.photoURL !== undefined
+  ) {
+
+    allowedUpdates.photoURL =
+      data.photoURL;
+
+  }
+
+
+  allowedUpdates.updatedAt =
+    new Date();
+
 
   await db
     .collection("users")
     .doc(uid)
-    .update({
-
-      ...data,
-
-      updatedAt: new Date()
-
-    });
+    .update(
+      allowedUpdates
+    );
 
 
   return true;
@@ -91,36 +218,52 @@ const updateUserProfile = async (uid, data) => {
 };
 
 
-
-
+// =====================================================
 // REGISTER USER
+// =====================================================
 
 const registerUser = async ({
 
-
   fullName,
+
   username,
+
   email,
+
   contactNumber,
+
   password,
+
   organization,
+
+  barangay,
+
 }) => {
 
 
-  const firebaseUser = await auth.createUser({
-    email,
+  const firebaseUser =
+    await auth.createUser({
 
-    password,
+      email,
 
-    displayName: fullName
+      password,
+
+      displayName:
+        fullName,
+
+    });
 
 
-  });
+  const role =
+    "participant";
 
-  const role = "participant";
 
-  const status = "active";
+  const status =
+    "active";
 
+
+  const now =
+    new Date();
 
 
   await db
@@ -128,9 +271,8 @@ const registerUser = async ({
     .doc(firebaseUser.uid)
     .set({
 
-
-      uid: firebaseUser.uid,
-
+      uid:
+        firebaseUser.uid,
 
       fullName,
 
@@ -140,27 +282,36 @@ const registerUser = async ({
 
       role,
 
-      organization: organization || "",
+      organization:
+        organization || "",
 
-      contactNumber: contactNumber || "",
+      contactNumber:
+        contactNumber || "",
+
+      barangay:
+        barangay || "",
 
       status,
 
-      photoURL: "",
+      photoURL:
+        "",
 
-      createdAt: new Date(),
+      createdAt:
+        now,
 
-      updatedAt: new Date()
+      updatedAt:
+        now,
 
+      lastLoginAt:
+        null,
 
     });
 
 
-
   return {
 
-
-    uid: firebaseUser.uid,
+    uid:
+      firebaseUser.uid,
 
     fullName,
 
@@ -170,22 +321,30 @@ const registerUser = async ({
 
     role,
 
-    organization: organization || "",
+    organization:
+      organization || "",
 
-    contactNumber: contactNumber || "",
+    contactNumber:
+      contactNumber || "",
 
-    status
+    barangay:
+      barangay || "",
 
+    status,
 
   };
-
 
 };
 
 
 module.exports = {
+
   registerUser,
+
   createUserProfile,
+
   getUserProfile,
-  updateUserProfile
+
+  updateUserProfile,
+
 };

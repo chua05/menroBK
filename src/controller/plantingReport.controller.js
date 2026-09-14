@@ -3,9 +3,59 @@ const {
   getAllPlantingReports,
   getPlantingReportById,
   getPlantingReportsByParticipantId,
+  reviewPlantingReport,
+  approvePlantingReport,
+  rejectPlantingReport,
+  getPlantingReportVerificationLogs,
 } = require(
   "../services/plantingReport.service"
 );
+
+
+// --------------------------------
+// NORMALIZE UPLOADED PHOTOS
+//
+// Supports:
+//
+// New:
+// req.files.photos
+//
+// Temporary backward compatibility:
+// req.files.photo
+// req.file
+// --------------------------------
+const getUploadedPlantingPhotos = (
+  req
+) => {
+  const photos = [];
+
+  if (
+    Array.isArray(
+      req.files?.photos
+    )
+  ) {
+    photos.push(
+      ...req.files.photos
+    );
+  }
+
+  if (
+    Array.isArray(
+      req.files?.photo
+    )
+  ) {
+    photos.push(
+      ...req.files.photo
+    );
+  }
+
+  if (req.file) {
+    photos.push(req.file);
+  }
+
+  return photos;
+};
+
 
 // SUBMIT PLANTING REPORT
 const submitPlantingReport = async (
@@ -13,30 +63,74 @@ const submitPlantingReport = async (
   res
 ) => {
   try {
+    // Always derive the account identity
+    // from the verified Firebase token.
     const participantId =
       req.user.uid;
 
     const {
       distributionId,
+      siteId,
+
+      participantType,
+      participantBarangay,
+      organizationAffiliation,
+
       quantityPlanted,
       plantingDate,
       plantingLocation,
+
       latitude,
       longitude,
+      accuracy,
+      locationCapturedAt,
+
+      eventId,
+      eventName,
+
       remarks,
     } = req.body || {};
 
-    if (!req.file) {
+
+    // --------------------------------
+    // EVIDENCE PHOTOS
+    // --------------------------------
+    const photos =
+      getUploadedPlantingPhotos(
+        req
+      );
+
+    if (
+      photos.length === 0
+    ) {
       return res.status(400).json({
         success: false,
         message:
-          "Planting photo is required.",
+          "Please add at least one planting evidence photo before submitting the report.",
       });
     }
 
     if (
+      photos.length > 10
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "A maximum of 10 planting evidence photos is allowed.",
+      });
+    }
+
+
+    // --------------------------------
+    // REQUIRED FIELDS
+    // --------------------------------
+    if (
       !distributionId ||
-      quantityPlanted === undefined ||
+      !siteId ||
+      !participantType ||
+      !participantBarangay ||
+      quantityPlanted ===
+        undefined ||
       !plantingDate ||
       !plantingLocation ||
       latitude === undefined ||
@@ -45,18 +139,16 @@ const submitPlantingReport = async (
       return res.status(400).json({
         success: false,
         message:
-          "All planting report fields are required.",
+          "Please complete all required planting report fields.",
       });
     }
 
+
+    // --------------------------------
+    // QUANTITY
+    // --------------------------------
     const parsedQuantity =
       Number(quantityPlanted);
-
-    const parsedLatitude =
-      Number(latitude);
-
-    const parsedLongitude =
-      Number(longitude);
 
     if (
       !Number.isInteger(
@@ -67,44 +159,136 @@ const submitPlantingReport = async (
       return res.status(400).json({
         success: false,
         message:
-          "Quantity planted must be a positive integer.",
+          "Quantity planted must be at least 1.",
       });
     }
 
+
+    // --------------------------------
+    // LATITUDE
+    // --------------------------------
+    const parsedLatitude =
+      Number(latitude);
+
     if (
-      Number.isNaN(parsedLatitude) ||
+      Number.isNaN(
+        parsedLatitude
+      ) ||
       parsedLatitude < -90 ||
       parsedLatitude > 90
     ) {
       return res.status(400).json({
         success: false,
         message:
-          "Latitude must be between -90 and 90.",
+          "The captured latitude is invalid.",
       });
     }
 
+
+    // --------------------------------
+    // LONGITUDE
+    // --------------------------------
+    const parsedLongitude =
+      Number(longitude);
+
     if (
-      Number.isNaN(parsedLongitude) ||
+      Number.isNaN(
+        parsedLongitude
+      ) ||
       parsedLongitude < -180 ||
       parsedLongitude > 180
     ) {
       return res.status(400).json({
         success: false,
         message:
-          "Longitude must be between -180 and 180.",
+          "The captured longitude is invalid.",
       });
     }
 
+
+    // --------------------------------
+    // OPTIONAL GPS ACCURACY
+    // --------------------------------
+    let parsedAccuracy = null;
+
+    if (
+      accuracy !== undefined &&
+      accuracy !== null &&
+      accuracy !== ""
+    ) {
+      parsedAccuracy =
+        Number(accuracy);
+
+      if (
+        !Number.isFinite(
+          parsedAccuracy
+        ) ||
+        parsedAccuracy < 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "The captured GPS accuracy is invalid.",
+        });
+      }
+    }
+
+
+    // --------------------------------
+    // LOCATION CAPTURE TIME
+    // --------------------------------
+    if (locationCapturedAt) {
+      const capturedDate =
+        new Date(
+          locationCapturedAt
+        );
+
+      if (
+        Number.isNaN(
+          capturedDate.getTime()
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "The location capture timestamp is invalid.",
+        });
+      }
+    }
+
+
+    // --------------------------------
+    // CREATE REPORT
+    // --------------------------------
     const report =
       await createPlantingReport(
         {
           distributionId,
+          siteId,
           participantId,
+
+          participantType:
+            String(
+              participantType
+            ).trim(),
+
+          participantBarangay:
+            String(
+              participantBarangay
+            ).trim(),
+
+          organizationAffiliation:
+            organizationAffiliation
+              ? String(
+                  organizationAffiliation
+                ).trim()
+              : "",
 
           quantityPlanted:
             parsedQuantity,
 
           plantingDate,
+
           plantingLocation,
 
           latitude:
@@ -113,46 +297,106 @@ const submitPlantingReport = async (
           longitude:
             parsedLongitude,
 
-          remarks,
+          accuracy:
+            parsedAccuracy,
+
+          locationCapturedAt:
+            locationCapturedAt ||
+            null,
+
+          eventId:
+            eventId || "",
+
+          eventName:
+            eventName || "",
+
+          remarks:
+            remarks || "",
         },
-        req.file
+        photos
       );
+
+
+    // --------------------------------
+    // INFORMATIVE SUCCESS MESSAGE
+    // --------------------------------
+    let message =
+      "Planting report submitted successfully.";
+
+    if (
+      report.verificationStatus ===
+      "Passed Automated Check"
+    ) {
+      message =
+        "Planting report submitted successfully and passed the automated verification check.";
+    }
+
+    if (
+      report.verificationStatus ===
+      "Flagged"
+    ) {
+      message =
+        "Planting report submitted successfully, but some verification checks were flagged for staff review.";
+    }
+
 
     return res.status(201).json({
       success: true,
-      message:
-        "Planting report submitted successfully.",
+      message,
       data: report,
     });
   } catch (error) {
-    console.error(error);
+    console.error(
+      "Submit planting report error:",
+      error
+    );
 
-    const knownErrors = [
+    const notFoundErrors = [
       "Distribution record not found.",
+      "Planting site not found.",
+    ];
+
+    const validationErrors = [
       "You cannot submit a report for another participant's distribution.",
       "Only released distributions can have planting reports.",
+      "Quantity planted must be a positive integer.",
       "Quantity planted cannot exceed the released quantity.",
+      "The linked distribution has an invalid released quantity.",
       "A planting report already exists for this distribution.",
       "Duplicate planting image detected.",
+      "Duplicate evidence photos were detected in this submission.",
+      "At least one planting evidence photo is required.",
+      "A maximum of 10 planting evidence photos is allowed.",
       "The uploaded file is not a valid image.",
+      "The selected planting site is inactive.",
+      "The selected planting site has invalid coordinates.",
+      "Latitude must be between -90 and 90.",
+      "Longitude must be between -180 and 180.",
     ];
 
     const statusCode =
-      error.message ===
-      "Distribution record not found."
+      notFoundErrors.includes(
+        error.message
+      )
         ? 404
-        : knownErrors.includes(
+        : validationErrors.includes(
             error.message
           )
         ? 400
         : 500;
 
-    return res.status(statusCode).json({
+    return res.status(
+      statusCode
+    ).json({
       success: false,
-      message: error.message,
+      message:
+        statusCode === 500
+          ? "Failed to submit planting report. Please try again."
+          : error.message,
     });
   }
 };
+
 
 // GET ALL REPORTS
 const getPlantingReports = async (
@@ -188,6 +432,7 @@ const getPlantingReports = async (
   }
 };
 
+
 // GET REPORT BY ID
 const getPlantingReport = async (
   req,
@@ -215,35 +460,228 @@ const getPlantingReport = async (
   }
 };
 
+
 // GET MY REPORTS
-const getMyPlantingReports = async (
+const getMyPlantingReports =
+  async (req, res) => {
+    try {
+      const reports =
+        await getPlantingReportsByParticipantId(
+          req.user.uid
+        );
+
+      return res.status(200).json({
+        success: true,
+        data: reports,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Failed to retrieve your planting reports.",
+      });
+    }
+  };
+
+
+// STAFF REVIEW REPORT
+const reviewReport = async (
   req,
   res
 ) => {
   try {
-    const reports =
-      await getPlantingReportsByParticipantId(
-        req.user.uid
+    const { id } = req.params;
+
+    const reviewedBy =
+      req.user.uid;
+
+    const {
+      remarks = "",
+    } = req.body || {};
+
+    const report =
+      await reviewPlantingReport(
+        id,
+        reviewedBy,
+        remarks
       );
 
     return res.status(200).json({
       success: true,
-      data: reports,
+      message:
+        "Planting report reviewed successfully.",
+      data: report,
     });
   } catch (error) {
     console.error(error);
 
-    return res.status(500).json({
+    const statusCode =
+      error.message ===
+      "Planting report not found."
+        ? 404
+        : 400;
+
+    return res.status(
+      statusCode
+    ).json({
       success: false,
-      message:
-        "Failed to retrieve your planting reports.",
+      message: error.message,
     });
   }
 };
+
+
+// ADMIN APPROVE REPORT
+const approveReport = async (
+  req,
+  res
+) => {
+  try {
+    const { id } = req.params;
+
+    const approvedBy =
+      req.user.uid;
+
+    const {
+      remarks = "",
+    } = req.body || {};
+
+    const report =
+      await approvePlantingReport(
+        id,
+        approvedBy,
+        remarks
+      );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Planting report approved successfully.",
+      data: report,
+    });
+  } catch (error) {
+    console.error(error);
+
+    const statusCode =
+      error.message ===
+      "Planting report not found."
+        ? 404
+        : 400;
+
+    return res.status(
+      statusCode
+    ).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+// ADMIN REJECT REPORT
+const rejectReport = async (
+  req,
+  res
+) => {
+  try {
+    const { id } = req.params;
+
+    const rejectedBy =
+      req.user.uid;
+
+    const {
+      remarks = "",
+    } = req.body || {};
+
+    if (
+      !String(
+        remarks
+      ).trim()
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Please enter a reason for rejecting the planting report.",
+      });
+    }
+
+    const report =
+      await rejectPlantingReport(
+        id,
+        rejectedBy,
+        remarks
+      );
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Planting report rejected successfully.",
+      data: report,
+    });
+  } catch (error) {
+    console.error(error);
+
+    const statusCode =
+      error.message ===
+      "Planting report not found."
+        ? 404
+        : 400;
+
+    return res.status(
+      statusCode
+    ).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+
+// GET VERIFICATION LOGS
+const getVerificationLogs = async (
+  req,
+  res
+) => {
+  try {
+    const { id } = req.params;
+
+    const logs =
+      await getPlantingReportVerificationLogs(
+        id
+      );
+
+    return res.status(200).json({
+      success: true,
+      data: logs,
+    });
+  } catch (error) {
+    console.error(error);
+
+    const statusCode =
+      error.message ===
+      "Planting report not found."
+        ? 404
+        : 500;
+
+    return res.status(
+      statusCode
+    ).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
 
 module.exports = {
   submitPlantingReport,
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
+  reviewReport,
+  approveReport,
+  rejectReport,
+  getVerificationLogs,
 };

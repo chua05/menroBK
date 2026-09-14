@@ -24,8 +24,11 @@ const submitSeedlingRequest = async (req, res) => {
       purpose,
       plantingLocation,
       preferredReleaseDate,
+
+      eventProposal,
     } = req.body || {};
 
+    // BASIC REQUEST VALIDATION
     if (
       !participantId ||
       !participantName ||
@@ -35,22 +38,28 @@ const submitSeedlingRequest = async (req, res) => {
       quantity === undefined ||
       !purpose ||
       !plantingLocation ||
-      !preferredReleaseDate
+      !preferredReleaseDate ||
+      !eventProposal
     ) {
       return res.status(400).json({
         success: false,
-        message: "All fields are required.",
+        message:
+          "All seedling request and event proposal fields are required.",
       });
     }
 
-    if (!Number.isInteger(quantity)) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be an integer.",
-      });
+    // QUANTITY VALIDATION
+    const parsedQuantity =
+  Number(quantity);
+
+if (
+  !Number.isInteger(
+    parsedQuantity
+  )
+) {
     }
 
-    if (quantity <= 0) {
+    if (parsedQuantity <= 0) {
       return res.status(400).json({
         success: false,
         message:
@@ -58,33 +67,200 @@ const submitSeedlingRequest = async (req, res) => {
       });
     }
 
-    const request = await createSeedlingRequest({
-      participantId,
-      participantName,
-      organization,
-      contactNumber,
+    const {
+      eventName,
+      barangay,
+      proposedDate,
+      proposedStartTime,
+      proposedEndTime,
+      eventLocation,
+      latitude,
+      longitude,
+      expectedParticipants,
+      description,
+    } = eventProposal;
 
-      inventoryId,
+    // EVENT REQUIRED FIELDS
+    if (
+      !eventName ||
+      !barangay ||
+      !proposedDate ||
+      !proposedStartTime ||
+      !proposedEndTime ||
+      !eventLocation ||
+      latitude === undefined ||
+      longitude === undefined ||
+      expectedParticipants === undefined
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "All required event proposal fields must be provided.",
+      });
+    }
 
-      quantity,
-      purpose,
-      plantingLocation,
-      preferredReleaseDate,
+    const parsedLatitude =
+      Number(latitude);
 
-      status: "Pending",
+    const parsedLongitude =
+      Number(longitude);
 
-      reviewedBy: "",
-      approvedBy: "",
-      rejectedBy: "",
-      releasedBy: "",
+    const parsedExpectedParticipants =
+      Number(expectedParticipants);
 
-      inventoryDeducted: false,
-    });
+    // GPS VALIDATION
+    if (
+      Number.isNaN(parsedLatitude) ||
+      parsedLatitude < -90 ||
+      parsedLatitude > 90
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Event latitude must be between -90 and 90.",
+      });
+    }
+
+    if (
+      Number.isNaN(parsedLongitude) ||
+      parsedLongitude < -180 ||
+      parsedLongitude > 180
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Event longitude must be between -180 and 180.",
+      });
+    }
+
+    // EXPECTED PARTICIPANTS VALIDATION
+    if (
+      !Number.isInteger(
+        parsedExpectedParticipants
+      ) ||
+      parsedExpectedParticipants <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Expected participants must be a positive integer.",
+      });
+    }
+
+    // DATE VALIDATION
+    const parsedEventDate =
+      new Date(
+        `${proposedDate}T00:00:00`
+      );
+
+    if (
+      Number.isNaN(
+        parsedEventDate.getTime()
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Invalid proposed event date.",
+      });
+    }
+
+    // TIME VALIDATION
+    const timePattern =
+      /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+    if (
+      !timePattern.test(
+        proposedStartTime
+      ) ||
+      !timePattern.test(
+        proposedEndTime
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Event time must use HH:MM format.",
+      });
+    }
+
+    if (
+      proposedStartTime >=
+      proposedEndTime
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Event end time must be later than the start time.",
+      });
+    }
+
+    const request =
+      await createSeedlingRequest({
+        participantId,
+        participantName,
+        organization,
+        contactNumber,
+
+        inventoryId,
+
+        quantity: parsedQuantity,
+        purpose,
+        plantingLocation,
+        preferredReleaseDate,
+
+        // EVENT PROPOSAL
+        eventProposal: {
+          eventName:
+            eventName.trim(),
+
+          barangay:
+            barangay.trim(),
+
+          proposedDate,
+
+          proposedStartTime,
+
+          proposedEndTime,
+
+          eventLocation:
+            eventLocation.trim(),
+
+          latitude:
+            parsedLatitude,
+
+          longitude:
+            parsedLongitude,
+
+          expectedParticipants:
+            parsedExpectedParticipants,
+
+          description:
+            description?.trim() || "",
+
+          status:
+            "Proposed",
+        },
+
+        // Will contain the real
+        // planting event document ID
+        // after event authorization.
+        eventId: "",
+
+        status: "Pending",
+
+        reviewedBy: "",
+        approvedBy: "",
+        rejectedBy: "",
+        releasedBy: "",
+
+        inventoryDeducted: false,
+      });
 
     return res.status(201).json({
       success: true,
       message:
-        "Seedling request submitted successfully.",
+        "Seedling request and event proposal submitted successfully.",
       data: request,
     });
   } catch (error) {
@@ -96,10 +272,12 @@ const submitSeedlingRequest = async (req, res) => {
         ? 404
         : 400;
 
-    return res.status(statusCode).json({
-      success: false,
-      message: error.message,
-    });
+    return res
+      .status(statusCode)
+      .json({
+        success: false,
+        message: error.message,
+      });
   }
 };
 

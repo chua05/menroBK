@@ -2,7 +2,10 @@ const {
   getAllDistributions,
   getDistributionById,
   getDistributionsByParticipantId,
-} = require("../services/distribution.service");
+} = require(
+  "../services/distribution.service"
+);
+
 
 // GET ALL DISTRIBUTIONS
 const getDistributions = async (
@@ -38,6 +41,7 @@ const getDistributions = async (
   }
 };
 
+
 // GET DISTRIBUTION BY ID
 const getDistribution = async (
   req,
@@ -47,7 +51,9 @@ const getDistribution = async (
     const { id } = req.params;
 
     const distribution =
-      await getDistributionById(id);
+      await getDistributionById(
+        id
+      );
 
     return res.status(200).json({
       success: true,
@@ -58,17 +64,21 @@ const getDistribution = async (
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message:
+        error.message,
     });
   }
 };
 
+
 // GET DISTRIBUTIONS BY PARTICIPANT ID
+// ADMIN / STAFF
 const getParticipantDistributions =
   async (req, res) => {
     try {
-      const { participantId } =
-        req.params;
+      const {
+        participantId,
+      } = req.params;
 
       const distributions =
         await getDistributionsByParticipantId(
@@ -90,8 +100,49 @@ const getParticipantDistributions =
     }
   };
 
+
+// GET CURRENT PARTICIPANT'S
+// OWN DISTRIBUTIONS
+const getMyDistributions =
+  async (req, res) => {
+    try {
+      const participantId =
+        req.user.uid;
+
+      const distributions =
+        await getDistributionsByParticipantId(
+          participantId
+        );
+
+      const releasedDistributions =
+        distributions.filter(
+          (distribution) =>
+            distribution.status ===
+            "Released"
+        );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Your released distribution records retrieved successfully.",
+        data:
+          releasedDistributions,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        success: false,
+        message:
+          "Failed to retrieve your distribution records.",
+      });
+    }
+  };
+
+
 module.exports = {
   getDistributions,
   getDistribution,
   getParticipantDistributions,
+  getMyDistributions,
 };

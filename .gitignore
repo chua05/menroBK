@@ -19,3 +19,6 @@ postman/globals/
 
 # Logs
 *.log
+
+# Uploaded development files
+uploads/

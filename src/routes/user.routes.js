@@ -8,16 +8,14 @@ const router =
 
 const {
 
-  register,
+  getUsers,
 
-  verifyUser,
+  changeUserRole,
 
-  getProfile,
-
-  updateProfile,
+  changeUserStatus,
 
 } = require(
-  "../controller/auth.controller"
+  "../controller/user.controller"
 );
 
 
@@ -39,91 +37,63 @@ const {
 );
 
 
-const {
-
-  authLimiter,
-
-} = require(
-  "../middleware/rateLimiter.middleware"
-);
-
-
 // =====================================================
-// REGISTER
-// =====================================================
-
-router.post(
-
-  "/register",
-
-  authLimiter,
-
-  register
-
-);
-
-
-// =====================================================
-// VERIFY USER
-// =====================================================
-
-router.post(
-
-  "/verify",
-
-  verifyToken,
-
-  verifyUser
-
-);
-
-
-// =====================================================
-// GET PROFILE
+// GET ALL REGISTERED USERS
+// Admin + Staff
 // =====================================================
 
 router.get(
 
-  "/profile",
+  "/",
 
   verifyToken,
 
   authorizeRoles(
-
-    "participant",
-
     "admin",
-
     "staff"
-
   ),
 
-  getProfile
+  getUsers
 
 );
 
 
 // =====================================================
-// UPDATE PROFILE
+// UPDATE USER ROLE
+// Admin only
 // =====================================================
 
-router.put(
+router.patch(
 
-  "/profile",
+  "/:uid/role",
 
   verifyToken,
 
   authorizeRoles(
-
-    "participant",
-
-    "admin",
-
-    "staff"
-
+    "admin"
   ),
 
-  updateProfile
+  changeUserRole
+
+);
+
+
+// =====================================================
+// UPDATE USER STATUS
+// Admin only
+// =====================================================
+
+router.patch(
+
+  "/:uid/status",
+
+  verifyToken,
+
+  authorizeRoles(
+    "admin"
+  ),
+
+  changeUserStatus
 
 );
 

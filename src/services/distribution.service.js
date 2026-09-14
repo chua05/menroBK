@@ -57,11 +57,17 @@ const createDistributionRecordInTransaction = (
     purpose:
       requestData.purpose,
 
+    plantingSiteId:
+    requestData.plantingSiteId || "",
+
     plantingLocation:
       requestData.plantingLocation,
 
     preferredReleaseDate:
       requestData.preferredReleaseDate,
+
+    eventId:
+    requestData.eventId || "",
 
     reviewedBy:
       requestData.reviewedBy || "",

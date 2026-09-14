@@ -7,6 +7,10 @@ const {
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
+  reviewReport,
+  approveReport,
+  rejectReport,
+  getVerificationLogs,
 } = require(
   "../controller/plantingReport.controller"
 );
@@ -29,16 +33,89 @@ const {
   "../middleware/upload.middleware"
 );
 
+
+// --------------------------------
+// PLANTING EVIDENCE UPLOAD
+//
+// New field:
+// photos = 1 to 10 evidence photos
+//
+// Legacy field:
+// photo = old single-photo frontend
+//
+// Both are temporarily accepted so
+// the current frontend will not break
+// before PlantingPage.jsx is updated.
+// --------------------------------
+const plantingEvidenceUpload =
+  uploadPlantingPhoto.fields([
+    {
+      name: "photos",
+      maxCount: 10,
+    },
+    {
+      name: "photo",
+      maxCount: 1,
+    },
+  ]);
+
+
+// HANDLE MULTER ERRORS
+const handlePlantingEvidenceUpload = (
+  req,
+  res,
+  next
+) => {
+  plantingEvidenceUpload(
+    req,
+    res,
+    (error) => {
+      if (!error) {
+        return next();
+      }
+
+      if (
+        error.code ===
+        "LIMIT_FILE_SIZE"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Each planting evidence photo must not exceed 10 MB.",
+        });
+      }
+
+      if (
+        error.code ===
+        "LIMIT_UNEXPECTED_FILE"
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "A maximum of 10 planting evidence photos is allowed.",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to process the planting evidence photos.",
+      });
+    }
+  );
+};
+
+
 // PARTICIPANT SUBMIT REPORT
 router.post(
   "/",
   verifyToken,
   authorizeRoles("participant"),
-  uploadPlantingPhoto.single(
-    "photo"
-  ),
+  handlePlantingEvidenceUpload,
   submitPlantingReport
 );
+
 
 // PARTICIPANT VIEW OWN REPORTS
 router.get(
@@ -47,6 +124,7 @@ router.get(
   authorizeRoles("participant"),
   getMyPlantingReports
 );
+
 
 // ADMIN AND STAFF VIEW ALL
 router.get(
@@ -59,6 +137,7 @@ router.get(
   getPlantingReports
 );
 
+
 // ADMIN AND STAFF VIEW BY ID
 router.get(
   "/:id",
@@ -69,5 +148,46 @@ router.get(
   ),
   getPlantingReport
 );
+
+
+// STAFF REVIEW REPORT
+router.patch(
+  "/:id/review",
+  verifyToken,
+  authorizeRoles("staff"),
+  reviewReport
+);
+
+
+// ADMIN APPROVE REPORT
+router.patch(
+  "/:id/approve",
+  verifyToken,
+  authorizeRoles("admin"),
+  approveReport
+);
+
+
+// ADMIN REJECT REPORT
+router.patch(
+  "/:id/reject",
+  verifyToken,
+  authorizeRoles("admin"),
+  rejectReport
+);
+
+
+// ADMIN AND STAFF VIEW
+// VERIFICATION HISTORY
+router.get(
+  "/:id/verification-logs",
+  verifyToken,
+  authorizeRoles(
+    "admin",
+    "staff"
+  ),
+  getVerificationLogs
+);
+
 
 module.exports = router;

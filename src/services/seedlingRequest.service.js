@@ -1,360 +1,731 @@
 const { db } = require("../config/firebase");
-const { Timestamp } = require("firebase-admin/firestore");
+
+const {
+  Timestamp,
+} = require("firebase-admin/firestore");
 
 const {
   calculateInventoryStatus,
-} = require("./inventory.service");
+} = require(
+  "./inventory.service"
+);
 
 const {
   createDistributionRecordInTransaction,
-} = require("./distribution.service");
+} = require(
+  "./distribution.service"
+);
 
-const COLLECTION = "seedlingRequests";
-const INVENTORY_COLLECTION = "seedlingInventory";
+const COLLECTION =
+  "seedlingRequests";
 
+const INVENTORY_COLLECTION =
+  "seedlingInventory";
+
+// ========================================
 // CREATE SEEDLING REQUEST
-const createSeedlingRequest = async (data) => {
-  const inventoryRef = db
-    .collection(INVENTORY_COLLECTION)
-    .doc(data.inventoryId);
+// ========================================
+const createSeedlingRequest =
+  async (data) => {
+    const inventoryRef = db
+      .collection(
+        INVENTORY_COLLECTION
+      )
+      .doc(data.inventoryId);
 
-  const inventoryDoc = await inventoryRef.get();
+    const inventoryDoc =
+      await inventoryRef.get();
 
-  if (
-    !inventoryDoc.exists ||
-    inventoryDoc.data().isDeleted === true
-  ) {
-    throw new Error("Selected seedling inventory not found.");
-  }
+    if (
+      !inventoryDoc.exists ||
+      inventoryDoc.data()
+        .isDeleted === true
+    ) {
+      throw new Error(
+        "Selected seedling inventory not found."
+      );
+    }
 
-  const inventoryData = inventoryDoc.data();
-  const now = Timestamp.now();
+    const inventoryData =
+      inventoryDoc.data();
 
-  const requestData = {
-    ...data,
+    const requestedQuantity =
+      Number(data.quantity);
 
-    // Species comes from the selected inventory record.
-    species: inventoryData.species,
+    if (
+      !Number.isInteger(
+        requestedQuantity
+      ) ||
+      requestedQuantity <= 0
+    ) {
+      throw new Error(
+        "Requested quantity must be a positive whole number."
+      );
+    }
 
-    createdAt: now,
-    updatedAt: now,
+    const availableQuantity =
+      Number(
+        inventoryData
+          .availableQuantity || 0
+      );
+
+    if (
+      requestedQuantity >
+      availableQuantity
+    ) {
+      throw new Error(
+        `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
+      );
+    }
+
+    const now =
+      Timestamp.now();
+
+    const requestData = {
+      ...data,
+
+      quantity:
+        requestedQuantity,
+
+      species:
+        inventoryData.species,
+
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const docRef = await db
+      .collection(COLLECTION)
+      .add(requestData);
+
+    return {
+      id: docRef.id,
+      ...requestData,
+    };
   };
 
-  const docRef = await db
-    .collection(COLLECTION)
-    .add(requestData);
-
-  return {
-    id: docRef.id,
-    ...requestData,
-  };
-};
-
+// ========================================
 // GET ALL REQUESTS
-const getAllSeedlingRequests = async () => {
-  const snapshot = await db
-    .collection(COLLECTION)
-    .get();
+// ========================================
+const getAllSeedlingRequests =
+  async () => {
+    const snapshot =
+      await db
+        .collection(COLLECTION)
+        .get();
 
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-};
+    return snapshot.docs.map(
+      (doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })
+    );
+  };
 
+// ========================================
 // GET REQUEST BY ID
-const getSeedlingRequestById = async (id) => {
-  const doc = await db
-    .collection(COLLECTION)
-    .doc(id)
-    .get();
+// ========================================
+const getSeedlingRequestById =
+  async (id) => {
+    const doc = await db
+      .collection(COLLECTION)
+      .doc(id)
+      .get();
 
-  if (!doc.exists) {
-    throw new Error("Seedling request not found.");
-  }
-
-  return {
-    id: doc.id,
-    ...doc.data(),
-  };
-};
-
-// GET REQUESTS BY STATUS
-const getSeedlingRequestsByStatus = async (status) => {
-  const snapshot = await db
-    .collection(COLLECTION)
-    .where("status", "==", status)
-    .get();
-
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-};
-
-// GET PARTICIPANT REQUESTS
-const getSeedlingRequestsByParticipantId = async (
-  participantId
-) => {
-  const snapshot = await db
-    .collection(COLLECTION)
-    .where("participantId", "==", participantId)
-    .get();
-
-  return snapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-};
-
-// REVIEW REQUEST
-const reviewSeedlingRequest = async (
-  id,
-  reviewData
-) => {
-  const docRef = db
-    .collection(COLLECTION)
-    .doc(id);
-
-  const doc = await docRef.get();
-
-  if (!doc.exists) {
-    throw new Error("Seedling request not found.");
-  }
-
-  const currentRequest = doc.data();
-
-  if (currentRequest.status !== "Pending") {
-    throw new Error(
-      "Only pending requests can be reviewed."
-    );
-  }
-
-  await docRef.update({
-    ...reviewData,
-    status: "Reviewed",
-    updatedAt: Timestamp.now(),
-  });
-
-  const updatedDoc = await docRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
-  };
-};
-
-// APPROVE REQUEST
-const approveSeedlingRequest = async (
-  id,
-  approvedBy
-) => {
-  const docRef = db
-    .collection(COLLECTION)
-    .doc(id);
-
-  const doc = await docRef.get();
-
-  if (!doc.exists) {
-    throw new Error("Seedling request not found.");
-  }
-
-  const currentRequest = doc.data();
-
-  if (currentRequest.status !== "Reviewed") {
-    throw new Error(
-      "Only reviewed requests can be approved."
-    );
-  }
-
-  await docRef.update({
-    status: "Approved",
-    approvedBy,
-    updatedAt: Timestamp.now(),
-  });
-
-  const updatedDoc = await docRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
-  };
-};
-
-// REJECT REQUEST
-const rejectSeedlingRequest = async (
-  id,
-  rejectedBy
-) => {
-  const docRef = db
-    .collection(COLLECTION)
-    .doc(id);
-
-  const doc = await docRef.get();
-
-  if (!doc.exists) {
-    throw new Error("Seedling request not found.");
-  }
-
-  const currentRequest = doc.data();
-
-  if (currentRequest.status !== "Reviewed") {
-    throw new Error(
-      "Only reviewed requests can be rejected."
-    );
-  }
-
-  await docRef.update({
-    status: "Rejected",
-    rejectedBy,
-    updatedAt: Timestamp.now(),
-  });
-
-  const updatedDoc = await docRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
-  };
-};
-
-// RELEASE REQUEST AND DEDUCT INVENTORY
-const releaseSeedlingRequest = async (
-  id,
-  releasedBy
-) => {
-  const requestRef = db
-    .collection(COLLECTION)
-    .doc(id);
-
-  await db.runTransaction(async (transaction) => {
-    const requestDoc = await transaction.get(
-      requestRef
-    );
-
-    if (!requestDoc.exists) {
+    if (!doc.exists) {
       throw new Error(
         "Seedling request not found."
       );
     }
 
-    const currentRequest = requestDoc.data();
+    return {
+      id: doc.id,
+      ...doc.data(),
+    };
+  };
 
-    if (currentRequest.status !== "Approved") {
+// ========================================
+// GET BY STATUS
+// ========================================
+const getSeedlingRequestsByStatus =
+  async (status) => {
+    const snapshot = await db
+      .collection(COLLECTION)
+      .where(
+        "status",
+        "==",
+        status
+      )
+      .get();
+
+    return snapshot.docs.map(
+      (doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })
+    );
+  };
+
+// ========================================
+// PARTICIPANT REQUESTS
+// ========================================
+const getSeedlingRequestsByParticipantId =
+  async (participantId) => {
+    const snapshot = await db
+      .collection(COLLECTION)
+      .where(
+        "participantId",
+        "==",
+        participantId
+      )
+      .get();
+
+    return snapshot.docs.map(
+      (doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      })
+    );
+  };
+
+// ========================================
+// STAFF REVIEW
+// ========================================
+const reviewSeedlingRequest =
+  async (
+    id,
+    reviewData
+  ) => {
+    const docRef = db
+      .collection(COLLECTION)
+      .doc(id);
+
+    const doc =
+      await docRef.get();
+
+    if (!doc.exists) {
       throw new Error(
-        "Only approved requests can be released."
+        "Seedling request not found."
       );
     }
 
-    if (!currentRequest.inventoryId) {
-      throw new Error(
-        "Seedling request has no linked inventory."
-      );
-    }
-
-    const requestedQuantity =
-      currentRequest.quantity;
+    const currentRequest =
+      doc.data();
 
     if (
-      !Number.isInteger(requestedQuantity) ||
-      requestedQuantity <= 0
+      currentRequest.status !==
+      "Pending"
     ) {
       throw new Error(
-        "Invalid requested quantity."
+        "Only pending requests can be reviewed."
+      );
+    }
+
+    const quantity =
+      Number(
+        reviewData.quantity
+      );
+
+    if (
+      !Number.isInteger(
+        quantity
+      ) ||
+      quantity <= 0
+    ) {
+      throw new Error(
+        "Request quantity must be a positive whole number."
       );
     }
 
     const inventoryRef = db
-      .collection(INVENTORY_COLLECTION)
-      .doc(currentRequest.inventoryId);
+      .collection(
+        INVENTORY_COLLECTION
+      )
+      .doc(
+        currentRequest
+          .inventoryId
+      );
 
-    const inventoryDoc = await transaction.get(
-      inventoryRef
-    );
+    const inventoryDoc =
+      await inventoryRef.get();
 
     if (
       !inventoryDoc.exists ||
-      inventoryDoc.data().isDeleted === true
+      inventoryDoc.data()
+        .isDeleted === true
     ) {
       throw new Error(
         "Linked seedling inventory not found."
       );
     }
 
-    const inventoryData = inventoryDoc.data();
+    const inventoryData =
+      inventoryDoc.data();
 
     const availableQuantity =
-      inventoryData.availableQuantity || 0;
+      Number(
+        inventoryData
+          .availableQuantity || 0
+      );
 
-    if (availableQuantity < requestedQuantity) {
+    if (
+      quantity >
+      availableQuantity
+    ) {
       throw new Error(
-        "Insufficient seedling stock."
+        `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
       );
     }
 
-    const newAvailableQuantity =
-      availableQuantity - requestedQuantity;
+    await docRef.update({
+      ...reviewData,
 
-    const newDistributedQuantity =
-      (inventoryData.distributedQuantity || 0) +
-      requestedQuantity;
+      quantity,
 
-    const newStatus = calculateInventoryStatus(
-      newAvailableQuantity
-    );
+      status: "Reviewed",
 
-    const now = Timestamp.now();
-
-    // Deduct inventory.
-    transaction.update(inventoryRef, {
-      availableQuantity:
-        newAvailableQuantity,
-
-      distributedQuantity:
-        newDistributedQuantity,
-
-      status: newStatus,
-
-      updatedBy: releasedBy,
-
-      updatedAt: now,
+      updatedAt:
+        Timestamp.now(),
     });
 
-    // Mark request as Released.
-    transaction.update(requestRef, {
-      status: "Released",
+    const updatedDoc =
+      await docRef.get();
 
-      releasedBy,
+    return {
+      id: updatedDoc.id,
+      ...updatedDoc.data(),
+    };
+  };
 
-      releasedAt: now,
+// ========================================
+// ADMIN FINAL APPROVAL
+// RESERVE + DEDUCT AVAILABLE STOCK
+// ========================================
+const approveSeedlingRequest =
+  async (
+    id,
+    approvedBy
+  ) => {
+    const requestRef = db
+      .collection(COLLECTION)
+      .doc(id);
 
-      inventoryDeducted: true,
+    await db.runTransaction(
+      async (transaction) => {
+        const requestDoc =
+          await transaction.get(
+            requestRef
+          );
 
-      distributionId: id,
+        if (!requestDoc.exists) {
+          throw new Error(
+            "Seedling request not found."
+          );
+        }
 
-      updatedAt: now,
-    });
+        const currentRequest =
+          requestDoc.data();
 
-    // Create permanent distribution record.
-    createDistributionRecordInTransaction(
-      transaction,
-      {
-        requestId: id,
-        requestData: currentRequest,
-        releasedBy,
-        releasedAt: now,
+        if (
+          currentRequest.status !==
+          "Reviewed"
+        ) {
+          throw new Error(
+            "Only reviewed requests can be approved."
+          );
+        }
+
+        if (
+          currentRequest
+            .inventoryDeducted ===
+          true
+        ) {
+          throw new Error(
+            "Inventory has already been deducted for this request."
+          );
+        }
+
+        if (
+          !currentRequest.inventoryId
+        ) {
+          throw new Error(
+            "Seedling request has no linked inventory."
+          );
+        }
+
+        const requestedQuantity =
+          Number(
+            currentRequest.quantity
+          );
+
+        if (
+          !Number.isInteger(
+            requestedQuantity
+          ) ||
+          requestedQuantity <= 0
+        ) {
+          throw new Error(
+            "Invalid requested quantity."
+          );
+        }
+
+        const inventoryRef = db
+          .collection(
+            INVENTORY_COLLECTION
+          )
+          .doc(
+            currentRequest
+              .inventoryId
+          );
+
+        const inventoryDoc =
+          await transaction.get(
+            inventoryRef
+          );
+
+        if (
+          !inventoryDoc.exists ||
+          inventoryDoc.data()
+            .isDeleted === true
+        ) {
+          throw new Error(
+            "Linked seedling inventory not found."
+          );
+        }
+
+        const inventoryData =
+          inventoryDoc.data();
+
+        const availableQuantity =
+          Number(
+            inventoryData
+              .availableQuantity ||
+              0
+          );
+
+        if (
+          availableQuantity <
+          requestedQuantity
+        ) {
+          throw new Error(
+            `Insufficient seedling stock. Only ${availableQuantity} seedlings are available.`
+          );
+        }
+
+        const currentReserved =
+          Number(
+            inventoryData
+              .reservedQuantity ||
+              0
+          );
+
+        const newAvailable =
+          availableQuantity -
+          requestedQuantity;
+
+        const newReserved =
+          currentReserved +
+          requestedQuantity;
+
+        const now =
+          Timestamp.now();
+
+        transaction.update(
+          inventoryRef,
+          {
+            availableQuantity:
+              newAvailable,
+
+            reservedQuantity:
+              newReserved,
+
+            status:
+              calculateInventoryStatus(
+                newAvailable
+              ),
+
+            updatedBy:
+              approvedBy,
+
+            updatedAt: now,
+          }
+        );
+
+        transaction.update(
+          requestRef,
+          {
+            status:
+              "Approved",
+
+            approvedBy,
+
+            approvedAt: now,
+
+            // Prevent second deduction.
+            inventoryDeducted:
+              true,
+
+            inventoryReserved:
+              true,
+
+            updatedAt: now,
+          }
+        );
       }
     );
-  });
 
-  
-  const updatedDoc = await requestRef.get();
+    const updatedDoc =
+      await requestRef.get();
 
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
+    return {
+      id: updatedDoc.id,
+      ...updatedDoc.data(),
+    };
   };
-};
+
+// ========================================
+// REJECT REQUEST
+// ========================================
+const rejectSeedlingRequest =
+  async (
+    id,
+    rejectedBy
+  ) => {
+    const docRef = db
+      .collection(COLLECTION)
+      .doc(id);
+
+    const doc =
+      await docRef.get();
+
+    if (!doc.exists) {
+      throw new Error(
+        "Seedling request not found."
+      );
+    }
+
+    const currentRequest =
+      doc.data();
+
+    if (
+      currentRequest.status !==
+      "Reviewed"
+    ) {
+      throw new Error(
+        "Only reviewed requests can be rejected."
+      );
+    }
+
+    await docRef.update({
+      status:
+        "Rejected",
+
+      rejectedBy,
+
+      rejectedAt:
+        Timestamp.now(),
+
+      updatedAt:
+        Timestamp.now(),
+    });
+
+    const updatedDoc =
+      await docRef.get();
+
+    return {
+      id: updatedDoc.id,
+      ...updatedDoc.data(),
+    };
+  };
+
+// ========================================
+// RELEASE REQUEST
+// MOVE RESERVED → DISTRIBUTED
+// DO NOT DEDUCT AVAILABLE AGAIN
+// ========================================
+const releaseSeedlingRequest =
+  async (
+    id,
+    releasedBy
+  ) => {
+    const requestRef = db
+      .collection(COLLECTION)
+      .doc(id);
+
+    await db.runTransaction(
+      async (transaction) => {
+        const requestDoc =
+          await transaction.get(
+            requestRef
+          );
+
+        if (!requestDoc.exists) {
+          throw new Error(
+            "Seedling request not found."
+          );
+        }
+
+        const currentRequest =
+          requestDoc.data();
+
+        if (
+          currentRequest.status !==
+          "Approved"
+        ) {
+          throw new Error(
+            "Only approved requests can be released."
+          );
+        }
+
+        if (
+          !currentRequest.inventoryId
+        ) {
+          throw new Error(
+            "Seedling request has no linked inventory."
+          );
+        }
+
+        if (
+          currentRequest
+            .inventoryDeducted !==
+          true
+        ) {
+          throw new Error(
+            "Inventory was not reserved for this approved request."
+          );
+        }
+
+        const requestedQuantity =
+          Number(
+            currentRequest.quantity
+          );
+
+        if (
+          !Number.isInteger(
+            requestedQuantity
+          ) ||
+          requestedQuantity <= 0
+        ) {
+          throw new Error(
+            "Invalid requested quantity."
+          );
+        }
+
+        const inventoryRef = db
+          .collection(
+            INVENTORY_COLLECTION
+          )
+          .doc(
+            currentRequest
+              .inventoryId
+          );
+
+        const inventoryDoc =
+          await transaction.get(
+            inventoryRef
+          );
+
+        if (
+          !inventoryDoc.exists ||
+          inventoryDoc.data()
+            .isDeleted === true
+        ) {
+          throw new Error(
+            "Linked seedling inventory not found."
+          );
+        }
+
+        const inventoryData =
+          inventoryDoc.data();
+
+        const reservedQuantity =
+          Number(
+            inventoryData
+              .reservedQuantity ||
+              0
+          );
+
+        if (
+          reservedQuantity <
+          requestedQuantity
+        ) {
+          throw new Error(
+            "Reserved stock is inconsistent with this request."
+          );
+        }
+
+        const distributedQuantity =
+          Number(
+            inventoryData
+              .distributedQuantity ||
+              0
+          );
+
+        const now =
+          Timestamp.now();
+
+        transaction.update(
+          inventoryRef,
+          {
+            reservedQuantity:
+              reservedQuantity -
+              requestedQuantity,
+
+            distributedQuantity:
+              distributedQuantity +
+              requestedQuantity,
+
+            updatedBy:
+              releasedBy,
+
+            updatedAt: now,
+          }
+        );
+
+        transaction.update(
+          requestRef,
+          {
+            status:
+              "Released",
+
+            releasedBy,
+
+            releasedAt: now,
+
+            inventoryReleased:
+              true,
+
+            distributionId:
+              id,
+
+            updatedAt: now,
+          }
+        );
+
+        createDistributionRecordInTransaction(
+          transaction,
+          {
+            requestId: id,
+
+            requestData:
+              currentRequest,
+
+            releasedBy,
+
+            releasedAt: now,
+          }
+        );
+      }
+    );
+
+    const updatedDoc =
+      await requestRef.get();
+
+    return {
+      id: updatedDoc.id,
+      ...updatedDoc.data(),
+    };
+  };
 
 module.exports = {
   createSeedlingRequest,

@@ -51,7 +51,10 @@ const getAllUsers = async () => {
 };
 
 const updateUserRole = async (uid, role) => {
-  if (!VALID_ROLES.includes(role)) {
+   const normalizedRole =
+    String(role || "").toLowerCase();
+    
+  if (!VALID_ROLES.includes(normalizedRole)) {
     throw new Error("Invalid user role.");
   }
 
@@ -66,7 +69,7 @@ const updateUserRole = async (uid, role) => {
   }
 
   await userRef.update({
-    role,
+    role: normalizedRole,
     updatedAt: new Date(),
   });
 
@@ -79,7 +82,9 @@ const updateUserRole = async (uid, role) => {
 };
 
 const updateUserStatus = async (uid, status) => {
-  if (!VALID_STATUSES.includes(status)) {
+  const normalizedStatus = String(status || "").toLowerCase();
+  
+  if (!VALID_STATUSES.includes(normalizedStatus)) {
     throw new Error("Invalid user status.");
   }
 
