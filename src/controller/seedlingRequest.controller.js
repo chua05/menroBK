@@ -10,6 +10,10 @@ const {
   releaseSeedlingRequest,
 } = require("../services/seedlingRequest.service");
 
+// ========================================
+// PARTICIPANT — SUBMIT REQUEST
+// ========================================
+
 const submitSeedlingRequest = async (req, res) => {
   try {
     const participantId = req.user.uid;
@@ -28,7 +32,10 @@ const submitSeedlingRequest = async (req, res) => {
       eventProposal,
     } = req.body || {};
 
+    // ========================================
     // BASIC REQUEST VALIDATION
+    // ========================================
+
     if (
       !participantId ||
       !participantName ||
@@ -48,24 +55,29 @@ const submitSeedlingRequest = async (req, res) => {
       });
     }
 
+    // ========================================
     // QUANTITY VALIDATION
-    const parsedQuantity =
-  Number(quantity);
+    // ========================================
 
-if (
-  !Number.isInteger(
-    parsedQuantity
-  )
-) {
+    const parsedQuantity = Number(quantity);
+
+    if (!Number.isInteger(parsedQuantity)) {
+      return res.status(400).json({
+        success: false,
+        message: "Quantity must be a whole number.",
+      });
     }
 
     if (parsedQuantity <= 0) {
       return res.status(400).json({
         success: false,
-        message:
-          "Quantity must be greater than zero.",
+        message: "Quantity must be greater than zero.",
       });
     }
+
+    // ========================================
+    // EVENT PROPOSAL
+    // ========================================
 
     const {
       eventName,
@@ -80,7 +92,10 @@ if (
       description,
     } = eventProposal;
 
+    // ========================================
     // EVENT REQUIRED FIELDS
+    // ========================================
+
     if (
       !eventName ||
       !barangay ||
@@ -99,16 +114,17 @@ if (
       });
     }
 
-    const parsedLatitude =
-      Number(latitude);
+    const parsedLatitude = Number(latitude);
+    const parsedLongitude = Number(longitude);
 
-    const parsedLongitude =
-      Number(longitude);
+    const parsedExpectedParticipants = Number(
+      expectedParticipants
+    );
 
-    const parsedExpectedParticipants =
-      Number(expectedParticipants);
-
+    // ========================================
     // GPS VALIDATION
+    // ========================================
+
     if (
       Number.isNaN(parsedLatitude) ||
       parsedLatitude < -90 ||
@@ -133,11 +149,12 @@ if (
       });
     }
 
+    // ========================================
     // EXPECTED PARTICIPANTS VALIDATION
+    // ========================================
+
     if (
-      !Number.isInteger(
-        parsedExpectedParticipants
-      ) ||
+      !Number.isInteger(parsedExpectedParticipants) ||
       parsedExpectedParticipants <= 0
     ) {
       return res.status(400).json({
@@ -147,35 +164,31 @@ if (
       });
     }
 
+    // ========================================
     // DATE VALIDATION
-    const parsedEventDate =
-      new Date(
-        `${proposedDate}T00:00:00`
-      );
+    // ========================================
 
-    if (
-      Number.isNaN(
-        parsedEventDate.getTime()
-      )
-    ) {
+    const parsedEventDate = new Date(
+      `${proposedDate}T00:00:00`
+    );
+
+    if (Number.isNaN(parsedEventDate.getTime())) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid proposed event date.",
+        message: "Invalid proposed event date.",
       });
     }
 
+    // ========================================
     // TIME VALIDATION
+    // ========================================
+
     const timePattern =
       /^([01]\d|2[0-3]):([0-5]\d)$/;
 
     if (
-      !timePattern.test(
-        proposedStartTime
-      ) ||
-      !timePattern.test(
-        proposedEndTime
-      )
+      !timePattern.test(proposedStartTime) ||
+      !timePattern.test(proposedEndTime)
     ) {
       return res.status(400).json({
         success: false,
@@ -184,10 +197,7 @@ if (
       });
     }
 
-    if (
-      proposedStartTime >=
-      proposedEndTime
-    ) {
+    if (proposedStartTime >= proposedEndTime) {
       return res.status(400).json({
         success: false,
         message:
@@ -195,67 +205,67 @@ if (
       });
     }
 
-    const request =
-      await createSeedlingRequest({
-        participantId,
-        participantName,
-        organization,
-        contactNumber,
+    // ========================================
+    // CREATE REQUEST
+    // ========================================
 
-        inventoryId,
+    const request = await createSeedlingRequest({
+      participantId,
+      participantName,
+      organization,
+      contactNumber,
 
-        quantity: parsedQuantity,
-        purpose,
-        plantingLocation,
-        preferredReleaseDate,
+      inventoryId,
 
-        // EVENT PROPOSAL
-        eventProposal: {
-          eventName:
-            eventName.trim(),
+      quantity: parsedQuantity,
+      purpose,
+      plantingLocation,
+      preferredReleaseDate,
 
-          barangay:
-            barangay.trim(),
+      eventProposal: {
+        eventName: eventName.trim(),
+        barangay: barangay.trim(),
 
-          proposedDate,
+        proposedDate,
+        proposedStartTime,
+        proposedEndTime,
 
-          proposedStartTime,
+        eventLocation: eventLocation.trim(),
 
-          proposedEndTime,
+        latitude: parsedLatitude,
+        longitude: parsedLongitude,
 
-          eventLocation:
-            eventLocation.trim(),
+        expectedParticipants:
+          parsedExpectedParticipants,
 
-          latitude:
-            parsedLatitude,
+        description:
+          description?.trim() || "",
 
-          longitude:
-            parsedLongitude,
+        status: "Proposed",
+      },
 
-          expectedParticipants:
-            parsedExpectedParticipants,
+      // Real planting event document ID
+      // can be assigned after authorization.
+      eventId: "",
 
-          description:
-            description?.trim() || "",
+      status: "Pending",
 
-          status:
-            "Proposed",
-        },
+      reviewedBy: "",
+      reviewedAt: null,
 
-        // Will contain the real
-        // planting event document ID
-        // after event authorization.
-        eventId: "",
+      approvedBy: "",
+      approvedAt: null,
 
-        status: "Pending",
+      rejectedBy: "",
+      rejectedAt: null,
 
-        reviewedBy: "",
-        approvedBy: "",
-        rejectedBy: "",
-        releasedBy: "",
+      releasedBy: "",
+      releasedAt: null,
 
-        inventoryDeducted: false,
-      });
+      inventoryDeducted: false,
+      inventoryReserved: false,
+      inventoryReleased: false,
+    });
 
     return res.status(201).json({
       success: true,
@@ -264,7 +274,10 @@ if (
       data: request,
     });
   } catch (error) {
-    console.error(error);
+    console.error(
+      "submitSeedlingRequest error:",
+      error
+    );
 
     const statusCode =
       error.message ===
@@ -272,16 +285,18 @@ if (
         ? 404
         : 400;
 
-    return res
-      .status(statusCode)
-      .json({
-        success: false,
-        message: error.message,
-      });
+    return res.status(statusCode).json({
+      success: false,
+      message:
+        error.message ||
+        "Failed to submit seedling request.",
+    });
   }
 };
 
-
+// ========================================
+// ADMIN / STAFF — GET ALL REQUESTS
+// ========================================
 
 const getSeedlingRequests = async (req, res) => {
   try {
@@ -290,39 +305,51 @@ const getSeedlingRequests = async (req, res) => {
     let requests;
 
     if (status) {
-      requests = await getSeedlingRequestsByStatus(status);
+      requests =
+        await getSeedlingRequestsByStatus(status);
     } else {
-      requests = await getAllSeedlingRequests();
+      requests =
+        await getAllSeedlingRequests();
     }
 
     return res.status(200).json({
       success: true,
       data: requests,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "getSeedlingRequests error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to retrieve requests.",
+      message:
+        "Failed to retrieve requests.",
     });
   }
 };
+
+// ========================================
+// ADMIN / STAFF — GET ONE REQUEST
+// ========================================
 
 const getSeedlingRequest = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const request = await getSeedlingRequestById(id);
+    const request =
+      await getSeedlingRequestById(id);
 
     return res.status(200).json({
       success: true,
       data: request,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "getSeedlingRequest error:",
+      error
+    );
 
     return res.status(404).json({
       success: false,
@@ -331,29 +358,50 @@ const getSeedlingRequest = async (req, res) => {
   }
 };
 
-const getMySeedlingRequests = async (req, res) => {
+// ========================================
+// PARTICIPANT — GET OWN REQUESTS
+// ========================================
+
+const getMySeedlingRequests = async (
+  req,
+  res
+) => {
   try {
     const participantId = req.user.uid;
 
     const requests =
-      await getSeedlingRequestsByParticipantId(participantId);
+      await getSeedlingRequestsByParticipantId(
+        participantId
+      );
 
     return res.status(200).json({
       success: true,
       data: requests,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "getMySeedlingRequests error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to retrieve my requests.",
+      message:
+        "Failed to retrieve my requests.",
     });
   }
 };
 
-const markRequestReviewed = async (req, res) => {
+// ========================================
+// STAFF — REVIEW PENDING REQUEST
+//
+// Pending -> Reviewed
+// ========================================
+
+const markRequestReviewed = async (
+  req,
+  res
+) => {
   try {
     const { id } = req.params;
 
@@ -366,6 +414,10 @@ const markRequestReviewed = async (req, res) => {
       preferredReleaseDate,
     } = req.body || {};
 
+    // ========================================
+    // REQUIRED REVIEW FIELDS
+    // ========================================
+
     if (
       quantity === undefined ||
       !purpose ||
@@ -374,50 +426,77 @@ const markRequestReviewed = async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "All review fields are required.",
+        message:
+          "All review fields are required.",
       });
     }
 
-    if (!Number.isInteger(quantity)) {
-    return res.status(400).json({
-      success: false,
-      message: "Quantity must be an integer.",
-    });
-  }
+    const parsedQuantity = Number(quantity);
 
-    if (quantity <= 0) {
+    // ========================================
+    // QUANTITY VALIDATION
+    // ========================================
+
+    if (!Number.isInteger(parsedQuantity)) {
       return res.status(400).json({
         success: false,
-        message: "Quantity must be greater than zero.",
+        message:
+          "Quantity must be a whole number.",
       });
     }
 
-    const updatedRequest = await reviewSeedlingRequest(
-      id,
-      {
+    if (parsedQuantity <= 0) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Quantity must be greater than zero.",
+      });
+    }
+
+    // ========================================
+    // STAFF REVIEW
+    // ========================================
+
+    const updatedRequest =
+      await reviewSeedlingRequest(id, {
         reviewedBy,
-        quantity,
-        purpose,
-        plantingLocation,
+
+        quantity: parsedQuantity,
+
+        purpose: String(purpose).trim(),
+
+        plantingLocation:
+          String(plantingLocation).trim(),
+
         preferredReleaseDate,
-      }
-    );
+      });
 
     return res.status(200).json({
       success: true,
-      message: "Request reviewed successfully.",
+      message:
+        "Request reviewed successfully and forwarded to the administrator for final approval.",
       data: updatedRequest,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "markRequestReviewed error:",
+      error
+    );
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message:
+        error.message ||
+        "Failed to review request.",
     });
   }
 };
+
+// ========================================
+// ADMIN — FINAL APPROVAL
+//
+// Reviewed -> Approved
+// ========================================
 
 const approveRequest = async (req, res) => {
   try {
@@ -425,26 +504,38 @@ const approveRequest = async (req, res) => {
 
     const approvedBy = req.user.uid;
 
-    const request = await approveSeedlingRequest(
-      id,
-      approvedBy
-    );
+    const request =
+      await approveSeedlingRequest(
+        id,
+        approvedBy
+      );
 
     return res.status(200).json({
       success: true,
-      message: "Seedling request approved successfully.",
+      message:
+        "Seedling request approved successfully.",
       data: request,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "approveRequest error:",
+      error
+    );
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message:
+        error.message ||
+        "Failed to approve request.",
     });
   }
 };
+
+// ========================================
+// ADMIN — REJECT REVIEWED REQUEST
+//
+// Reviewed -> Rejected
+// ========================================
 
 const rejectRequest = async (req, res) => {
   try {
@@ -452,26 +543,38 @@ const rejectRequest = async (req, res) => {
 
     const rejectedBy = req.user.uid;
 
-    const request = await rejectSeedlingRequest(
-      id,
-      rejectedBy
-    );
+    const request =
+      await rejectSeedlingRequest(
+        id,
+        rejectedBy
+      );
 
     return res.status(200).json({
       success: true,
-      message: "Seedling request rejected successfully.",
+      message:
+        "Seedling request rejected successfully.",
       data: request,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "rejectRequest error:",
+      error
+    );
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message:
+        error.message ||
+        "Failed to reject request.",
     });
   }
 };
+
+// ========================================
+// STAFF — RELEASE APPROVED REQUEST
+//
+// Approved -> Released
+// ========================================
 
 const releaseRequest = async (req, res) => {
   try {
@@ -479,23 +582,29 @@ const releaseRequest = async (req, res) => {
 
     const releasedBy = req.user.uid;
 
-    const request = await releaseSeedlingRequest(
-      id,
-      releasedBy
-    );
+    const request =
+      await releaseSeedlingRequest(
+        id,
+        releasedBy
+      );
 
     return res.status(200).json({
       success: true,
-      message: "Seedlings released successfully.",
+      message:
+        "Seedlings released successfully.",
       data: request,
     });
-
   } catch (error) {
-    console.error(error);
+    console.error(
+      "releaseRequest error:",
+      error
+    );
 
     return res.status(400).json({
       success: false,
-      message: error.message,
+      message:
+        error.message ||
+        "Failed to release seedlings.",
     });
   }
 };

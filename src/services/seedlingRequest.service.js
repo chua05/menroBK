@@ -191,111 +191,142 @@ const getSeedlingRequestsByParticipantId =
 // ========================================
 // STAFF REVIEW
 // ========================================
-const reviewSeedlingRequest =
-  async (
-    id,
-    reviewData
-  ) => {
-    const docRef = db
-      .collection(COLLECTION)
-      .doc(id);
+const reviewSeedlingRequest = async (
+  id,
+  reviewData
+) => {
+  const docRef = db
+    .collection(COLLECTION)
+    .doc(id);
 
-    const doc =
-      await docRef.get();
+  const doc = await docRef.get();
 
-    if (!doc.exists) {
-      throw new Error(
-        "Seedling request not found."
-      );
-    }
+  // ========================================
+  // REQUEST EXISTS
+  // ========================================
 
-    const currentRequest =
-      doc.data();
+  if (!doc.exists) {
+    throw new Error(
+      "Seedling request not found."
+    );
+  }
 
-    if (
-      currentRequest.status !==
-      "Pending"
-    ) {
-      throw new Error(
-        "Only pending requests can be reviewed."
-      );
-    }
+  const currentRequest = doc.data();
 
-    const quantity =
-      Number(
-        reviewData.quantity
-      );
+  // ========================================
+  // ONLY PENDING CAN BE REVIEWED
+  // ========================================
 
-    if (
-      !Number.isInteger(
-        quantity
-      ) ||
-      quantity <= 0
-    ) {
-      throw new Error(
-        "Request quantity must be a positive whole number."
-      );
-    }
+  if (currentRequest.status !== "Pending") {
+    throw new Error(
+      "Only pending requests can be reviewed."
+    );
+  }
 
-    const inventoryRef = db
-      .collection(
-        INVENTORY_COLLECTION
-      )
-      .doc(
-        currentRequest
-          .inventoryId
-      );
+  // ========================================
+  // QUANTITY VALIDATION
+  // ========================================
 
-    const inventoryDoc =
-      await inventoryRef.get();
+  const quantity = Number(
+    reviewData.quantity
+  );
 
-    if (
-      !inventoryDoc.exists ||
-      inventoryDoc.data()
-        .isDeleted === true
-    ) {
-      throw new Error(
-        "Linked seedling inventory not found."
-      );
-    }
+  if (
+    !Number.isInteger(quantity) ||
+    quantity <= 0
+  ) {
+    throw new Error(
+      "Request quantity must be a positive whole number."
+    );
+  }
 
-    const inventoryData =
-      inventoryDoc.data();
+  // ========================================
+  // LINKED INVENTORY
+  // ========================================
 
-    const availableQuantity =
-      Number(
-        inventoryData
-          .availableQuantity || 0
-      );
+  if (!currentRequest.inventoryId) {
+    throw new Error(
+      "Seedling request has no linked inventory."
+    );
+  }
 
-    if (
-      quantity >
-      availableQuantity
-    ) {
-      throw new Error(
-        `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
-      );
-    }
+  const inventoryRef = db
+    .collection(INVENTORY_COLLECTION)
+    .doc(currentRequest.inventoryId);
 
-    await docRef.update({
-      ...reviewData,
+  const inventoryDoc =
+    await inventoryRef.get();
 
-      quantity,
+  if (
+    !inventoryDoc.exists ||
+    inventoryDoc.data().isDeleted === true
+  ) {
+    throw new Error(
+      "Linked seedling inventory not found."
+    );
+  }
 
-      status: "Reviewed",
+  const inventoryData =
+    inventoryDoc.data();
 
-      updatedAt:
-        Timestamp.now(),
-    });
+  const availableQuantity = Number(
+    inventoryData.availableQuantity || 0
+  );
 
-    const updatedDoc =
-      await docRef.get();
+  // ========================================
+  // CHECK CURRENT STOCK
+  // ========================================
 
-    return {
-      id: updatedDoc.id,
-      ...updatedDoc.data(),
-    };
+  if (quantity > availableQuantity) {
+    throw new Error(
+      `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
+    );
+  }
+
+  const now = Timestamp.now();
+
+  // ========================================
+  // SAVE STAFF REVIEW
+  //
+  // NOTE:
+  // Do NOT deduct inventory here.
+  // Inventory reservation happens only
+  // after Admin approval.
+  // ========================================
+
+  await docRef.update({
+    quantity,
+
+    purpose:
+      String(reviewData.purpose || "").trim(),
+
+    plantingLocation:
+      String(
+        reviewData.plantingLocation || ""
+      ).trim(),
+
+    preferredReleaseDate:
+      reviewData.preferredReleaseDate,
+
+    reviewedBy:
+      reviewData.reviewedBy,
+
+    reviewedAt: now,
+
+    status: "Reviewed",
+
+    updatedAt: now,
+  });
+
+  const updatedDoc =
+    await docRef.get();
+
+  return {
+    id: updatedDoc.id,
+    ...updatedDoc.data(),
   };
+};
+
 
 // ========================================
 // ADMIN FINAL APPROVAL
