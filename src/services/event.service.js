@@ -977,8 +977,7 @@ const getAllEvents =
 
     return snapshot.docs
       .map(
-        (doc) =>
-          doc.data()
+        (doc) => ({ id: doc.id, ...doc.data() })
       )
       .filter(
         (event) =>
@@ -1002,8 +1001,7 @@ const getArchivedEvents =
 
     return snapshot.docs
       .map(
-        (doc) =>
-          doc.data()
+        (doc) => ({ id: doc.id, ...doc.data() })
       )
       .filter(
         (event) =>
@@ -1035,7 +1033,7 @@ const getEventById =
       );
     }
 
-    return eventDoc.data();
+    return { id: eventDoc.id, ...eventDoc.data() };
   };
 
 // ========================================

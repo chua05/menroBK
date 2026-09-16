@@ -633,8 +633,8 @@ const deleteInventoryById =
     const docRef =
       inventoryCollection.doc(id);
 
-    const doc =
-      await docRef.get();
+    await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(docRef);
 
     if (
       !doc.exists ||
@@ -659,19 +659,21 @@ const deleteInventoryById =
       );
     }
 
-    await docRef.update({
+    const now = Timestamp.now();
+    transaction.update(docRef, {
       isDeleted: true,
 
       deletedBy,
 
       deletedAt:
-        Timestamp.now(),
+        now,
 
       updatedBy:
         deletedBy,
 
       updatedAt:
-        Timestamp.now(),
+        now,
+    });
     });
 
     return {
@@ -679,13 +681,41 @@ const deleteInventoryById =
     };
   };
 
+const restoreInventoryById = async (id, restoredBy) => {
+  const ref = inventoryCollection.doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists || doc.data().isDeleted !== true) {
+      throw new Error("Archived inventory not found.");
+    }
+    const now = Timestamp.now();
+    transaction.update(ref, {
+      isDeleted: false,
+      restoredBy,
+      restoredAt: now,
+      updatedBy: restoredBy,
+      updatedAt: now,
+    });
+  });
+  const doc = await ref.get();
+  return { id: doc.id, ...doc.data() };
+};
+
+const getArchivedInventory = async () => {
+  const snapshot = await inventoryCollection.where("isDeleted", "==", true).get();
+  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => String(a.species || "").localeCompare(String(b.species || "")));
+};
+
 module.exports = {
   createInventory,
   getAllInventory,
+  getArchivedInventory,
   getAvailableInventoryItems,
   getInventoryById,
   updateInventoryById,
   addInventoryStock,
   deleteInventoryById,
+  restoreInventoryById,
   calculateInventoryStatus,
 };

@@ -27,6 +27,7 @@ const {
 } = require(
   "./event.service"
 );
+const { createNotificationInTransaction } = require("./notification.service");
 
 const COLLECTION =
   "seedlingRequests";
@@ -608,6 +609,10 @@ const approveSeedlingRequest =
         const currentRequest =
           requestDoc.data();
 
+        if (currentRequest.status === "Approved" && currentRequest.eventId) {
+          return;
+        }
+
         if (
           currentRequest.status !==
           "Reviewed"
@@ -882,6 +887,16 @@ const approveSeedlingRequest =
           approvedItems,
           updatedAt: now,
         });
+
+        createNotificationInTransaction(transaction, {
+          recipientUserId: currentRequest.participantId,
+          type: "request_approved",
+          title: "Seedling request approved",
+          message: "Your seedling request has been approved. Please wait for release updates.",
+          relatedRecordType: "seedlingRequest",
+          relatedRecordId: id,
+          createdAt: now,
+        });
       }
     );
 
@@ -913,8 +928,8 @@ const rejectSeedlingRequest =
         .collection(COLLECTION)
         .doc(id);
 
-    const doc =
-      await docRef.get();
+    await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(docRef);
 
     if (!doc.exists) {
       throw new Error(
@@ -937,7 +952,7 @@ const rejectSeedlingRequest =
     const now =
       Timestamp.now();
 
-    await docRef.update({
+    transaction.update(docRef, {
       status:
         "Rejected",
 
@@ -959,6 +974,18 @@ const rejectSeedlingRequest =
 
       updatedAt:
         now,
+    });
+    createNotificationInTransaction(transaction, {
+      recipientUserId: currentRequest.participantId,
+      type: "request_rejected",
+      title: "Seedling request rejected",
+      message: cleanString(reason)
+        ? `Your seedling request was rejected. Reason: ${cleanString(reason)}`
+        : "Your seedling request was rejected.",
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      createdAt: now,
+    });
     });
 
     const updatedDoc =
@@ -1013,6 +1040,10 @@ const releaseSeedlingRequest =
         const currentRequest =
           requestDoc.data();
 
+        if (currentRequest.status === "Released" && currentRequest.inventoryReleased === true) {
+          return;
+        }
+
         if (
           currentRequest.status !==
           "Approved"
@@ -1046,9 +1077,9 @@ const releaseSeedlingRequest =
         }
 
         const requestItems =
-          normalizeRequestItems(
-            currentRequest
-          );
+          Array.isArray(currentRequest.approvedItems) && currentRequest.approvedItems.length > 0
+            ? currentRequest.approvedItems
+            : normalizeRequestItems(currentRequest);
 
         validateItemStructure(
           requestItems
@@ -1128,6 +1159,7 @@ const releaseSeedlingRequest =
             inventoryRef,
             inventoryData,
           } = record;
+          const quantityToRelease = Number(item.quantity || 0);
 
           const reservedQuantity =
             Number(
@@ -1169,8 +1201,10 @@ const releaseSeedlingRequest =
             requestId:
               id,
 
-            requestData:
-              currentRequest,
+            requestData: {
+              ...currentRequest,
+              items: requestItems,
+            },
 
             releasedBy,
 
@@ -1204,6 +1238,15 @@ const releaseSeedlingRequest =
               now,
           }
         );
+        createNotificationInTransaction(transaction, {
+          recipientUserId: currentRequest.participantId,
+          type: "request_released",
+          title: "Seedlings released",
+          message: "Seedlings for your request have been released.",
+          relatedRecordType: "seedlingRequest",
+          relatedRecordId: id,
+          createdAt: now,
+        });
       }
     );
 

@@ -1,11 +1,13 @@
 const {
   createInventory,
   getAllInventory,
+  getArchivedInventory,
   getAvailableInventoryItems,
   getInventoryById,
   updateInventoryById,
   addInventoryStock,
   deleteInventoryById,
+  restoreInventoryById,
 } = require("../services/inventory.service");
 
 // ========================================
@@ -828,6 +830,28 @@ const deleteInventory = async (
           error.message,
       });
   }
+  };
+
+const restoreInventory = async (req, res) => {
+  try {
+    const inventory = await restoreInventoryById(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, message: "Seedling record restored successfully.", data: inventory });
+  } catch (error) {
+    if (error.message === "Archived inventory not found.") {
+      return res.status(404).json({ success: false, message: error.message });
+    }
+    console.error(error);
+    return res.status(500).json({ success: false, message: "Failed to restore seedling inventory." });
+  }
+};
+
+const getArchivedInventoryItems = async (req, res) => {
+  try {
+    return res.status(200).json({ success: true, data: await getArchivedInventory() });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ success: false, message: "Failed to retrieve archived inventory." });
+  }
 };
 
 module.exports = {
@@ -838,4 +862,6 @@ module.exports = {
   updateInventory,
   addStock,
   deleteInventory,
+  restoreInventory,
+  getArchivedInventoryItems,
 };

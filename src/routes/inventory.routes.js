@@ -10,6 +10,8 @@ const {
   updateInventory,
   addStock,
   deleteInventory,
+  restoreInventory,
+  getArchivedInventoryItems,
 } = require("../controller/inventory.controller");
 
 const {
@@ -108,5 +110,9 @@ router.delete(
   authorizeRoles("staff"),
   deleteInventory
 );
+
+router.get("/archived", verifyToken, authorizeRoles("admin", "staff"), getArchivedInventoryItems);
+
+router.patch("/:id/restore", verifyToken, authorizeRoles("staff"), restoreInventory);
 
 module.exports = router;
