@@ -110,6 +110,14 @@ const savePlantingPhoto = async ({
     );
   }
 
+  const backendURL = (process.env.BACKEND_URL ||
+    (process.env.NODE_ENV === "production" ? "" : "http://localhost:5000"))
+    .trim().replace(/\/$/, "");
+
+  if (!backendURL) {
+    throw new Error("BACKEND_URL is required to create upload links in production.");
+  }
+
   const participantFolder = path.join(
     UPLOAD_ROOT,
     PLANTING_REPORT_FOLDER,
@@ -142,10 +150,6 @@ const savePlantingPhoto = async ({
     participantId,
     fileName,
   ].join("/");
-
-  const backendURL =
-    process.env.BACKEND_URL ||
-    "http://localhost:5000";
 
   return {
     filePath: relativePath,

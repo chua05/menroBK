@@ -141,21 +141,21 @@ const register = async (req, res) => {
       password,
       organization
 
-    } = req.body;
+    } = req.body || {};
 
 
 
     if (
 
-      !fullName ||
+      typeof fullName !== "string" || !fullName.trim() ||
 
-      !username ||
+      typeof username !== "string" || !username.trim() ||
 
-      !email ||
+      typeof email !== "string" || !email.trim() ||
 
-      !contactNumber ||
+      typeof contactNumber !== "string" || !contactNumber.trim() ||
 
-      !password
+      typeof password !== "string" || !password
 
     ) {
 
@@ -167,9 +167,16 @@ const register = async (req, res) => {
 
     }
 
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedContactNumber = contactNumber.trim();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return sendError(res, 400, "Invalid email address");
+    }
+
     if (
 
-      !/^09\d{9}$/.test(contactNumber)
+      !/^09\d{9}$/.test(normalizedContactNumber)
       ){
 
       return sendError(
@@ -182,12 +189,12 @@ const register = async (req, res) => {
 
 
     const user = await authService.registerUser({
-      fullName,
-      username,
-      email,
-      contactNumber,
+      fullName: fullName.trim(),
+      username: username.trim(),
+      email: normalizedEmail,
+      contactNumber: normalizedContactNumber,
       password,
-      organization
+      organization: typeof organization === "string" ? organization.trim() : ""
     });
     return sendSuccess(
 
@@ -204,18 +211,14 @@ const register = async (req, res) => {
   }
 
   catch (error) {
-
-    console.error(error);
-
-    return sendError(
-
-      res,
-
-      400,
-
-      error.message
-
-    );
+    if (error.code === "auth/email-already-exists") {
+      return sendError(res, 409, "Email is already registered.");
+    }
+    if (error.code === "auth/invalid-email" || error.code === "auth/invalid-password") {
+      return sendError(res, 400, "Invalid registration details.");
+    }
+    console.error("Registration failed:", error);
+    return sendError(res, 500, "Registration failed. Please try again.");
 
   }
 

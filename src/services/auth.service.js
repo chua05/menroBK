@@ -266,6 +266,7 @@ const registerUser = async ({
     new Date();
 
 
+  try {
   await db
     .collection("users")
     .doc(firebaseUser.uid)
@@ -306,6 +307,14 @@ const registerUser = async ({
         null,
 
     });
+  } catch (error) {
+    try {
+      await auth.deleteUser(firebaseUser.uid);
+    } catch (cleanupError) {
+      console.error("Failed to remove incomplete Firebase Auth account:", cleanupError);
+    }
+    throw new Error("User profile could not be created.");
+  }
 
 
   return {

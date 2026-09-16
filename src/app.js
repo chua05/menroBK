@@ -29,8 +29,8 @@ app.use(helmet());
 // ---------------------------------------------
 
 const allowedOrigins = [
-  "http://localhost:5173",
-  process.env.FRONTEND_URL,
+  ...(process.env.NODE_ENV === "production" ? [] : ["http://localhost:5173"]),
+  process.env.FRONTEND_URL?.trim().replace(/\/$/, ""),
 ].filter(Boolean);
 
 app.use(
@@ -125,8 +125,6 @@ app.use((req, res) => {
 // ---------------------------------------------
 
 app.use((err, req, res, next) => {
-  console.error(err);
-
   // CORS validation error
   if (err.message?.startsWith("CORS blocked request from origin:")) {
     return res.status(403).json({
@@ -134,6 +132,8 @@ app.use((err, req, res, next) => {
       message: "Origin not allowed by CORS.",
     });
   }
+
+  console.error(err);
 
   // Multer / upload validation errors
   if (
