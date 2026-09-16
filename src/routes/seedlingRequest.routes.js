@@ -39,7 +39,10 @@ router.post(
 router.get(
   "/",
   verifyToken,
-  authorizeRoles("admin", "staff"),
+  authorizeRoles(
+    "admin",
+    "staff"
+  ),
   getSeedlingRequests
 );
 
@@ -47,7 +50,7 @@ router.get(
 // PARTICIPANT — VIEW OWN REQUESTS
 //
 // IMPORTANT:
-// Keep this BEFORE "/:id"
+// Keep this BEFORE "/:id".
 // ========================================
 
 router.get(
@@ -58,7 +61,7 @@ router.get(
 );
 
 // ========================================
-// STAFF — REVIEW PENDING REQUEST
+// STAFF — REVIEW
 //
 // Pending -> Reviewed
 // ========================================
@@ -74,7 +77,16 @@ router.patch(
 // ADMIN — FINAL APPROVAL
 //
 // Reviewed -> Approved
-// Inventory stock is reserved/deducted here.
+//
+// Request body:
+// {
+//   "reason": "..."
+// }
+//
+// Approval:
+// 1. Reserves all requested inventory
+// 2. Creates the Tree Planting event
+// 3. Event is immediately Scheduled
 // ========================================
 
 router.patch(
@@ -85,9 +97,14 @@ router.patch(
 );
 
 // ========================================
-// ADMIN — REJECT REVIEWED REQUEST
+// ADMIN — FINAL REJECTION
 //
 // Reviewed -> Rejected
+//
+// Request body:
+// {
+//   "reason": "..."
+// }
 // ========================================
 
 router.patch(
@@ -101,7 +118,8 @@ router.patch(
 // STAFF — RELEASE APPROVED REQUEST
 //
 // Approved -> Released
-// Reserved stock becomes distributed stock.
+//
+// All reserved stock becomes distributed.
 // Available stock is NOT deducted again.
 // ========================================
 
@@ -116,13 +134,16 @@ router.patch(
 // ADMIN / STAFF — VIEW ONE REQUEST
 //
 // IMPORTANT:
-// Keep this AFTER "/my".
+// Keep this AFTER "/my" and action routes.
 // ========================================
 
 router.get(
   "/:id",
   verifyToken,
-  authorizeRoles("admin", "staff"),
+  authorizeRoles(
+    "admin",
+    "staff"
+  ),
   getSeedlingRequest
 );
 

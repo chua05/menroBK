@@ -11,24 +11,150 @@ const {
 } = require("../services/seedlingRequest.service");
 
 // ========================================
+// HELPER — CLEAN STRING
+// ========================================
+
+const cleanString = (value) =>
+  String(value || "").trim();
+
+// ========================================
+// HELPER — VALIDATE DECISION REASON
+// ========================================
+
+const validateDecisionReason = (
+  reason
+) => {
+  const cleanReason =
+    cleanString(reason);
+
+  if (!cleanReason) {
+    throw new Error(
+      "A reason is required before making the final decision."
+    );
+  }
+
+  if (cleanReason.length < 5) {
+    throw new Error(
+      "Decision reason must be at least 5 characters."
+    );
+  }
+
+  if (cleanReason.length > 500) {
+    throw new Error(
+      "Decision reason must not exceed 500 characters."
+    );
+  }
+
+  return cleanReason;
+};
+
+// ========================================
+// HELPER — VALIDATE REQUEST ITEMS
+// ========================================
+
+const validateRequestItems = (
+  items
+) => {
+  if (
+    !Array.isArray(items) ||
+    items.length === 0
+  ) {
+    throw new Error(
+      "At least one seedling must be selected."
+    );
+  }
+
+  if (items.length > 10) {
+    throw new Error(
+      "A maximum of 10 seedling types may be requested at a time."
+    );
+  }
+
+  const inventoryIds =
+    new Set();
+
+  return items.map(
+    (item, index) => {
+      const inventoryId =
+        cleanString(
+          item?.inventoryId
+        );
+
+      const quantity =
+        Number(
+          item?.quantity
+        );
+
+      if (!inventoryId) {
+        throw new Error(
+          `Seedling item ${index + 1} has no selected inventory.`
+        );
+      }
+
+      if (
+        !Number.isInteger(
+          quantity
+        ) ||
+        quantity <= 0
+      ) {
+        throw new Error(
+          `Seedling item ${index + 1} must have a positive whole-number quantity.`
+        );
+      }
+
+      if (
+        inventoryIds.has(
+          inventoryId
+        )
+      ) {
+        throw new Error(
+          "The same seedling inventory cannot be selected more than once."
+        );
+      }
+
+      inventoryIds.add(
+        inventoryId
+      );
+
+      return {
+        inventoryId,
+        quantity,
+      };
+    }
+  );
+};
+
+// ========================================
 // PARTICIPANT — SUBMIT REQUEST
 // ========================================
 
-const submitSeedlingRequest = async (req, res) => {
+const submitSeedlingRequest = async (
+  req,
+  res
+) => {
   try {
-    const participantId = req.user.uid;
+    const participantId =
+      req.user.uid;
 
     const {
-      participantName = req.user.fullName,
-      organization = req.user.organization,
-      contactNumber = req.user.contactNumber,
+      participantName =
+        req.user.fullName ||
+        req.user.name ||
+        "",
 
-      inventoryId,
-      quantity,
+      organization =
+        req.user.organization ||
+        req.user.barangay ||
+        "",
+
+      contactNumber =
+        req.user.contactNumber ||
+        "",
+
+      items,
       purpose,
       plantingLocation,
       preferredReleaseDate,
-
       eventProposal,
     } = req.body || {};
 
@@ -38,13 +164,21 @@ const submitSeedlingRequest = async (req, res) => {
 
     if (
       !participantId ||
-      !participantName ||
-      !organization ||
-      !contactNumber ||
-      !inventoryId ||
-      quantity === undefined ||
-      !purpose ||
-      !plantingLocation ||
+      !cleanString(
+        participantName
+      ) ||
+      !cleanString(
+        organization
+      ) ||
+      !cleanString(
+        contactNumber
+      ) ||
+      !cleanString(
+        purpose
+      ) ||
+      !cleanString(
+        plantingLocation
+      ) ||
       !preferredReleaseDate ||
       !eventProposal
     ) {
@@ -56,24 +190,13 @@ const submitSeedlingRequest = async (req, res) => {
     }
 
     // ========================================
-    // QUANTITY VALIDATION
+    // REQUEST ITEMS
     // ========================================
 
-    const parsedQuantity = Number(quantity);
-
-    if (!Number.isInteger(parsedQuantity)) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be a whole number.",
-      });
-    }
-
-    if (parsedQuantity <= 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Quantity must be greater than zero.",
-      });
-    }
+    const validatedItems =
+      validateRequestItems(
+        items
+      );
 
     // ========================================
     // EVENT PROPOSAL
@@ -82,6 +205,7 @@ const submitSeedlingRequest = async (req, res) => {
     const {
       eventName,
       barangay,
+      plantingSiteId,
       proposedDate,
       proposedStartTime,
       proposedEndTime,
@@ -92,20 +216,22 @@ const submitSeedlingRequest = async (req, res) => {
       description,
     } = eventProposal;
 
-    // ========================================
-    // EVENT REQUIRED FIELDS
-    // ========================================
-
     if (
-      !eventName ||
-      !barangay ||
+      !cleanString(eventName) ||
+      !cleanString(barangay) ||
+      !cleanString(
+        plantingSiteId
+      ) ||
       !proposedDate ||
       !proposedStartTime ||
       !proposedEndTime ||
-      !eventLocation ||
+      !cleanString(
+        eventLocation
+      ) ||
       latitude === undefined ||
       longitude === undefined ||
-      expectedParticipants === undefined
+      expectedParticipants ===
+        undefined
     ) {
       return res.status(400).json({
         success: false,
@@ -114,19 +240,25 @@ const submitSeedlingRequest = async (req, res) => {
       });
     }
 
-    const parsedLatitude = Number(latitude);
-    const parsedLongitude = Number(longitude);
+    const parsedLatitude =
+      Number(latitude);
 
-    const parsedExpectedParticipants = Number(
-      expectedParticipants
-    );
+    const parsedLongitude =
+      Number(longitude);
+
+    const parsedExpectedParticipants =
+      Number(
+        expectedParticipants
+      );
 
     // ========================================
     // GPS VALIDATION
     // ========================================
 
     if (
-      Number.isNaN(parsedLatitude) ||
+      !Number.isFinite(
+        parsedLatitude
+      ) ||
       parsedLatitude < -90 ||
       parsedLatitude > 90
     ) {
@@ -138,7 +270,9 @@ const submitSeedlingRequest = async (req, res) => {
     }
 
     if (
-      Number.isNaN(parsedLongitude) ||
+      !Number.isFinite(
+        parsedLongitude
+      ) ||
       parsedLongitude < -180 ||
       parsedLongitude > 180
     ) {
@@ -150,12 +284,15 @@ const submitSeedlingRequest = async (req, res) => {
     }
 
     // ========================================
-    // EXPECTED PARTICIPANTS VALIDATION
+    // EXPECTED PARTICIPANTS
     // ========================================
 
     if (
-      !Number.isInteger(parsedExpectedParticipants) ||
-      parsedExpectedParticipants <= 0
+      !Number.isInteger(
+        parsedExpectedParticipants
+      ) ||
+      parsedExpectedParticipants <=
+        0
     ) {
       return res.status(400).json({
         success: false,
@@ -168,14 +305,31 @@ const submitSeedlingRequest = async (req, res) => {
     // DATE VALIDATION
     // ========================================
 
-    const parsedEventDate = new Date(
-      `${proposedDate}T00:00:00`
-    );
+    const parsedEventDate =
+      new Date(
+        `${proposedDate}T00:00:00`
+      );
 
-    if (Number.isNaN(parsedEventDate.getTime())) {
+    if (
+      Number.isNaN(
+        parsedEventDate.getTime()
+      )
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Invalid proposed event date.",
+        message:
+          "Invalid proposed event date.",
+      });
+    }
+
+    // Proposed date must not be in the past (local date comparison)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    if (parsedEventDate.getTime() < today.getTime()) {
+      return res.status(400).json({
+        success: false,
+        message: "Proposed event date cannot be in the past.",
       });
     }
 
@@ -187,8 +341,12 @@ const submitSeedlingRequest = async (req, res) => {
       /^([01]\d|2[0-3]):([0-5]\d)$/;
 
     if (
-      !timePattern.test(proposedStartTime) ||
-      !timePattern.test(proposedEndTime)
+      !timePattern.test(
+        proposedStartTime
+      ) ||
+      !timePattern.test(
+        proposedEndTime
+      )
     ) {
       return res.status(400).json({
         success: false,
@@ -197,7 +355,10 @@ const submitSeedlingRequest = async (req, res) => {
       });
     }
 
-    if (proposedStartTime >= proposedEndTime) {
+    if (
+      proposedStartTime >=
+      proposedEndTime
+    ) {
       return res.status(400).json({
         success: false,
         message:
@@ -209,68 +370,123 @@ const submitSeedlingRequest = async (req, res) => {
     // CREATE REQUEST
     // ========================================
 
-    const request = await createSeedlingRequest({
-      participantId,
-      participantName,
-      organization,
-      contactNumber,
+    const request =
+      await createSeedlingRequest({
+        participantId,
 
-      inventoryId,
+        participantName:
+          cleanString(
+            participantName
+          ),
 
-      quantity: parsedQuantity,
-      purpose,
-      plantingLocation,
-      preferredReleaseDate,
+        organization:
+          cleanString(
+            organization
+          ),
 
-      eventProposal: {
-        eventName: eventName.trim(),
-        barangay: barangay.trim(),
+        contactNumber:
+          cleanString(
+            contactNumber
+          ),
 
-        proposedDate,
-        proposedStartTime,
-        proposedEndTime,
+        items:
+          validatedItems,
 
-        eventLocation: eventLocation.trim(),
+        purpose:
+          cleanString(
+            purpose
+          ),
 
-        latitude: parsedLatitude,
-        longitude: parsedLongitude,
+        plantingLocation:
+          cleanString(
+            plantingLocation
+          ),
 
-        expectedParticipants:
-          parsedExpectedParticipants,
+        preferredReleaseDate,
 
-        description:
-          description?.trim() || "",
+        eventProposal: {
+          eventName:
+            cleanString(
+              eventName
+            ),
 
-        status: "Proposed",
-      },
+          barangay:
+            cleanString(
+              barangay
+            ),
 
-      // Real planting event document ID
-      // can be assigned after authorization.
-      eventId: "",
+          plantingSiteId:
+            cleanString(
+              plantingSiteId
+            ),
 
-      status: "Pending",
+          proposedDate,
 
-      reviewedBy: "",
-      reviewedAt: null,
+          proposedStartTime,
 
-      approvedBy: "",
-      approvedAt: null,
+          proposedEndTime,
 
-      rejectedBy: "",
-      rejectedAt: null,
+          eventLocation:
+            cleanString(
+              eventLocation
+            ),
 
-      releasedBy: "",
-      releasedAt: null,
+          latitude:
+            parsedLatitude,
 
-      inventoryDeducted: false,
-      inventoryReserved: false,
-      inventoryReleased: false,
-    });
+          longitude:
+            parsedLongitude,
+
+          expectedParticipants:
+            parsedExpectedParticipants,
+
+          description:
+            cleanString(
+              description
+            ),
+
+          status:
+            "Proposed",
+        },
+
+        eventId: "",
+
+        eventCreated:
+          false,
+
+        status:
+          "Pending",
+
+        reviewedBy: "",
+        reviewedAt: null,
+
+        approvedBy: "",
+        approvedAt: null,
+
+        rejectedBy: "",
+        rejectedAt: null,
+
+        releasedBy: "",
+        releasedAt: null,
+
+        decisionReason: "",
+        decisionBy: "",
+        decisionAt: null,
+
+        inventoryDeducted:
+          false,
+
+        inventoryReserved:
+          false,
+
+        inventoryReleased:
+          false,
+      });
 
     return res.status(201).json({
       success: true,
       message:
-        "Seedling request and event proposal submitted successfully.",
+        "Seedling request and planting event proposal submitted successfully.",
       data: request,
     });
   } catch (error) {
@@ -279,18 +495,14 @@ const submitSeedlingRequest = async (req, res) => {
       error
     );
 
-    const statusCode =
-      error.message ===
-      "Selected seedling inventory not found."
-        ? 404
-        : 400;
-
-    return res.status(statusCode).json({
-      success: false,
-      message:
-        error.message ||
-        "Failed to submit seedling request.",
-    });
+    return res
+      .status(400)
+      .json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to submit seedling request.",
+      });
   }
 };
 
@@ -298,19 +510,20 @@ const submitSeedlingRequest = async (req, res) => {
 // ADMIN / STAFF — GET ALL REQUESTS
 // ========================================
 
-const getSeedlingRequests = async (req, res) => {
+const getSeedlingRequests = async (
+  req,
+  res
+) => {
   try {
-    const { status } = req.query;
+    const { status } =
+      req.query;
 
-    let requests;
-
-    if (status) {
-      requests =
-        await getSeedlingRequestsByStatus(status);
-    } else {
-      requests =
-        await getAllSeedlingRequests();
-    }
+    const requests =
+      status
+        ? await getSeedlingRequestsByStatus(
+            status
+          )
+        : await getAllSeedlingRequests();
 
     return res.status(200).json({
       success: true,
@@ -334,12 +547,15 @@ const getSeedlingRequests = async (req, res) => {
 // ADMIN / STAFF — GET ONE REQUEST
 // ========================================
 
-const getSeedlingRequest = async (req, res) => {
+const getSeedlingRequest = async (
+  req,
+  res
+) => {
   try {
-    const { id } = req.params;
-
     const request =
-      await getSeedlingRequestById(id);
+      await getSeedlingRequestById(
+        req.params.id
+      );
 
     return res.status(200).json({
       success: true,
@@ -353,7 +569,8 @@ const getSeedlingRequest = async (req, res) => {
 
     return res.status(404).json({
       success: false,
-      message: error.message,
+      message:
+        error.message,
     });
   }
 };
@@ -362,158 +579,129 @@ const getSeedlingRequest = async (req, res) => {
 // PARTICIPANT — GET OWN REQUESTS
 // ========================================
 
-const getMySeedlingRequests = async (
-  req,
-  res
-) => {
-  try {
-    const participantId = req.user.uid;
+const getMySeedlingRequests =
+  async (req, res) => {
+    try {
+      const requests =
+        await getSeedlingRequestsByParticipantId(
+          req.user.uid
+        );
 
-    const requests =
-      await getSeedlingRequestsByParticipantId(
-        participantId
+      return res.status(200).json({
+        success: true,
+        data: requests,
+      });
+    } catch (error) {
+      console.error(
+        "getMySeedlingRequests error:",
+        error
       );
 
-    return res.status(200).json({
-      success: true,
-      data: requests,
-    });
-  } catch (error) {
-    console.error(
-      "getMySeedlingRequests error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to retrieve my requests.",
-    });
-  }
-};
+      return res.status(500).json({
+        success: false,
+        message:
+          "Failed to retrieve my requests.",
+      });
+    }
+  };
 
 // ========================================
-// STAFF — REVIEW PENDING REQUEST
+// STAFF — REVIEW
 //
 // Pending -> Reviewed
 // ========================================
 
-const markRequestReviewed = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
-
-    const reviewedBy = req.user.uid;
-
-    const {
-      quantity,
-      purpose,
-      plantingLocation,
-      preferredReleaseDate,
-    } = req.body || {};
-
-    // ========================================
-    // REQUIRED REVIEW FIELDS
-    // ========================================
-
-    if (
-      quantity === undefined ||
-      !purpose ||
-      !plantingLocation ||
-      !preferredReleaseDate
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "All review fields are required.",
-      });
-    }
-
-    const parsedQuantity = Number(quantity);
-
-    // ========================================
-    // QUANTITY VALIDATION
-    // ========================================
-
-    if (!Number.isInteger(parsedQuantity)) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Quantity must be a whole number.",
-      });
-    }
-
-    if (parsedQuantity <= 0) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Quantity must be greater than zero.",
-      });
-    }
-
-    // ========================================
-    // STAFF REVIEW
-    // ========================================
-
-    const updatedRequest =
-      await reviewSeedlingRequest(id, {
-        reviewedBy,
-
-        quantity: parsedQuantity,
-
-        purpose: String(purpose).trim(),
-
-        plantingLocation:
-          String(plantingLocation).trim(),
-
+const markRequestReviewed =
+  async (req, res) => {
+    try {
+      const {
+        items,
+        purpose,
+        plantingLocation,
         preferredReleaseDate,
+        reviewRemarks,
+      } = req.body || {};
+
+      if (
+        !cleanString(
+          purpose
+        ) ||
+        !cleanString(
+          plantingLocation
+        ) ||
+        !preferredReleaseDate
+        || !cleanString(reviewRemarks)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "All review fields are required.",
+        });
+      }
+
+      const validatedItems =
+        validateRequestItems(
+          items
+        );
+
+      const updatedRequest =
+        await reviewSeedlingRequest(
+          req.params.id,
+          {
+            reviewedBy: req.user.uid,
+            reviewedByName: req.user.fullName || req.user.name || "",
+            items: validatedItems,
+            purpose: cleanString(purpose),
+            plantingLocation: cleanString(plantingLocation),
+            preferredReleaseDate,
+            reviewRemarks: cleanString(reviewRemarks),
+          }
+        );
+
+      return res.status(200).json({
+        success: true,
+        message:
+          "Request reviewed successfully and forwarded to the administrator for final approval.",
+        data:
+          updatedRequest,
       });
+    } catch (error) {
+      console.error(
+        "markRequestReviewed error:",
+        error
+      );
 
-    return res.status(200).json({
-      success: true,
-      message:
-        "Request reviewed successfully and forwarded to the administrator for final approval.",
-      data: updatedRequest,
-    });
-  } catch (error) {
-    console.error(
-      "markRequestReviewed error:",
-      error
-    );
-
-    return res.status(400).json({
-      success: false,
-      message:
-        error.message ||
-        "Failed to review request.",
-    });
-  }
-};
+      return res.status(400).json({
+        success: false,
+        message:
+          error.message ||
+          "Failed to review request.",
+      });
+    }
+  };
 
 // ========================================
 // ADMIN — FINAL APPROVAL
 //
 // Reviewed -> Approved
+//
+// Reason REQUIRED.
+// Inventory is reserved.
+// Planting event is created and Scheduled.
 // ========================================
 
-const approveRequest = async (req, res) => {
+const approveRequest = async (
+  req,
+  res
+) => {
   try {
-    const { id } = req.params;
-
-    const approvedBy = req.user.uid;
-
-    const request =
-      await approveSeedlingRequest(
-        id,
-        approvedBy
-      );
+    // Approval does not require a reason.
+    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason);
 
     return res.status(200).json({
       success: true,
       message:
-        "Seedling request approved successfully.",
+        "Seedling request approved successfully and the planting event has been added to the event schedule.",
       data: request,
     });
   } catch (error) {
@@ -532,21 +720,24 @@ const approveRequest = async (req, res) => {
 };
 
 // ========================================
-// ADMIN — REJECT REVIEWED REQUEST
-//
-// Reviewed -> Rejected
+// ADMIN — FINAL REJECTION
 // ========================================
 
-const rejectRequest = async (req, res) => {
+const rejectRequest = async (
+  req,
+  res
+) => {
   try {
-    const { id } = req.params;
-
-    const rejectedBy = req.user.uid;
+    const reason =
+      validateDecisionReason(
+        req.body?.reason
+      );
 
     const request =
       await rejectSeedlingRequest(
-        id,
-        rejectedBy
+        req.params.id,
+        req.user.uid,
+        reason
       );
 
     return res.status(200).json({
@@ -571,21 +762,18 @@ const rejectRequest = async (req, res) => {
 };
 
 // ========================================
-// STAFF — RELEASE APPROVED REQUEST
-//
-// Approved -> Released
+// STAFF — RELEASE
 // ========================================
 
-const releaseRequest = async (req, res) => {
+const releaseRequest = async (
+  req,
+  res
+) => {
   try {
-    const { id } = req.params;
-
-    const releasedBy = req.user.uid;
-
     const request =
       await releaseSeedlingRequest(
-        id,
-        releasedBy
+        req.params.id,
+        req.user.uid
       );
 
     return res.status(200).json({

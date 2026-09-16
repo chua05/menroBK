@@ -1,8 +1,12 @@
-const { db } = require("../config/firebase");
+const {
+  db,
+} = require("../config/firebase");
 
 const {
   Timestamp,
-} = require("firebase-admin/firestore");
+} = require(
+  "firebase-admin/firestore"
+);
 
 const COLLECTION =
   "seedlingInventory";
@@ -13,14 +17,26 @@ const inventoryCollection =
 // ========================================
 // AUTOMATIC STATUS
 // ========================================
+
 const calculateInventoryStatus = (
-  availableQuantity
+  availableQuantity,
+  lowStockThreshold = 20
 ) => {
-  if (availableQuantity === 0) {
+  const available =
+    Number(availableQuantity || 0);
+
+  const threshold =
+    Number.isInteger(
+      Number(lowStockThreshold)
+    )
+      ? Number(lowStockThreshold)
+      : 20;
+
+  if (available <= 0) {
     return "Out of Stock";
   }
 
-  if (availableQuantity <= 20) {
+  if (available <= threshold) {
     return "Low Stock";
   }
 
@@ -30,6 +46,7 @@ const calculateInventoryStatus = (
 // ========================================
 // CREATE INVENTORY
 // ========================================
+
 const createInventory = async (
   data
 ) => {
@@ -39,8 +56,32 @@ const createInventory = async (
   const quantity =
     Number(data.quantity);
 
+  const lowStockThreshold =
+    Number.isInteger(
+      Number(
+        data.lowStockThreshold
+      )
+    )
+      ? Number(
+          data.lowStockThreshold
+        )
+      : 20;
+
   const inventoryData = {
-    ...data,
+    species:
+      String(
+        data.species || ""
+      ).trim(),
+
+    scientificName:
+      String(
+        data.scientificName || ""
+      ).trim(),
+
+    category:
+      String(
+        data.category || ""
+      ).trim(),
 
     quantity,
 
@@ -48,18 +89,48 @@ const createInventory = async (
       quantity,
 
     // Approved requests that are
-    // not yet physically released.
+    // waiting for physical release.
     reservedQuantity: 0,
 
-    // Actual released seedlings.
+    // Seedlings already physically released.
     distributedQuantity: 0,
+
+    lowStockThreshold,
+
+    dateReceived:
+      String(
+        data.dateReceived || ""
+      ).trim(),
+
+    sourceNursery:
+      String(
+        data.sourceNursery || ""
+      ).trim(),
+
+    batchReference:
+      String(
+        data.batchReference || ""
+      ).trim(),
+
+    description:
+      String(
+        data.description || ""
+      ).trim(),
 
     status:
       calculateInventoryStatus(
-        quantity
+        quantity,
+        lowStockThreshold
       ),
 
     isDeleted: false,
+
+    createdBy:
+      data.createdBy,
+
+    updatedBy:
+      data.updatedBy ||
+      data.createdBy,
 
     createdAt: now,
     updatedAt: now,
@@ -78,7 +149,9 @@ const createInventory = async (
 
 // ========================================
 // GET ALL INVENTORY
+// ADMIN / STAFF
 // ========================================
+
 const getAllInventory = async (
   {
     status,
@@ -103,9 +176,12 @@ const getAllInventory = async (
     inventory =
       inventory.filter(
         (item) =>
-          item.status
-            ?.toLowerCase() ===
-          status.toLowerCase()
+          String(
+            item.status || ""
+          ).toLowerCase() ===
+          String(
+            status
+          ).toLowerCase()
       );
   }
 
@@ -113,20 +189,87 @@ const getAllInventory = async (
     inventory =
       inventory.filter(
         (item) =>
-          item.species
-            ?.toLowerCase()
+          String(
+            item.species || ""
+          )
+            .toLowerCase()
             .includes(
-              species.toLowerCase()
+              String(
+                species
+              ).toLowerCase()
             )
       );
   }
+
+  inventory.sort((a, b) =>
+    String(a.species || "")
+      .localeCompare(
+        String(b.species || "")
+      )
+  );
 
   return inventory;
 };
 
 // ========================================
+// PARTICIPANT — GET AVAILABLE ITEMS
+//
+// Only fields needed for the request
+// dropdown are returned.
+// ========================================
+
+const getAvailableInventoryItems =
+  async () => {
+    const snapshot =
+      await inventoryCollection.get();
+
+    return snapshot.docs
+      .map((doc) => ({
+        id: doc.id,
+        ...doc.data(),
+      }))
+      .filter(
+        (item) =>
+          item.isDeleted !== true &&
+          Number(
+            item.availableQuantity ||
+              0
+          ) > 0
+      )
+      .map((item) => ({
+        id: item.id,
+
+        species:
+          item.species || "",
+
+        scientificName:
+          item.scientificName ||
+          "",
+
+        category:
+          item.category || "",
+
+        availableQuantity:
+          Number(
+            item.availableQuantity ||
+              0
+          ),
+
+        status:
+          item.status || "",
+      }))
+      .sort((a, b) =>
+        String(a.species)
+          .localeCompare(
+            String(b.species)
+          )
+      );
+  };
+
+// ========================================
 // GET INVENTORY BY ID
 // ========================================
+
 const getInventoryById =
   async (id) => {
     const doc =
@@ -152,6 +295,7 @@ const getInventoryById =
 // ========================================
 // UPDATE INVENTORY DETAILS + QUANTITY
 // ========================================
+
 const updateInventoryById =
   async (
     id,
@@ -183,12 +327,24 @@ const updateInventoryById =
 
         const updates = {};
 
+        // ========================================
+        // BASIC INFORMATION
+        // ========================================
+
         if (
           updateData.species !==
           undefined
         ) {
           updates.species =
             updateData.species;
+        }
+
+        if (
+          updateData.scientificName !==
+          undefined
+        ) {
+          updates.scientificName =
+            updateData.scientificName;
         }
 
         if (
@@ -200,6 +356,30 @@ const updateInventoryById =
         }
 
         if (
+          updateData.dateReceived !==
+          undefined
+        ) {
+          updates.dateReceived =
+            updateData.dateReceived;
+        }
+
+        if (
+          updateData.sourceNursery !==
+          undefined
+        ) {
+          updates.sourceNursery =
+            updateData.sourceNursery;
+        }
+
+        if (
+          updateData.batchReference !==
+          undefined
+        ) {
+          updates.batchReference =
+            updateData.batchReference;
+        }
+
+        if (
           updateData.description !==
           undefined
         ) {
@@ -207,9 +387,34 @@ const updateInventoryById =
             updateData.description;
         }
 
-        // --------------------------------
+        // ========================================
+        // LOW STOCK THRESHOLD
+        // ========================================
+
+        const effectiveThreshold =
+          updateData.lowStockThreshold !==
+          undefined
+            ? Number(
+                updateData.lowStockThreshold
+              )
+            : Number(
+                currentData
+                  .lowStockThreshold ??
+                  20
+              );
+
+        if (
+          updateData.lowStockThreshold !==
+          undefined
+        ) {
+          updates.lowStockThreshold =
+            effectiveThreshold;
+        }
+
+        // ========================================
         // QUANTITY EDIT
-        // --------------------------------
+        // ========================================
+
         if (
           updateData.quantity !==
           undefined
@@ -238,7 +443,8 @@ const updateInventoryById =
           const reservedQuantity =
             Number(
               currentData
-                .reservedQuantity || 0
+                .reservedQuantity ||
+                0
             );
 
           const distributedQuantity =
@@ -252,9 +458,9 @@ const updateInventoryById =
             reservedQuantity +
             distributedQuantity;
 
-          // You cannot reduce total stock
-          // below seedlings already reserved
-          // or distributed.
+          // Total quantity cannot be
+          // lower than seedlings already
+          // reserved or distributed.
           if (
             newQuantity <
             committedQuantity
@@ -276,7 +482,24 @@ const updateInventoryById =
 
           updates.status =
             calculateInventoryStatus(
-              newAvailableQuantity
+              newAvailableQuantity,
+              effectiveThreshold
+            );
+        } else if (
+          updateData.lowStockThreshold !==
+          undefined
+        ) {
+          // If only the threshold changed,
+          // recalculate status using the
+          // current available stock.
+          updates.status =
+            calculateInventoryStatus(
+              Number(
+                currentData
+                  .availableQuantity ||
+                  0
+              ),
+              effectiveThreshold
             );
         }
 
@@ -306,6 +529,7 @@ const updateInventoryById =
 // ========================================
 // ADD STOCK
 // ========================================
+
 const addInventoryStock =
   async (
     id,
@@ -346,6 +570,13 @@ const addInventoryStock =
               .availableQuantity || 0
           );
 
+        const lowStockThreshold =
+          Number(
+            currentData
+              .lowStockThreshold ??
+              20
+          );
+
         const newQuantity =
           currentQuantity +
           quantityToAdd;
@@ -356,7 +587,8 @@ const addInventoryStock =
 
         const newStatus =
           calculateInventoryStatus(
-            newAvailableQuantity
+            newAvailableQuantity,
+            lowStockThreshold
           );
 
         transaction.update(
@@ -390,8 +622,9 @@ const addInventoryStock =
   };
 
 // ========================================
-// SOFT DELETE INVENTORY
+// SOFT DELETE / ARCHIVE INVENTORY
 // ========================================
+
 const deleteInventoryById =
   async (
     id,
@@ -420,11 +653,9 @@ const deleteInventoryById =
         data.reservedQuantity || 0
       );
 
-    if (
-      reservedQuantity > 0
-    ) {
+    if (reservedQuantity > 0) {
       throw new Error(
-        "This seedling record cannot be deleted because it has approved seedlings waiting for release."
+        "This seedling record cannot be archived because it has approved seedlings waiting for release."
       );
     }
 
@@ -451,6 +682,7 @@ const deleteInventoryById =
 module.exports = {
   createInventory,
   getAllInventory,
+  getAvailableInventoryItems,
   getInventoryById,
   updateInventoryById,
   addInventoryStock,

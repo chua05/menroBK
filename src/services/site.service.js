@@ -59,6 +59,59 @@ function normalizePolygon(value) {
   return polygon;
 }
 
+function computeUtilizationFields(siteData) {
+  const maximumCapacity = Number(siteData.maximumCapacity || 0);
+  const planted = Number(siteData.planted || 0);
+
+  let availableCapacity = Math.max(0, maximumCapacity - planted);
+
+  let utilizationPercentage = 0;
+
+  if (maximumCapacity > 0) {
+    utilizationPercentage = Math.round((planted / maximumCapacity) * 100);
+
+    if (!Number.isFinite(utilizationPercentage)) {
+      utilizationPercentage = 0;
+    }
+
+    if (utilizationPercentage < 0) utilizationPercentage = 0;
+    if (utilizationPercentage > 100) utilizationPercentage = 100;
+  }
+
+  let utilizationStatus = "Available";
+
+  if (utilizationPercentage >= 90) {
+    utilizationStatus = "Full";
+  } else if (utilizationPercentage >= 50) {
+    utilizationStatus = "Partially Occupied";
+  } else {
+    utilizationStatus = "Available";
+  }
+
+  return {
+    availableCapacity,
+    utilizationPercentage,
+    utilizationStatus,
+  };
+}
+
+function formatSiteDocument(doc) {
+  const data = doc.data ? doc.data() : doc;
+  const base = {
+    id: doc.id || data.siteId || data.id,
+    ...data,
+  };
+
+  const util = computeUtilizationFields(base);
+
+  return {
+    ...base,
+    availableCapacity: util.availableCapacity,
+    utilizationPercentage: util.utilizationPercentage,
+    utilizationStatus: util.utilizationStatus,
+  };
+}
+
 // --------------------------------
 // CREATE SITE
 // --------------------------------
@@ -77,6 +130,14 @@ const createSite = async (data) => {
 
   if (!siteType) {
     throw new Error("Site type is required.");
+  }
+
+  const locationDescription = cleanString(
+    data.locationDescription
+  );
+
+  if (!locationDescription) {
+    throw new Error("Location description is required.");
   }
 
   const areaHectares = Number(data.areaHectares);
@@ -131,9 +192,9 @@ const createSite = async (data) => {
 
     polygon,
 
-    locationDescription: cleanString(
-      data.locationDescription
-    ),
+    locationDescription,
+
+    // keep compatibility: already have `locationDescription` above
 
     ownershipType: cleanString(
       data.ownershipType
@@ -185,12 +246,8 @@ const getAllSites = async () => {
   const snapshot = await db
     .collection(SITE_COLLECTION)
     .get();
-
   return snapshot.docs
-    .map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }))
+    .map((doc) => formatSiteDocument(doc))
     .filter(
       (site) =>
         String(site.status || "active")
@@ -206,12 +263,8 @@ const getArchivedSites = async () => {
   const snapshot = await db
     .collection(SITE_COLLECTION)
     .get();
-
   return snapshot.docs
-    .map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }))
+    .map((doc) => formatSiteDocument(doc))
     .filter(
       (site) =>
         String(site.status || "")
@@ -233,10 +286,7 @@ const getSiteById = async (siteId) => {
     throw new Error("Site not found.");
   }
 
-  return {
-    id: doc.id,
-    ...doc.data(),
-  };
+  return formatSiteDocument(doc);
 };
 
 // --------------------------------
@@ -269,11 +319,7 @@ const archiveSite = async (
   });
 
   const updatedDoc = await siteRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
-  };
+  return formatSiteDocument(updatedDoc);
 };
 
 // --------------------------------
@@ -306,11 +352,7 @@ const restoreSite = async (
   });
 
   const updatedDoc = await siteRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
-  };
+  return formatSiteDocument(updatedDoc);
 };
 
 module.exports = {

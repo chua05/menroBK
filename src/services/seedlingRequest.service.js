@@ -1,8 +1,12 @@
-const { db } = require("../config/firebase");
+const {
+  db,
+} = require("../config/firebase");
 
 const {
   Timestamp,
-} = require("firebase-admin/firestore");
+} = require(
+  "firebase-admin/firestore"
+);
 
 const {
   calculateInventoryStatus,
@@ -10,10 +14,18 @@ const {
   "./inventory.service"
 );
 
+const siteService = require("./site.service");
+
 const {
   createDistributionRecordInTransaction,
 } = require(
   "./distribution.service"
+);
+
+const {
+  createTreePlantingEventInTransaction,
+} = require(
+  "./event.service"
 );
 
 const COLLECTION =
@@ -22,61 +34,236 @@ const COLLECTION =
 const INVENTORY_COLLECTION =
   "seedlingInventory";
 
-// ========================================
-// CREATE SEEDLING REQUEST
-// ========================================
-const createSeedlingRequest =
-  async (data) => {
-    const inventoryRef = db
-      .collection(
-        INVENTORY_COLLECTION
-      )
-      .doc(data.inventoryId);
+const SITES_COLLECTION =
+  "sites";
 
-    const inventoryDoc =
-      await inventoryRef.get();
+// ========================================
+// HELPERS
+// ========================================
 
-    if (
-      !inventoryDoc.exists ||
-      inventoryDoc.data()
-        .isDeleted === true
-    ) {
+const cleanString = (
+  value
+) =>
+  String(
+    value || ""
+  ).trim();
+
+const normalizeBarangay = (
+  value
+) =>
+  cleanString(
+    value
+  ).toLowerCase();
+
+// ========================================
+// NORMALIZE REQUEST ITEMS
+//
+// Supports:
+// 1. New items[] records
+// 2. Old single inventoryId records
+// ========================================
+
+const normalizeRequestItems = (
+  request
+) => {
+  if (
+    Array.isArray(
+      request?.items
+    ) &&
+    request.items.length > 0
+  ) {
+    return request.items.map(
+      (item) => ({
+        inventoryId:
+          cleanString(
+            item.inventoryId
+          ),
+
+        species:
+          cleanString(
+            item.species
+          ),
+
+        scientificName:
+          cleanString(
+            item.scientificName
+          ),
+
+        category:
+          cleanString(
+            item.category
+          ),
+
+        quantity:
+          Number(
+            item.quantity
+          ),
+      })
+    );
+  }
+
+  // Backward compatibility.
+  if (
+    request?.inventoryId
+  ) {
+    return [
+      {
+        inventoryId:
+          cleanString(
+            request.inventoryId
+          ),
+
+        species:
+          cleanString(
+            request.species
+          ),
+
+        scientificName:
+          cleanString(
+            request.scientificName
+          ),
+
+        category:
+          cleanString(
+            request.category
+          ),
+
+        quantity:
+          Number(
+            request.quantity
+          ),
+      },
+    ];
+  }
+
+  return [];
+};
+
+// ========================================
+// VALIDATE BASIC ITEM STRUCTURE
+// ========================================
+
+const validateItemStructure = (
+  items
+) => {
+  if (
+    !Array.isArray(items) ||
+    items.length === 0
+  ) {
+    throw new Error(
+      "At least one seedling item is required."
+    );
+  }
+
+  const seenInventoryIds =
+    new Set();
+
+  for (
+    const item of items
+  ) {
+    const inventoryId =
+      cleanString(
+        item.inventoryId
+      );
+
+    const quantity =
+      Number(
+        item.quantity
+      );
+
+    if (!inventoryId) {
       throw new Error(
-        "Selected seedling inventory not found."
+        "A requested seedling has no linked inventory."
       );
     }
-
-    const inventoryData =
-      inventoryDoc.data();
-
-    const requestedQuantity =
-      Number(data.quantity);
 
     if (
       !Number.isInteger(
-        requestedQuantity
+        quantity
       ) ||
-      requestedQuantity <= 0
+      quantity <= 0
     ) {
       throw new Error(
-        "Requested quantity must be a positive whole number."
+        "Requested quantities must be positive whole numbers."
       );
     }
-
-    const availableQuantity =
-      Number(
-        inventoryData
-          .availableQuantity || 0
-      );
 
     if (
-      requestedQuantity >
-      availableQuantity
+      seenInventoryIds.has(
+        inventoryId
+      )
     ) {
       throw new Error(
-        `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
+        "The same seedling inventory cannot be requested more than once."
       );
     }
+
+    seenInventoryIds.add(
+      inventoryId
+    );
+  }
+};
+
+// ========================================
+// CREATE SEEDLING REQUEST
+// ========================================
+
+const createSeedlingRequest =
+  async (data) => {
+    const submittedItems =
+      normalizeRequestItems(
+        data
+      );
+
+    validateItemStructure(
+      submittedItems
+    );
+
+    const canonicalItems =
+      [];
+
+    // Read actual inventory records (existence only).
+    for (const item of submittedItems) {
+      const inventoryRef = db
+        .collection(INVENTORY_COLLECTION)
+        .doc(item.inventoryId);
+
+      const inventoryDoc = await inventoryRef.get();
+
+      if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
+        throw new Error(
+          "One of the selected seedling inventory records was not found."
+        );
+      }
+
+      const inventoryData = inventoryDoc.data();
+
+      // Do NOT reject requests where requested quantity exceeds available stock.
+      // Preserve requested quantity as provided.
+
+      canonicalItems.push({
+        inventoryId: inventoryDoc.id,
+
+        species: cleanString(inventoryData.species),
+
+        scientificName: cleanString(inventoryData.scientificName),
+
+        category: cleanString(inventoryData.category),
+
+        quantity: item.quantity,
+      });
+    }
+
+    const totalQuantity =
+      canonicalItems.reduce(
+        (
+          total,
+          item
+        ) =>
+          total +
+          item.quantity,
+        0
+      );
 
     const now =
       Timestamp.now();
@@ -84,22 +271,64 @@ const createSeedlingRequest =
     const requestData = {
       ...data,
 
-      quantity:
-        requestedQuantity,
+      // Canonical multi-tree data.
+      items:
+        canonicalItems,
 
-      species:
-        inventoryData.species,
+      totalQuantity,
 
-      createdAt: now,
-      updatedAt: now,
+      createdAt:
+        now,
+
+      updatedAt:
+        now,
     };
 
-    const docRef = await db
-      .collection(COLLECTION)
-      .add(requestData);
+    // Remove legacy client values if supplied.
+    delete requestData.inventoryId;
+    delete requestData.quantity;
+    delete requestData.species;
+    delete requestData.scientificName;
+    delete requestData.category;
+
+    // ========================================
+    // VALIDATE PLANTING SITE ELIGIBILITY (participant submission)
+    // Use Site service authoritative calculation.
+    // Available and Partially Occupied allowed. Full and archived rejected.
+    // ========================================
+    const plantingSiteId = cleanString(
+      requestData.eventProposal?.plantingSiteId
+    );
+
+    if (!plantingSiteId) {
+      throw new Error("Planting site is required.");
+    }
+
+    // Reuse site service so utilization logic is authoritative.
+    const site = await siteService.getSiteById(
+      plantingSiteId
+    );
+
+    if (String(site.status || "").trim().toLowerCase() !== "active") {
+      throw new Error("Selected planting site is archived.");
+    }
+
+    // site.utilizationPercentage now comes from site.service
+    const utilization = Number(site.utilizationPercentage || 0);
+
+    if (utilization >= 90) {
+      throw new Error("Selected planting site is already full.");
+    }
+
+    const docRef =
+      await db
+        .collection(COLLECTION)
+        .add(requestData);
 
     return {
-      id: docRef.id,
+      id:
+        docRef.id,
+
       ...requestData,
     };
   };
@@ -107,6 +336,7 @@ const createSeedlingRequest =
 // ========================================
 // GET ALL REQUESTS
 // ========================================
+
 const getAllSeedlingRequests =
   async () => {
     const snapshot =
@@ -116,7 +346,9 @@ const getAllSeedlingRequests =
 
     return snapshot.docs.map(
       (doc) => ({
-        id: doc.id,
+        id:
+          doc.id,
+
         ...doc.data(),
       })
     );
@@ -125,12 +357,14 @@ const getAllSeedlingRequests =
 // ========================================
 // GET REQUEST BY ID
 // ========================================
+
 const getSeedlingRequestById =
   async (id) => {
-    const doc = await db
-      .collection(COLLECTION)
-      .doc(id)
-      .get();
+    const doc =
+      await db
+        .collection(COLLECTION)
+        .doc(id)
+        .get();
 
     if (!doc.exists) {
       throw new Error(
@@ -139,7 +373,9 @@ const getSeedlingRequestById =
     }
 
     return {
-      id: doc.id,
+      id:
+        doc.id,
+
       ...doc.data(),
     };
   };
@@ -147,20 +383,24 @@ const getSeedlingRequestById =
 // ========================================
 // GET BY STATUS
 // ========================================
+
 const getSeedlingRequestsByStatus =
   async (status) => {
-    const snapshot = await db
-      .collection(COLLECTION)
-      .where(
-        "status",
-        "==",
-        status
-      )
-      .get();
+    const snapshot =
+      await db
+        .collection(COLLECTION)
+        .where(
+          "status",
+          "==",
+          status
+        )
+        .get();
 
     return snapshot.docs.map(
       (doc) => ({
-        id: doc.id,
+        id:
+          doc.id,
+
         ...doc.data(),
       })
     );
@@ -169,20 +409,26 @@ const getSeedlingRequestsByStatus =
 // ========================================
 // PARTICIPANT REQUESTS
 // ========================================
+
 const getSeedlingRequestsByParticipantId =
-  async (participantId) => {
-    const snapshot = await db
-      .collection(COLLECTION)
-      .where(
-        "participantId",
-        "==",
-        participantId
-      )
-      .get();
+  async (
+    participantId
+  ) => {
+    const snapshot =
+      await db
+        .collection(COLLECTION)
+        .where(
+          "participantId",
+          "==",
+          participantId
+        )
+        .get();
 
     return snapshot.docs.map(
       (doc) => ({
-        id: doc.id,
+        id:
+          doc.id,
+
         ...doc.data(),
       })
     );
@@ -190,165 +436,170 @@ const getSeedlingRequestsByParticipantId =
 
 // ========================================
 // STAFF REVIEW
+//
+// Pending -> Reviewed
+//
+// No stock reservation yet.
 // ========================================
-const reviewSeedlingRequest = async (
-  id,
-  reviewData
-) => {
-  const docRef = db
-    .collection(COLLECTION)
-    .doc(id);
 
-  const doc = await docRef.get();
+const reviewSeedlingRequest =
+  async (
+    id,
+    reviewData
+  ) => {
+    const docRef =
+      db
+        .collection(COLLECTION)
+        .doc(id);
 
-  // ========================================
-  // REQUEST EXISTS
-  // ========================================
+    const doc =
+      await docRef.get();
 
-  if (!doc.exists) {
-    throw new Error(
-      "Seedling request not found."
-    );
-  }
+    if (!doc.exists) {
+      throw new Error(
+        "Seedling request not found."
+      );
+    }
 
-  const currentRequest = doc.data();
+    const currentRequest =
+      doc.data();
 
-  // ========================================
-  // ONLY PENDING CAN BE REVIEWED
-  // ========================================
+    if (
+      currentRequest.status !==
+      "Pending"
+    ) {
+      throw new Error(
+        "Only pending requests can be reviewed."
+      );
+    }
 
-  if (currentRequest.status !== "Pending") {
-    throw new Error(
-      "Only pending requests can be reviewed."
-    );
-  }
+    const reviewItems = normalizeRequestItems({ items: reviewData.items });
 
-  // ========================================
-  // QUANTITY VALIDATION
-  // ========================================
+    validateItemStructure(reviewItems);
 
-  const quantity = Number(
-    reviewData.quantity
-  );
+    const canonicalItems = [];
 
-  if (
-    !Number.isInteger(quantity) ||
-    quantity <= 0
-  ) {
-    throw new Error(
-      "Request quantity must be a positive whole number."
-    );
-  }
+    // Only verify inventory existence, do NOT reject based on availableQuantity.
+    for (const item of reviewItems) {
+      const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
 
-  // ========================================
-  // LINKED INVENTORY
-  // ========================================
+      const inventoryDoc = await inventoryRef.get();
 
-  if (!currentRequest.inventoryId) {
-    throw new Error(
-      "Seedling request has no linked inventory."
-    );
-  }
+      if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
+        throw new Error(
+          "One of the linked seedling inventory records was not found."
+        );
+      }
 
-  const inventoryRef = db
-    .collection(INVENTORY_COLLECTION)
-    .doc(currentRequest.inventoryId);
+      const inventoryData = inventoryDoc.data();
 
-  const inventoryDoc =
-    await inventoryRef.get();
+      canonicalItems.push({
+        inventoryId: inventoryDoc.id,
 
-  if (
-    !inventoryDoc.exists ||
-    inventoryDoc.data().isDeleted === true
-  ) {
-    throw new Error(
-      "Linked seedling inventory not found."
-    );
-  }
+        species: cleanString(inventoryData.species),
 
-  const inventoryData =
-    inventoryDoc.data();
+        scientificName: cleanString(inventoryData.scientificName),
 
-  const availableQuantity = Number(
-    inventoryData.availableQuantity || 0
-  );
+        category: cleanString(inventoryData.category),
 
-  // ========================================
-  // CHECK CURRENT STOCK
-  // ========================================
+        quantity: item.quantity,
+      });
+    }
 
-  if (quantity > availableQuantity) {
-    throw new Error(
-      `Only ${availableQuantity} ${inventoryData.species} seedlings are currently available.`
-    );
-  }
+    const totalQuantity =
+      canonicalItems.reduce(
+        (
+          total,
+          item
+        ) =>
+          total +
+          item.quantity,
+        0
+      );
 
-  const now = Timestamp.now();
+    const now =
+      Timestamp.now();
 
-  // ========================================
-  // SAVE STAFF REVIEW
-  //
-  // NOTE:
-  // Do NOT deduct inventory here.
-  // Inventory reservation happens only
-  // after Admin approval.
-  // ========================================
+    // Review remarks validation
+    const reviewRemarks = cleanString(reviewData.reviewRemarks || "");
 
-  await docRef.update({
-    quantity,
+    if (!reviewRemarks) {
+      throw new Error("Review findings/remarks are required.");
+    }
 
-    purpose:
-      String(reviewData.purpose || "").trim(),
+    await docRef.update({
+      items:
+        canonicalItems,
 
-    plantingLocation:
-      String(
-        reviewData.plantingLocation || ""
-      ).trim(),
+      totalQuantity,
 
-    preferredReleaseDate:
-      reviewData.preferredReleaseDate,
+      purpose:
+        cleanString(
+          reviewData.purpose
+        ),
 
-    reviewedBy:
-      reviewData.reviewedBy,
+      plantingLocation:
+        cleanString(
+          reviewData
+            .plantingLocation
+        ),
 
-    reviewedAt: now,
+      preferredReleaseDate:
+        reviewData
+          .preferredReleaseDate,
+      reviewedBy: reviewData.reviewedBy,
+      reviewedByName: reviewData.reviewedByName || "",
+      reviewRemarks,
+      reviewedAt: now,
+      status: "Reviewed",
+      updatedAt: now,
+    });
 
-    status: "Reviewed",
+    const updatedDoc =
+      await docRef.get();
 
-    updatedAt: now,
-  });
+    return {
+      id:
+        updatedDoc.id,
 
-  const updatedDoc =
-    await docRef.get();
-
-  return {
-    id: updatedDoc.id,
-    ...updatedDoc.data(),
+      ...updatedDoc.data(),
+    };
   };
-};
-
 
 // ========================================
 // ADMIN FINAL APPROVAL
-// RESERVE + DEDUCT AVAILABLE STOCK
+//
+// Reviewed -> Approved
+//
+// All inventory reservations + event creation
+// + request approval happen atomically.
 // ========================================
+
 const approveSeedlingRequest =
   async (
     id,
-    approvedBy
+    approvedBy,
+    reason
   ) => {
-    const requestRef = db
-      .collection(COLLECTION)
-      .doc(id);
+    const requestRef =
+      db
+        .collection(COLLECTION)
+        .doc(id);
 
     await db.runTransaction(
       async (transaction) => {
+        // ========================================
+        // REQUEST
+        // ========================================
+
         const requestDoc =
           await transaction.get(
             requestRef
           );
 
-        if (!requestDoc.exists) {
+        if (
+          !requestDoc.exists
+        ) {
           throw new Error(
             "Seedling request not found."
           );
@@ -368,140 +619,269 @@ const approveSeedlingRequest =
 
         if (
           currentRequest
+            .inventoryReserved ===
+          true ||
+          currentRequest
             .inventoryDeducted ===
           true
         ) {
           throw new Error(
-            "Inventory has already been deducted for this request."
+            "Inventory has already been reserved for this request."
           );
         }
 
         if (
-          !currentRequest.inventoryId
+          currentRequest
+            .eventCreated ===
+            true ||
+          currentRequest.eventId
         ) {
           throw new Error(
-            "Seedling request has no linked inventory."
+            "A planting event has already been created for this request."
           );
         }
 
-        const requestedQuantity =
-          Number(
-            currentRequest.quantity
+        // Use approvedItems for release when present; otherwise fall back to request items.
+        const requestItems =
+          Array.isArray(currentRequest.approvedItems) && currentRequest.approvedItems.length > 0
+            ? currentRequest.approvedItems
+            : normalizeRequestItems(currentRequest);
+
+        validateItemStructure(requestItems);
+
+        // ========================================
+        // READ ALL INVENTORY FIRST
+        //
+        // Firestore transactions require reads
+        // before writes.
+        // ========================================
+
+        const inventoryRecords = [];
+
+        // For each requested item, read inventory and compute approvedQuantity = min(requested, available).
+        // Do not reject approval if requested > available; approve only what can be accommodated.
+        for (const item of requestItems) {
+          const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
+
+          const inventoryDoc = await transaction.get(inventoryRef);
+
+          if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
+            throw new Error(
+              `Linked seedling inventory for ${item.species || "a requested item"} was not found.`
+            );
+          }
+
+          const inventoryData = inventoryDoc.data();
+
+          const availableQuantity = Number(inventoryData.availableQuantity || 0);
+
+          const requestedQty = Number(item.quantity || 0);
+
+          const approvedQuantity = Math.max(0, Math.min(requestedQty, availableQuantity));
+
+          inventoryRecords.push({ item, inventoryRef, inventoryData, approvedQuantity });
+        }
+
+        // ========================================
+        // EVENT PROPOSAL
+        // ========================================
+
+        const proposal =
+          currentRequest
+            .eventProposal ||
+          {};
+
+        const plantingSiteId =
+          cleanString(
+            proposal.plantingSiteId
           );
 
-        if (
-          !Number.isInteger(
-            requestedQuantity
-          ) ||
-          requestedQuantity <= 0
-        ) {
+        const barangay =
+          cleanString(
+            proposal.barangay
+          );
+
+        if (!plantingSiteId) {
           throw new Error(
-            "Invalid requested quantity."
+            "The request has no linked planting site."
           );
         }
 
-        const inventoryRef = db
-          .collection(
-            INVENTORY_COLLECTION
-          )
-          .doc(
-            currentRequest
-              .inventoryId
+        if (!barangay) {
+          throw new Error(
+            "The request has no event barangay."
           );
+        }
 
-        const inventoryDoc =
+        // ========================================
+        // PLANTING SITE
+        // ========================================
+
+        const siteRef =
+          db
+            .collection(
+              SITES_COLLECTION
+            )
+            .doc(
+              plantingSiteId
+            );
+
+        const siteDoc =
           await transaction.get(
-            inventoryRef
+            siteRef
           );
 
-        if (
-          !inventoryDoc.exists ||
-          inventoryDoc.data()
-            .isDeleted === true
-        ) {
+        if (!siteDoc.exists) {
           throw new Error(
-            "Linked seedling inventory not found."
+            "Planting site not found."
           );
         }
 
-        const inventoryData =
-          inventoryDoc.data();
-
-        const availableQuantity =
-          Number(
-            inventoryData
-              .availableQuantity ||
-              0
-          );
+        const siteData =
+          siteDoc.data();
 
         if (
-          availableQuantity <
-          requestedQuantity
+          cleanString(
+            siteData.status
+          ).toLowerCase() !==
+          "active"
         ) {
           throw new Error(
-            `Insufficient seedling stock. Only ${availableQuantity} seedlings are available.`
+            "Selected planting site is not active."
           );
         }
 
-        const currentReserved =
-          Number(
-            inventoryData
-              .reservedQuantity ||
-              0
+        // Ensure site is not already full at approval time.
+        const planted = Number(siteData.planted || 0);
+        const maximumCapacity = Number(siteData.maximumCapacity || 0);
+
+        let utilizationPercentage = 0;
+        if (maximumCapacity > 0) {
+          utilizationPercentage = Math.round(
+            (planted / maximumCapacity) * 100
           );
+        }
 
-        const newAvailable =
-          availableQuantity -
-          requestedQuantity;
+        if (utilizationPercentage >= 90) {
+          throw new Error("Selected planting site is already full.");
+        }
 
-        const newReserved =
-          currentReserved +
-          requestedQuantity;
+        if (
+          normalizeBarangay(
+            siteData.barangay
+          ) !==
+          normalizeBarangay(
+            barangay
+          )
+        ) {
+          throw new Error(
+            "Selected planting site does not belong to the event barangay."
+          );
+        }
 
         const now =
           Timestamp.now();
 
-        transaction.update(
-          inventoryRef,
-          {
-            availableQuantity:
-              newAvailable,
+        // ========================================
+        // CREATE TREE PLANTING EVENT
+        //
+        // Approval means Authorized + Scheduled.
+        // ========================================
 
-            reservedQuantity:
-              newReserved,
+        // Build approvedItems for event creation: use approved quantities from inventoryRecords.
+        const approvedItems = inventoryRecords.map((rec) => ({
+          inventoryId: rec.item.inventoryId,
+          species: rec.item.species,
+          scientificName: rec.item.scientificName,
+          category: rec.item.category,
+          quantity: rec.approvedQuantity,
+        }));
 
-            status:
-              calculateInventoryStatus(
-                newAvailable
-              ),
+        const eventRequestData = {
+          ...currentRequest,
+          // For event allocation use approvedItems (what MENRO will actually provide)
+          items: approvedItems,
+          totalQuantity: approvedItems.reduce((total, item) => total + Number(item.quantity || 0), 0),
+        };
 
-            updatedBy:
+        const {
+          eventId,
+        } =
+          await createTreePlantingEventInTransaction(
+            transaction,
+            {
+              requestId:
+                id,
+
+              requestData:
+                eventRequestData,
+
+              // Keep this for compatibility with
+              // the current event service.
+              // For multiple items, first item is
+              // supplied as legacy inventoryData.
+              inventoryData:
+                inventoryRecords[0]
+                  .inventoryData,
+
               approvedBy,
 
-            updatedAt: now,
+              approvedAt:
+                now,
+
+              siteData,
+            }
+          );
+
+        // ========================================
+        // RESERVE ALL INVENTORY ITEMS
+        // ========================================
+
+        for (const record of inventoryRecords) {
+          const { item, inventoryRef, inventoryData, approvedQuantity } = record;
+
+          if (approvedQuantity <= 0) {
+            // Nothing to reserve for this inventory item.
+            continue;
           }
-        );
 
-        transaction.update(
-          requestRef,
-          {
-            status:
-              "Approved",
+          const availableQuantity = Number(inventoryData.availableQuantity || 0);
 
-            approvedBy,
+          const reservedQuantity = Number(inventoryData.reservedQuantity || 0);
 
-            approvedAt: now,
+          const newAvailable = availableQuantity - approvedQuantity;
 
-            // Prevent second deduction.
-            inventoryDeducted:
-              true,
+          const newReserved = reservedQuantity + approvedQuantity;
 
-            inventoryReserved:
-              true,
+          const lowStockThreshold = Number(inventoryData.lowStockThreshold ?? 20);
 
+          transaction.update(inventoryRef, {
+            availableQuantity: newAvailable,
+            reservedQuantity: newReserved,
+            status: calculateInventoryStatus(newAvailable, lowStockThreshold),
+            updatedBy: approvedBy,
             updatedAt: now,
-          }
-        );
+          });
+        }
+
+        // ========================================
+        // UPDATE REQUEST
+        // ========================================
+
+        // Store approvedItems on the request for later release and auditing.
+        transaction.update(requestRef, {
+          status: "Approved",
+          approvedBy,
+          approvedAt: now,
+          decisionBy: approvedBy,
+          decisionAt: now,
+          eventId,
+          eventCreated: true,
+          inventoryDeducted: true,
+          inventoryReserved: true,
+          approvedItems,
+          updatedAt: now,
+        });
       }
     );
 
@@ -509,22 +889,29 @@ const approveSeedlingRequest =
       await requestRef.get();
 
     return {
-      id: updatedDoc.id,
+      id:
+        updatedDoc.id,
+
       ...updatedDoc.data(),
     };
   };
 
 // ========================================
-// REJECT REQUEST
+// ADMIN REJECTION
+//
+// Reviewed -> Rejected
 // ========================================
+
 const rejectSeedlingRequest =
   async (
     id,
-    rejectedBy
+    rejectedBy,
+    reason
   ) => {
-    const docRef = db
-      .collection(COLLECTION)
-      .doc(id);
+    const docRef =
+      db
+        .collection(COLLECTION)
+        .doc(id);
 
     const doc =
       await docRef.get();
@@ -547,6 +934,9 @@ const rejectSeedlingRequest =
       );
     }
 
+    const now =
+      Timestamp.now();
+
     await docRef.update({
       status:
         "Rejected",
@@ -554,43 +944,67 @@ const rejectSeedlingRequest =
       rejectedBy,
 
       rejectedAt:
-        Timestamp.now(),
+        now,
+
+      decisionReason:
+        cleanString(
+          reason
+        ),
+
+      decisionBy:
+        rejectedBy,
+
+      decisionAt:
+        now,
 
       updatedAt:
-        Timestamp.now(),
+        now,
     });
 
     const updatedDoc =
       await docRef.get();
 
     return {
-      id: updatedDoc.id,
+      id:
+        updatedDoc.id,
+
       ...updatedDoc.data(),
     };
   };
 
 // ========================================
 // RELEASE REQUEST
-// MOVE RESERVED → DISTRIBUTED
-// DO NOT DEDUCT AVAILABLE AGAIN
+//
+// Approved -> Released
+//
+// Reserved -> Distributed.
+// Available is NOT deducted again.
 // ========================================
+
 const releaseSeedlingRequest =
   async (
     id,
     releasedBy
   ) => {
-    const requestRef = db
-      .collection(COLLECTION)
-      .doc(id);
+    const requestRef =
+      db
+        .collection(COLLECTION)
+        .doc(id);
 
     await db.runTransaction(
       async (transaction) => {
+        // ========================================
+        // REQUEST
+        // ========================================
+
         const requestDoc =
           await transaction.get(
             requestRef
           );
 
-        if (!requestDoc.exists) {
+        if (
+          !requestDoc.exists
+        ) {
           throw new Error(
             "Seedling request not found."
           );
@@ -609,109 +1023,165 @@ const releaseSeedlingRequest =
         }
 
         if (
-          !currentRequest.inventoryId
-        ) {
-          throw new Error(
-            "Seedling request has no linked inventory."
-          );
-        }
-
-        if (
+          currentRequest
+            .inventoryReserved !==
+            true &&
           currentRequest
             .inventoryDeducted !==
-          true
+            true
         ) {
           throw new Error(
             "Inventory was not reserved for this approved request."
           );
         }
 
-        const requestedQuantity =
-          Number(
-            currentRequest.quantity
-          );
-
         if (
-          !Number.isInteger(
-            requestedQuantity
-          ) ||
-          requestedQuantity <= 0
+          currentRequest
+            .inventoryReleased ===
+          true
         ) {
           throw new Error(
-            "Invalid requested quantity."
+            "Seedlings have already been released for this request."
           );
         }
 
-        const inventoryRef = db
-          .collection(
-            INVENTORY_COLLECTION
-          )
-          .doc(
+        const requestItems =
+          normalizeRequestItems(
             currentRequest
-              .inventoryId
           );
 
-        const inventoryDoc =
-          await transaction.get(
-            inventoryRef
-          );
+        validateItemStructure(
+          requestItems
+        );
 
-        if (
-          !inventoryDoc.exists ||
-          inventoryDoc.data()
-            .isDeleted === true
+        // ========================================
+        // READ ALL INVENTORY FIRST
+        // ========================================
+
+        const inventoryRecords =
+          [];
+
+        for (
+          const item of requestItems
         ) {
-          throw new Error(
-            "Linked seedling inventory not found."
-          );
+          const inventoryRef =
+            db
+              .collection(
+                INVENTORY_COLLECTION
+              )
+              .doc(
+                item.inventoryId
+              );
+
+          const inventoryDoc =
+            await transaction.get(
+              inventoryRef
+            );
+
+          if (
+            !inventoryDoc.exists ||
+            inventoryDoc.data()
+              .isDeleted === true
+          ) {
+            throw new Error(
+              `Linked seedling inventory for ${item.species || "a requested item"} was not found.`
+            );
+          }
+
+          const inventoryData =
+            inventoryDoc.data();
+
+          const reservedQuantity =
+            Number(
+              inventoryData
+                .reservedQuantity ||
+                0
+            );
+
+          const quantityToRelease = Number(item.quantity || 0);
+
+          if (reservedQuantity < quantityToRelease) {
+            throw new Error(
+              `Reserved ${inventoryData.species} stock is inconsistent with this request.`
+            );
+          }
+
+          inventoryRecords.push({
+            item,
+            inventoryRef,
+            inventoryData,
+          });
         }
-
-        const inventoryData =
-          inventoryDoc.data();
-
-        const reservedQuantity =
-          Number(
-            inventoryData
-              .reservedQuantity ||
-              0
-          );
-
-        if (
-          reservedQuantity <
-          requestedQuantity
-        ) {
-          throw new Error(
-            "Reserved stock is inconsistent with this request."
-          );
-        }
-
-        const distributedQuantity =
-          Number(
-            inventoryData
-              .distributedQuantity ||
-              0
-          );
 
         const now =
           Timestamp.now();
 
-        transaction.update(
-          inventoryRef,
+        // ========================================
+        // RESERVED -> DISTRIBUTED
+        // ========================================
+
+        for (
+          const record of inventoryRecords
+        ) {
+          const {
+            item,
+            inventoryRef,
+            inventoryData,
+          } = record;
+
+          const reservedQuantity =
+            Number(
+              inventoryData
+                .reservedQuantity ||
+                0
+            );
+
+          const distributedQuantity =
+            Number(
+              inventoryData
+                .distributedQuantity ||
+                0
+            );
+
+          transaction.update(
+            inventoryRef,
+            {
+              reservedQuantity: reservedQuantity - quantityToRelease,
+
+              distributedQuantity: distributedQuantity + quantityToRelease,
+
+              updatedBy:
+                releasedBy,
+
+              updatedAt:
+                now,
+            }
+          );
+        }
+
+        // ========================================
+        // DISTRIBUTION RECORD
+        // ========================================
+
+        createDistributionRecordInTransaction(
+          transaction,
           {
-            reservedQuantity:
-              reservedQuantity -
-              requestedQuantity,
+            requestId:
+              id,
 
-            distributedQuantity:
-              distributedQuantity +
-              requestedQuantity,
+            requestData:
+              currentRequest,
 
-            updatedBy:
-              releasedBy,
+            releasedBy,
 
-            updatedAt: now,
+            releasedAt:
+              now,
           }
         );
+
+        // ========================================
+        // REQUEST -> RELEASED
+        // ========================================
 
         transaction.update(
           requestRef,
@@ -721,7 +1191,8 @@ const releaseSeedlingRequest =
 
             releasedBy,
 
-            releasedAt: now,
+            releasedAt:
+              now,
 
             inventoryReleased:
               true,
@@ -729,21 +1200,8 @@ const releaseSeedlingRequest =
             distributionId:
               id,
 
-            updatedAt: now,
-          }
-        );
-
-        createDistributionRecordInTransaction(
-          transaction,
-          {
-            requestId: id,
-
-            requestData:
-              currentRequest,
-
-            releasedBy,
-
-            releasedAt: now,
+            updatedAt:
+              now,
           }
         );
       }
@@ -753,7 +1211,9 @@ const releaseSeedlingRequest =
       await requestRef.get();
 
     return {
-      id: updatedDoc.id,
+      id:
+        updatedDoc.id,
+
       ...updatedDoc.data(),
     };
   };
@@ -768,4 +1228,8 @@ module.exports = {
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
+
+  // Useful for other modules that need
+  // backward-compatible request items.
+  normalizeRequestItems,
 };

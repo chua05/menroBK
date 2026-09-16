@@ -5,6 +5,7 @@ const router = express.Router();
 const {
   addInventory,
   getInventory,
+  getAvailableInventory,
   getInventoryItem,
   updateInventory,
   addStock,
@@ -19,15 +20,41 @@ const {
   authorizeRoles,
 } = require("../middleware/role.middleware");
 
-// CREATE INVENTORY — ADMIN ONLY
+// ========================================
+// STAFF — CREATE INVENTORY
+// ========================================
+
 router.post(
   "/",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   addInventory
 );
 
-// GET ALL INVENTORY — ADMIN AND STAFF
+// ========================================
+// PARTICIPANT — GET AVAILABLE SEEDLINGS
+//
+// IMPORTANT:
+// Keep this BEFORE "/:id".
+//
+// This endpoint returns only seedlings
+// that are currently available for request.
+// ========================================
+
+router.get(
+  "/available",
+  verifyToken,
+  authorizeRoles("participant"),
+  getAvailableInventory
+);
+
+// ========================================
+// ADMIN / STAFF — VIEW ALL INVENTORY
+//
+// Admin = view only
+// Staff = inventory management
+// ========================================
+
 router.get(
   "/",
   verifyToken,
@@ -35,7 +62,13 @@ router.get(
   getInventory
 );
 
-// GET INVENTORY BY ID — ADMIN AND STAFF
+// ========================================
+// ADMIN / STAFF — VIEW ONE INVENTORY ITEM
+//
+// IMPORTANT:
+// Keep this AFTER "/available".
+// ========================================
+
 router.get(
   "/:id",
   verifyToken,
@@ -43,27 +76,36 @@ router.get(
   getInventoryItem
 );
 
-// UPDATE INVENTORY DETAILS — ADMIN ONLY
+// ========================================
+// STAFF — UPDATE INVENTORY
+// ========================================
+
 router.patch(
   "/:id",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   updateInventory
 );
 
-// ADD STOCK — ADMIN ONLY
+// ========================================
+// STAFF — ADD STOCK
+// ========================================
+
 router.patch(
   "/:id/stock",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   addStock
 );
 
-// DELETE INVENTORY — ADMIN ONLY
+// ========================================
+// STAFF — ARCHIVE / SOFT DELETE INVENTORY
+// ========================================
+
 router.delete(
   "/:id",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   deleteInventory
 );
 

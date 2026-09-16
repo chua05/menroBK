@@ -1,21 +1,87 @@
-const { db } = require("../config/firebase");
+const {
+  db,
+} = require("../config/firebase");
 
-const COLLECTION = "distributions";
+const COLLECTION =
+  "distributions";
 
 const distributionCollection =
   db.collection(COLLECTION);
 
-/**
- * Creates a distribution record inside an existing
- * Firestore transaction.
- *
- * This is called during seedling release so that:
- * 1. Inventory deduction
- * 2. Request release
- * 3. Distribution record creation
- *
- * happen in one atomic transaction.
- */
+// ========================================
+// HELPER — NORMALIZE REQUEST ITEMS
+// ========================================
+
+const normalizeRequestItems = (
+  requestData
+) => {
+  if (
+    Array.isArray(
+      requestData.items
+    ) &&
+    requestData.items.length > 0
+  ) {
+    return requestData.items.map(
+      (item) => ({
+        inventoryId:
+          item.inventoryId,
+
+        species:
+          item.species || "",
+
+        scientificName:
+          item.scientificName ||
+          "",
+
+        category:
+          item.category || "",
+
+        quantity:
+          Number(
+            item.quantity || 0
+          ),
+      })
+    );
+  }
+
+  // Backward compatibility for old
+  // single-item request records.
+  if (
+    requestData.inventoryId
+  ) {
+    return [
+      {
+        inventoryId:
+          requestData.inventoryId,
+
+        species:
+          requestData.species ||
+          "",
+
+        scientificName:
+          requestData
+            .scientificName || "",
+
+        category:
+          requestData.category ||
+          "",
+
+        quantity:
+          Number(
+            requestData.quantity ||
+            0
+          ),
+      },
+    ];
+  }
+
+  return [];
+};
+
+// ========================================
+// CREATE DISTRIBUTION INSIDE TRANSACTION
+// ========================================
+
 const createDistributionRecordInTransaction = (
   transaction,
   {
@@ -25,16 +91,42 @@ const createDistributionRecordInTransaction = (
     releasedAt,
   }
 ) => {
-  // Use requestId as distribution document ID.
-  // This ensures one distribution record per request.
+  // One distribution document per request.
   const distributionRef =
-    distributionCollection.doc(requestId);
+    distributionCollection.doc(
+      requestId
+    );
+
+  const items =
+    normalizeRequestItems(
+      requestData
+    );
+
+  if (items.length === 0) {
+    throw new Error(
+      "Distribution has no seedling items."
+    );
+  }
+
+  const totalQuantityReleased =
+    items.reduce(
+      (
+        total,
+        item
+      ) =>
+        total +
+        Number(
+          item.quantity || 0
+        ),
+      0
+    );
+
+  const proposal =
+    requestData.eventProposal ||
+    {};
 
   const distributionData = {
     requestId,
-
-    inventoryId:
-      requestData.inventoryId,
 
     participantId:
       requestData.participantId,
@@ -48,40 +140,48 @@ const createDistributionRecordInTransaction = (
     contactNumber:
       requestData.contactNumber,
 
-    species:
-      requestData.species,
+    // Canonical multi-item structure.
+    items,
 
-    quantityReleased:
-      requestData.quantity,
+    totalQuantityReleased,
 
     purpose:
       requestData.purpose,
 
     plantingSiteId:
-    requestData.plantingSiteId || "",
+      proposal.plantingSiteId ||
+      requestData.plantingSiteId ||
+      "",
 
     plantingLocation:
-      requestData.plantingLocation,
+      requestData.plantingLocation ||
+      proposal.eventLocation ||
+      "",
 
     preferredReleaseDate:
-      requestData.preferredReleaseDate,
+      requestData
+        .preferredReleaseDate,
 
     eventId:
-    requestData.eventId || "",
+      requestData.eventId || "",
 
     reviewedBy:
-      requestData.reviewedBy || "",
+      requestData.reviewedBy ||
+      "",
 
     approvedBy:
-      requestData.approvedBy || "",
+      requestData.approvedBy ||
+      "",
 
     releasedBy,
 
-    status: "Released",
+    status:
+      "Released",
 
     releasedAt,
 
-    createdAt: releasedAt,
+    createdAt:
+      releasedAt,
   };
 
   transaction.set(
@@ -90,83 +190,125 @@ const createDistributionRecordInTransaction = (
   );
 
   return {
-    id: distributionRef.id,
+    id:
+      distributionRef.id,
+
     ...distributionData,
   };
 };
 
-// GET ALL DISTRIBUTION RECORDS
-const getAllDistributions = async (
-  {
-    species,
-    participantId,
-    requestId,
-  } = {}
-) => {
-  const snapshot =
-    await distributionCollection.get();
+// ========================================
+// GET ALL DISTRIBUTIONS
+// ========================================
 
-  let distributions =
-    snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+const getAllDistributions =
+  async (
+    {
+      species,
+      participantId,
+      requestId,
+    } = {}
+  ) => {
+    const snapshot =
+      await distributionCollection.get();
 
-  if (species) {
-    distributions =
-      distributions.filter(
-        (distribution) =>
-          distribution.species
-            ?.toLowerCase()
-            .includes(
-              species.toLowerCase()
-            )
+    let distributions =
+      snapshot.docs.map(
+        (doc) => ({
+          id:
+            doc.id,
+
+          ...doc.data(),
+        })
       );
-  }
 
-  if (participantId) {
-    distributions =
-      distributions.filter(
-        (distribution) =>
-          distribution.participantId ===
-          participantId
-      );
-  }
+    if (species) {
+      const searchSpecies =
+        String(
+          species
+        )
+          .trim()
+          .toLowerCase();
 
-  if (requestId) {
-    distributions =
-      distributions.filter(
-        (distribution) =>
-          distribution.requestId ===
-          requestId
-      );
-  }
+      distributions =
+        distributions.filter(
+          (distribution) => {
+            const items =
+              normalizeRequestItems(
+                distribution
+              );
 
-  return distributions;
-};
+            return items.some(
+              (item) =>
+                String(
+                  item.species ||
+                    ""
+                )
+                  .toLowerCase()
+                  .includes(
+                    searchSpecies
+                  )
+            );
+          }
+        );
+    }
 
-// GET DISTRIBUTION BY ID
-const getDistributionById = async (id) => {
-  const doc =
-    await distributionCollection
-      .doc(id)
-      .get();
+    if (participantId) {
+      distributions =
+        distributions.filter(
+          (distribution) =>
+            distribution
+              .participantId ===
+            participantId
+        );
+    }
 
-  if (!doc.exists) {
-    throw new Error(
-      "Distribution record not found."
-    );
-  }
+    if (requestId) {
+      distributions =
+        distributions.filter(
+          (distribution) =>
+            distribution
+              .requestId ===
+            requestId
+        );
+    }
 
-  return {
-    id: doc.id,
-    ...doc.data(),
+    return distributions;
   };
-};
 
-// GET DISTRIBUTIONS BY PARTICIPANT ID
+// ========================================
+// GET DISTRIBUTION BY ID
+// ========================================
+
+const getDistributionById =
+  async (id) => {
+    const doc =
+      await distributionCollection
+        .doc(id)
+        .get();
+
+    if (!doc.exists) {
+      throw new Error(
+        "Distribution record not found."
+      );
+    }
+
+    return {
+      id:
+        doc.id,
+
+      ...doc.data(),
+    };
+  };
+
+// ========================================
+// GET DISTRIBUTIONS BY PARTICIPANT
+// ========================================
+
 const getDistributionsByParticipantId =
-  async (participantId) => {
+  async (
+    participantId
+  ) => {
     const snapshot =
       await distributionCollection
         .where(
@@ -176,10 +318,14 @@ const getDistributionsByParticipantId =
         )
         .get();
 
-    return snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    return snapshot.docs.map(
+      (doc) => ({
+        id:
+          doc.id,
+
+        ...doc.data(),
+      })
+    );
   };
 
 module.exports = {
