@@ -155,7 +155,9 @@ const register = async (req, res) => {
 
       typeof contactNumber !== "string" || !contactNumber.trim() ||
 
-      typeof password !== "string" || !password
+      typeof password !== "string" || !password ||
+
+      typeof organization !== "string" || !organization.trim()
 
     ) {
 
@@ -194,7 +196,7 @@ const register = async (req, res) => {
       email: normalizedEmail,
       contactNumber: normalizedContactNumber,
       password,
-      organization: typeof organization === "string" ? organization.trim() : ""
+      organization: organization.trim()
     });
     return sendSuccess(
 
