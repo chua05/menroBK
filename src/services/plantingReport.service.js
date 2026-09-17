@@ -573,22 +573,17 @@ if (submittedEventId) {
   // --------------------------------
   // 8. VALIDATE SUBMITTED GPS
   // --------------------------------
-  const submittedLatitude =
-    Number(
-      data.latitude
-    );
-
-  const submittedLongitude =
-    Number(
-      data.longitude
-    );
+  // Testing: absent captured GPS stays null; real photo/site findings remain informational.
+  const hasSubmittedLatitude = data.latitude !== undefined && data.latitude !== null && data.latitude !== "";
+  const hasSubmittedLongitude = data.longitude !== undefined && data.longitude !== null && data.longitude !== "";
+  if (hasSubmittedLatitude !== hasSubmittedLongitude) {
+    throw new Error("Provide both captured coordinates or neither.");
+  }
+  const submittedLatitude = hasSubmittedLatitude ? Number(data.latitude) : null;
+  const submittedLongitude = hasSubmittedLongitude ? Number(data.longitude) : null;
 
   if (
-    Number.isNaN(
-      submittedLatitude
-    ) ||
-    submittedLatitude < -90 ||
-    submittedLatitude > 90
+    hasSubmittedLatitude && (!Number.isFinite(submittedLatitude) || submittedLatitude < -90 || submittedLatitude > 90)
   ) {
     throw new Error(
       "Latitude must be between -90 and 90."
@@ -596,11 +591,7 @@ if (submittedEventId) {
   }
 
   if (
-    Number.isNaN(
-      submittedLongitude
-    ) ||
-    submittedLongitude < -180 ||
-    submittedLongitude > 180
+    hasSubmittedLongitude && (!Number.isFinite(submittedLongitude) || submittedLongitude < -180 || submittedLongitude > 180)
   ) {
     throw new Error(
       "Longitude must be between -180 and 180."
@@ -612,16 +603,12 @@ if (submittedEventId) {
   // 9. COMPARE CAPTURED GPS
   // WITH REGISTERED SITE
   // --------------------------------
-  const siteGpsDistanceMeters =
-    calculateDistanceMeters(
-      submittedLatitude,
-      submittedLongitude,
-      siteLatitude,
-      siteLongitude
-    );
+  const siteGpsDistanceMeters = hasSubmittedLatitude
+    ? calculateDistanceMeters(submittedLatitude, submittedLongitude, siteLatitude, siteLongitude)
+    : null;
 
   const siteGpsValid =
-    siteGpsDistanceMeters <=
+    siteGpsDistanceMeters !== null && siteGpsDistanceMeters <=
     SITE_GPS_TOLERANCE_METERS;
 
 
@@ -727,8 +714,8 @@ if (submittedEventId) {
     // photo verification
     const photoVerification =
       validatePlantingReport({
-        submittedLatitude,
-        submittedLongitude,
+        submittedLatitude: hasSubmittedLatitude ? submittedLatitude : siteLatitude,
+        submittedLongitude: hasSubmittedLongitude ? submittedLongitude : siteLongitude,
         plantingDate:
           data.plantingDate,
         metadata,
@@ -748,7 +735,7 @@ if (submittedEventId) {
 
 
     // Registered site check
-    if (!siteGpsValid) {
+    if (siteGpsDistanceMeters !== null && !siteGpsValid) {
       if (
         !photoFlags.includes(
           "OUTSIDE_REGISTERED_SITE"

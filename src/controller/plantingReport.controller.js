@@ -133,9 +133,7 @@ const submitPlantingReport = async (
       quantityPlanted ===
         undefined ||
       !plantingDate ||
-      !plantingLocation ||
-      latitude === undefined ||
-      longitude === undefined
+      !plantingLocation
     ) {
       return res.status(400).json({
         success: false,
@@ -168,15 +166,16 @@ const submitPlantingReport = async (
     // --------------------------------
     // LATITUDE
     // --------------------------------
-    const parsedLatitude =
-      Number(latitude);
+    // Testing: device GPS may be unavailable even when the image is valid.
+    const hasLatitude = latitude !== undefined && latitude !== null && latitude !== "";
+    const hasLongitude = longitude !== undefined && longitude !== null && longitude !== "";
+    if (hasLatitude !== hasLongitude) {
+      return res.status(400).json({ success: false, message: "Provide both captured coordinates or neither." });
+    }
+    const parsedLatitude = hasLatitude ? Number(latitude) : null;
 
     if (
-      Number.isNaN(
-        parsedLatitude
-      ) ||
-      parsedLatitude < -90 ||
-      parsedLatitude > 90
+      hasLatitude && (!Number.isFinite(parsedLatitude) || parsedLatitude < -90 || parsedLatitude > 90)
     ) {
       return res.status(400).json({
         success: false,
@@ -189,15 +188,10 @@ const submitPlantingReport = async (
     // --------------------------------
     // LONGITUDE
     // --------------------------------
-    const parsedLongitude =
-      Number(longitude);
+    const parsedLongitude = hasLongitude ? Number(longitude) : null;
 
     if (
-      Number.isNaN(
-        parsedLongitude
-      ) ||
-      parsedLongitude < -180 ||
-      parsedLongitude > 180
+      hasLongitude && (!Number.isFinite(parsedLongitude) || parsedLongitude < -180 || parsedLongitude > 180)
     ) {
       return res.status(400).json({
         success: false,

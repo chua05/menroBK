@@ -62,6 +62,18 @@ require.cache[storagePath] = {
   },
 };
 const { attachEvidence } = require("../src/services/plantingEvidence.service");
+const { validatePlantingReport } = require("../src/utils/plantingVerification.util");
+const { validateImageBuffer } = require("../src/utils/imageVerification.util");
+
+test("GPS mismatches stay truthful findings and invalid image bytes remain rejected", async () => {
+  const result = validatePlantingReport({
+    submittedLatitude: 12, submittedLongitude: 123, plantingDate: "2026-09-17",
+    metadata: { latitude: 0, longitude: 0, capturedAt: null },
+  });
+  assert.equal(result.gpsValid, false);
+  assert.ok(result.suspiciousFlags.includes("GPS_MISMATCH"));
+  await assert.rejects(validateImageBuffer(Buffer.from("not an image")), /not a valid image/);
+});
 
 test("evidence stays with its contributor and records real missing-metadata findings", async () => {
   table("events").set("event-1", { latitude: 12.1, longitude: 124.1 });

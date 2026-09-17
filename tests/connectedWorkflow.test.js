@@ -220,6 +220,80 @@ test("requester evidence moves a released parent from Pending to Pending Review 
   }
 });
 
+test("valid camera-style image submits without captured GPS and preserves missing metadata", async () => {
+  const sharp = require("sharp");
+  const controller = require("../src/controller/plantingReport.controller");
+  const reportService = require("../src/services/plantingReport.service");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  seedApproved("request-no-gps", "EVT-NO-GPS");
+  await requestService.releaseSeedlingRequest("request-no-gps", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
+  });
+  Object.assign(table("events").get("EVT-NO-GPS"), {
+    recordStatus: "scheduled", plantingSiteId: "site-no-gps", barangay: "Bacolod",
+  });
+  table("sites").set("site-no-gps", { status: "active", siteName: "Site", barangay: "Bacolod", latitude: 12, longitude: 123 });
+  const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "blue" } }).png().toBuffer();
+  const file = { buffer: image, mimetype: "image/png", originalname: "camera.png" };
+  const body = {
+    distributionId: "request-no-gps", inventoryId: "calamansi", siteId: "site-no-gps",
+    participantType: "requester", participantBarangay: "Bacolod", quantityPlanted: 20,
+    plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
+  };
+  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "other" }, [file]), /another participant/);
+  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
+  const res = { result: {}, status(code) { this.result.code = code; return this; },
+    json(value) { this.result.body = value; return this; } };
+  try {
+    await controller.submitPlantingReport({ body, user: { uid: "participant-1" }, files: { photo: [file] } }, res);
+    assert.equal(res.result.code, 201);
+    const report = res.result.body.data;
+    assert.equal(report.verificationStatus, "Pending Review");
+    assert.equal(report.submissions[0].latitude, null);
+    assert.equal(report.submissions[0].longitude, null);
+    assert.equal(report.submissions[0].photos[0].gpsMetadataPresent, false);
+    assert.equal(report.submissions[0].photos[0].gpsValid, false);
+    assert.ok(report.submissions[0].photos[0].suspiciousFlags.includes("GPS_METADATA_MISSING"));
+    assert.ok(report.submissions[0].photos[0].photoPath);
+  } finally {
+    for (const submission of res.result.body?.data?.submissions || []) {
+      for (const photo of submission.photos || []) await deletePlantingPhoto(photo.photoPath);
+    }
+  }
+});
+
+test("out-of-site captured coordinates remain flagged but do not block evidence", async () => {
+  const sharp = require("sharp");
+  const reportService = require("../src/services/plantingReport.service");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  seedApproved("request-outside", "EVT-OUTSIDE");
+  await requestService.releaseSeedlingRequest("request-outside", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
+  });
+  Object.assign(table("events").get("EVT-OUTSIDE"), {
+    recordStatus: "scheduled", plantingSiteId: "site-outside", barangay: "Bacolod",
+  });
+  table("sites").set("site-outside", { status: "active", siteName: "Site", barangay: "Bacolod", latitude: 12, longitude: 123 });
+  const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "red" } }).png().toBuffer();
+  let report;
+  try {
+    report = await reportService.createPlantingReport({
+      distributionId: "request-outside", inventoryId: "calamansi", siteId: "site-outside",
+      participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
+      quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site",
+      latitude: 0, longitude: 0, eventId: "EVT-OUTSIDE",
+    }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]);
+    assert.equal(report.verificationStatus, "Pending Review");
+    assert.equal(report.submissions[0].siteGpsValid, false);
+    assert.ok(report.submissions[0].suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
+    assert.equal(table("sites").get("site-outside").latitude, 12);
+  } finally {
+    for (const submission of report?.submissions || []) {
+      for (const photo of submission.photos || []) await deletePlantingPhoto(photo.photoPath);
+    }
+  }
+});
+
 test("participant monitoring returns only own records and accepts an empty history", async () => {
   const controller = require("../src/controller/monitoring.controller");
   const routes = require("../src/routes/monitoring.routes");
