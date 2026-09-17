@@ -78,10 +78,7 @@ router.patch(
 //
 // Reviewed -> Approved
 //
-// Request body:
-// {
-//   "reason": "..."
-// }
+// Optional request body: { "reason": "..." }
 //
 // Approval:
 // 1. Reserves all requested inventory

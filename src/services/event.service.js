@@ -107,10 +107,10 @@ function validateExpectedParticipants(
     !Number.isInteger(
       expectedParticipants
     ) ||
-    expectedParticipants < 1
+    expectedParticipants < 0
   ) {
     throw new Error(
-      "Expected participants must be a whole number greater than 0."
+      "Expected participants must be a whole number of 0 or greater."
     );
   }
 
@@ -746,9 +746,7 @@ const createTreePlantingEventInTransaction =
     );
 
     const expectedParticipants =
-      validateExpectedParticipants(
-        proposal.expectedParticipants
-      );
+      validateExpectedParticipants(proposal.expectedParticipants ?? 0);
 
     // ========================================
     // SEEDLING ALLOCATION
@@ -902,9 +900,9 @@ const createTreePlantingEventInTransaction =
       // approved seedling-request events.
       // ========================================
 
-      seedlingItems,
-
-      seedlingTotalQuantity,
+      requestedSeedlingItems: seedlingItems,
+      seedlingItems: [],
+      seedlingTotalQuantity: 0,
 
       // ========================================
       // PLANTING CONTRIBUTION COUNTERS
@@ -917,7 +915,7 @@ const createTreePlantingEventInTransaction =
         0,
 
       remainingSeedlingQuantity:
-        seedlingTotalQuantity,
+        0,
 
       // ========================================
       // LEGACY SINGLE-SEEDLING FIELDS
@@ -936,7 +934,7 @@ const createTreePlantingEventInTransaction =
       // For multi-tree events, this legacy
       // field represents TOTAL allocation.
       seedlingQuantity:
-        seedlingTotalQuantity,
+        0,
 
       createdBy:
         approvedBy,

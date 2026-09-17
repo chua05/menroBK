@@ -3,7 +3,6 @@ const {
   getAllPlantingReports,
   getPlantingReportById,
   getPlantingReportsByParticipantId,
-  reviewPlantingReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,
@@ -324,7 +323,7 @@ const submitPlantingReport = async (
       "Planting report submitted successfully.";
 
     if (
-      report.verificationStatus ===
+      report.automatedVerificationStatus ===
       "Passed Automated Check"
     ) {
       message =
@@ -332,7 +331,7 @@ const submitPlantingReport = async (
     }
 
     if (
-      report.verificationStatus ===
+      report.automatedVerificationStatus ===
       "Flagged"
     ) {
       message =
@@ -410,6 +409,10 @@ const getPlantingReports = async (
       distributionId,
     } = req.query;
 
+    if (verificationStatus && !["Pending Review", "Approved", "Rejected"].includes(verificationStatus)) {
+      return res.status(400).json({ success: false, message: "Invalid planting report status filter." });
+    }
+
     const reports =
       await getAllPlantingReports({
         verificationStatus,
@@ -446,16 +449,23 @@ const getPlantingReport = async (
         id
       );
 
+    if (req.user.role === "participant" && report.participantId !== req.user.uid) {
+      return res.status(404).json({ success: false, message: "Planting report not found." });
+    }
+
     return res.status(200).json({
       success: true,
       data: report,
     });
   } catch (error) {
-    console.error(error);
+    const expectedError = ["Planting report not found.", "Invalid planting report ID."].includes(error.message);
+    if (!expectedError) console.error(error);
 
-    return res.status(404).json({
+    return res.status(error.message === "Planting report not found." ? 404 : expectedError ? 400 : 500).json({
       success: false,
-      message: error.message,
+      message: expectedError
+        ? error.message
+        : "Failed to retrieve planting report.",
     });
   }
 };
@@ -486,54 +496,7 @@ const getMyPlantingReports =
   };
 
 
-// STAFF REVIEW REPORT
-const reviewReport = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
-
-    const reviewedBy =
-      req.user.uid;
-
-    const {
-      remarks = "",
-    } = req.body || {};
-
-    const report =
-      await reviewPlantingReport(
-        id,
-        reviewedBy,
-        remarks
-      );
-
-    return res.status(200).json({
-      success: true,
-      message:
-        "Planting report reviewed successfully.",
-      data: report,
-    });
-  } catch (error) {
-    console.error(error);
-
-    const statusCode =
-      error.message ===
-      "Planting report not found."
-        ? 404
-        : 400;
-
-    return res.status(
-      statusCode
-    ).json({
-      success: false,
-      message: error.message,
-    });
-  }
-};
-
-
-// ADMIN APPROVE REPORT
+// STAFF APPROVE REPORT
 const approveReport = async (
   req,
   res
@@ -548,11 +511,16 @@ const approveReport = async (
       remarks = "",
     } = req.body || {};
 
+    if (typeof remarks !== "string") {
+      return res.status(400).json({ success: false, message: "Approval remarks must be text." });
+    }
+
     const report =
       await approvePlantingReport(
         id,
         approvedBy,
-        remarks
+        remarks,
+        req.user.fullName
       );
 
     return res.status(200).json({
@@ -562,25 +530,26 @@ const approveReport = async (
       data: report,
     });
   } catch (error) {
-    console.error(error);
-
-    const statusCode =
-      error.message ===
-      "Planting report not found."
-        ? 404
-        : 400;
+    const statusCode = error.message === "Planting report not found."
+      ? 404
+      : error.message === "Invalid planting report ID."
+        ? 400
+        : error.message === "Only pending review planting reports can be approved."
+          ? 409
+          : 500;
+    if (statusCode === 500) console.error(error);
 
     return res.status(
       statusCode
     ).json({
       success: false,
-      message: error.message,
+      message: statusCode === 500 ? "Failed to approve planting report." : error.message,
     });
   }
 };
 
 
-// ADMIN REJECT REPORT
+// STAFF REJECT REPORT
 const rejectReport = async (
   req,
   res
@@ -595,11 +564,7 @@ const rejectReport = async (
       remarks = "",
     } = req.body || {};
 
-    if (
-      !String(
-        remarks
-      ).trim()
-    ) {
+    if (typeof remarks !== "string" || !remarks.trim()) {
       return res.status(400).json({
         success: false,
         message:
@@ -611,7 +576,8 @@ const rejectReport = async (
       await rejectPlantingReport(
         id,
         rejectedBy,
-        remarks
+        remarks,
+        req.user.fullName
       );
 
     return res.status(200).json({
@@ -621,19 +587,22 @@ const rejectReport = async (
       data: report,
     });
   } catch (error) {
-    console.error(error);
-
-    const statusCode =
-      error.message ===
-      "Planting report not found."
-        ? 404
-        : 400;
+    const statusCode = error.message === "Planting report not found."
+      ? 404
+      : error.message === "Invalid planting report ID."
+        ? 400
+        : error.message === "Only pending review planting reports can be rejected."
+          ? 409
+          : error.message === "Rejection reason is required."
+            ? 400
+            : 500;
+    if (statusCode === 500) console.error(error);
 
     return res.status(
       statusCode
     ).json({
       success: false,
-      message: error.message,
+      message: statusCode === 500 ? "Failed to reject planting report." : error.message,
     });
   }
 };
@@ -657,19 +626,18 @@ const getVerificationLogs = async (
       data: logs,
     });
   } catch (error) {
-    console.error(error);
-
-    const statusCode =
-      error.message ===
-      "Planting report not found."
-        ? 404
+    const statusCode = error.message === "Planting report not found."
+      ? 404
+      : error.message === "Invalid planting report ID."
+        ? 400
         : 500;
+    if (statusCode === 500) console.error(error);
 
     return res.status(
       statusCode
     ).json({
       success: false,
-      message: error.message,
+      message: statusCode === 500 ? "Failed to retrieve verification logs." : error.message,
     });
   }
 };
@@ -680,7 +648,6 @@ module.exports = {
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
-  reviewReport,
   approveReport,
   rejectReport,
   getVerificationLogs,

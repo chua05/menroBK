@@ -15,6 +15,8 @@ function createNotificationInTransaction(transaction, data) {
     type: data.type,
     relatedRecordType: data.relatedRecordType,
     relatedRecordId: data.relatedRecordId,
+    ...(data.relatedEventId ? { relatedEventId: data.relatedEventId } : {}),
+    ...(data.relatedDistributionId ? { relatedDistributionId: data.relatedDistributionId } : {}),
     isRead: false,
     createdAt: data.createdAt || Timestamp.now(),
     readAt: null,

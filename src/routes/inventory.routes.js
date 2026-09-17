@@ -50,6 +50,14 @@ router.get(
   getAvailableInventory
 );
 
+// Keep the specific path before "/:id" so it is not treated as an item ID.
+router.get(
+  "/archived",
+  verifyToken,
+  authorizeRoles("admin", "staff"),
+  getArchivedInventoryItems
+);
+
 // ========================================
 // ADMIN / STAFF — VIEW ALL INVENTORY
 //
@@ -110,8 +118,6 @@ router.delete(
   authorizeRoles("staff"),
   deleteInventory
 );
-
-router.get("/archived", verifyToken, authorizeRoles("admin", "staff"), getArchivedInventoryItems);
 
 router.patch("/:id/restore", verifyToken, authorizeRoles("staff"), restoreInventory);
 

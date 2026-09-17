@@ -19,6 +19,7 @@ const eventRoutes = require("./routes/event.routes");
 const monitoringRoutes = require("./routes/monitoring.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const analyticsRoutes = require("./routes/analytics.routes");
+const guestEventRoutes = require("./routes/guestEvent.routes");
 
 const app = express();
 
@@ -105,6 +106,7 @@ app.use("/api/inventory", inventoryRoutes);
 app.use("/api/distributions", distributionRoutes);
 app.use("/api/planting-reports", plantingReportRoutes);
 app.use("/api/events", eventRoutes);
+app.use("/api/guest-events", guestEventRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes);

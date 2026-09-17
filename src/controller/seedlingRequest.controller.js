@@ -229,9 +229,7 @@ const submitSeedlingRequest = async (
         eventLocation
       ) ||
       latitude === undefined ||
-      longitude === undefined ||
-      expectedParticipants ===
-        undefined
+      longitude === undefined
     ) {
       return res.status(400).json({
         success: false,
@@ -248,7 +246,7 @@ const submitSeedlingRequest = async (
 
     const parsedExpectedParticipants =
       Number(
-        expectedParticipants
+        expectedParticipants ?? 0
       );
 
     // ========================================
@@ -291,13 +289,13 @@ const submitSeedlingRequest = async (
       !Number.isInteger(
         parsedExpectedParticipants
       ) ||
-      parsedExpectedParticipants <=
+      parsedExpectedParticipants <
         0
     ) {
       return res.status(400).json({
         success: false,
         message:
-          "Expected participants must be a positive integer.",
+          "Expected participants must be a nonnegative integer.",
       });
     }
 
@@ -562,15 +560,12 @@ const getSeedlingRequest = async (
       data: request,
     });
   } catch (error) {
-    console.error(
-      "getSeedlingRequest error:",
-      error
-    );
-
-    return res.status(404).json({
+    const notFound = error.message === "Seedling request not found.";
+    if (!notFound) console.error("getSeedlingRequest error:", error);
+    return res.status(notFound ? 404 : 500).json({
       success: false,
       message:
-        error.message,
+        notFound ? error.message : "Failed to retrieve request.",
     });
   }
 };
@@ -620,7 +615,10 @@ const markRequestReviewed =
         plantingLocation,
         preferredReleaseDate,
         reviewRemarks,
+        reviewFindings,
       } = req.body || {};
+
+      const findings = reviewRemarks ?? reviewFindings;
 
       if (
         !cleanString(
@@ -630,7 +628,7 @@ const markRequestReviewed =
           plantingLocation
         ) ||
         !preferredReleaseDate
-        || !cleanString(reviewRemarks)
+        || !cleanString(findings)
       ) {
         return res.status(400).json({
           success: false,
@@ -654,7 +652,7 @@ const markRequestReviewed =
             purpose: cleanString(purpose),
             plantingLocation: cleanString(plantingLocation),
             preferredReleaseDate,
-            reviewRemarks: cleanString(reviewRemarks),
+            reviewRemarks: cleanString(findings),
           }
         );
 
@@ -666,16 +664,21 @@ const markRequestReviewed =
           updatedRequest,
       });
     } catch (error) {
-      console.error(
-        "markRequestReviewed error:",
-        error
-      );
+      const notFound = error.message === "Seedling request not found.";
+      const conflict = error.message === "Only pending requests can be reviewed.";
+      const invalid = [
+        "At least one seedling must be selected.",
+        "A maximum of 10 seedling types may be requested at a time.",
+        "The same seedling inventory cannot be selected more than once.",
+        "Review findings/remarks are required.",
+        "One of the linked seedling inventory records was not found.",
+      ].includes(error.message) || /^Seedling item \d+ (has no selected inventory|must have a positive whole-number quantity)\.$/.test(error.message);
+      const statusCode = notFound ? 404 : conflict ? 409 : invalid ? 400 : 500;
+      if (statusCode === 500) console.error("markRequestReviewed error:", error);
 
-      return res.status(400).json({
+      return res.status(statusCode).json({
         success: false,
-        message:
-          error.message ||
-          "Failed to review request.",
+        message: statusCode === 500 ? "Failed to review request." : error.message,
       });
     }
   };
@@ -685,7 +688,7 @@ const markRequestReviewed =
 //
 // Reviewed -> Approved
 //
-// Reason REQUIRED.
+// Approval reason is optional.
 // Inventory is reserved.
 // Planting event is created and Scheduled.
 // ========================================
@@ -773,7 +776,8 @@ const releaseRequest = async (
     const request =
       await releaseSeedlingRequest(
         req.params.id,
-        req.user.uid
+        req.user.uid,
+        req.body
       );
 
     return res.status(200).json({

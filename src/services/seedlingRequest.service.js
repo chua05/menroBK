@@ -28,6 +28,7 @@ const {
   "./event.service"
 );
 const { createNotificationInTransaction } = require("./notification.service");
+const { createInvitationInTransaction } = require("./guestEvent.service");
 
 const COLLECTION =
   "seedlingRequests";
@@ -453,107 +454,67 @@ const reviewSeedlingRequest =
         .collection(COLLECTION)
         .doc(id);
 
-    const doc =
-      await docRef.get();
-
-    if (!doc.exists) {
-      throw new Error(
-        "Seedling request not found."
-      );
-    }
-
-    const currentRequest =
-      doc.data();
-
-    if (
-      currentRequest.status !==
-      "Pending"
-    ) {
-      throw new Error(
-        "Only pending requests can be reviewed."
-      );
-    }
-
     const reviewItems = normalizeRequestItems({ items: reviewData.items });
 
     validateItemStructure(reviewItems);
 
-    const canonicalItems = [];
-
-    // Only verify inventory existence, do NOT reject based on availableQuantity.
-    for (const item of reviewItems) {
-      const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
-
-      const inventoryDoc = await inventoryRef.get();
-
-      if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
-        throw new Error(
-          "One of the linked seedling inventory records was not found."
-        );
-      }
-
-      const inventoryData = inventoryDoc.data();
-
-      canonicalItems.push({
-        inventoryId: inventoryDoc.id,
-
-        species: cleanString(inventoryData.species),
-
-        scientificName: cleanString(inventoryData.scientificName),
-
-        category: cleanString(inventoryData.category),
-
-        quantity: item.quantity,
-      });
-    }
-
-    const totalQuantity =
-      canonicalItems.reduce(
-        (
-          total,
-          item
-        ) =>
-          total +
-          item.quantity,
-        0
-      );
-
-    const now =
-      Timestamp.now();
-
-    // Review remarks validation
     const reviewRemarks = cleanString(reviewData.reviewRemarks || "");
 
     if (!reviewRemarks) {
       throw new Error("Review findings/remarks are required.");
     }
 
-    await docRef.update({
-      items:
-        canonicalItems,
+    await db.runTransaction(async (transaction) => {
+      const doc = await transaction.get(docRef);
 
-      totalQuantity,
+      if (!doc.exists) {
+        throw new Error("Seedling request not found.");
+      }
 
-      purpose:
-        cleanString(
-          reviewData.purpose
-        ),
+      if (doc.data().status !== "Pending") {
+        throw new Error("Only pending requests can be reviewed.");
+      }
 
-      plantingLocation:
-        cleanString(
-          reviewData
-            .plantingLocation
-        ),
+      const canonicalItems = [];
 
-      preferredReleaseDate:
-        reviewData
-          .preferredReleaseDate,
-      reviewedBy: reviewData.reviewedBy,
-      reviewedByName: reviewData.reviewedByName || "",
-      reviewRemarks,
-      reviewedAt: now,
-      status: "Reviewed",
-      updatedAt: now,
+      // Verify inventory existence, not availableQuantity.
+      for (const item of reviewItems) {
+        const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
+        const inventoryDoc = await transaction.get(inventoryRef);
+
+        if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
+          throw new Error("One of the linked seedling inventory records was not found.");
+        }
+
+        const inventoryData = inventoryDoc.data();
+        canonicalItems.push({
+          inventoryId: inventoryDoc.id,
+          species: cleanString(inventoryData.species),
+          scientificName: cleanString(inventoryData.scientificName),
+          category: cleanString(inventoryData.category),
+          quantity: item.quantity,
+        });
+      }
+
+      const totalQuantity = canonicalItems.reduce(
+        (total, item) => total + item.quantity,
+        0
+      );
+      const now = Timestamp.now();
+
+      transaction.update(docRef, {
+        items: canonicalItems,
+        totalQuantity,
+        purpose: cleanString(reviewData.purpose),
+        plantingLocation: cleanString(reviewData.plantingLocation),
+        preferredReleaseDate: reviewData.preferredReleaseDate,
+        reviewedBy: reviewData.reviewedBy,
+        reviewedByName: reviewData.reviewedByName || "",
+        reviewRemarks,
+        reviewedAt: now,
+        status: "Reviewed",
+        updatedAt: now,
+      });
     });
 
     const updatedDoc =
@@ -663,8 +624,7 @@ const approveSeedlingRequest =
 
         const inventoryRecords = [];
 
-        // For each requested item, read inventory and compute approvedQuantity = min(requested, available).
-        // Do not reject approval if requested > available; approve only what can be accommodated.
+        // Read inventory metadata; stock is checked and deducted at release.
         for (const item of requestItems) {
           const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
 
@@ -678,11 +638,9 @@ const approveSeedlingRequest =
 
           const inventoryData = inventoryDoc.data();
 
-          const availableQuantity = Number(inventoryData.availableQuantity || 0);
-
           const requestedQty = Number(item.quantity || 0);
 
-          const approvedQuantity = Math.max(0, Math.min(requestedQty, availableQuantity));
+          const approvedQuantity = requestedQty;
 
           inventoryRecords.push({ item, inventoryRef, inventoryData, approvedQuantity });
         }
@@ -838,36 +796,13 @@ const approveSeedlingRequest =
             }
           );
 
-        // ========================================
-        // RESERVE ALL INVENTORY ITEMS
-        // ========================================
-
-        for (const record of inventoryRecords) {
-          const { item, inventoryRef, inventoryData, approvedQuantity } = record;
-
-          if (approvedQuantity <= 0) {
-            // Nothing to reserve for this inventory item.
-            continue;
-          }
-
-          const availableQuantity = Number(inventoryData.availableQuantity || 0);
-
-          const reservedQuantity = Number(inventoryData.reservedQuantity || 0);
-
-          const newAvailable = availableQuantity - approvedQuantity;
-
-          const newReserved = reservedQuantity + approvedQuantity;
-
-          const lowStockThreshold = Number(inventoryData.lowStockThreshold ?? 20);
-
-          transaction.update(inventoryRef, {
-            availableQuantity: newAvailable,
-            reservedQuantity: newReserved,
-            status: calculateInventoryStatus(newAvailable, lowStockThreshold),
-            updatedBy: approvedBy,
-            updatedAt: now,
-          });
+        if (Number(proposal.expectedParticipants || 0) > 0) {
+          createInvitationInTransaction(transaction, eventId, id, now);
         }
+
+        // ========================================
+        // Approval schedules the event without moving inventory.
+        // ========================================
 
         // ========================================
         // UPDATE REQUEST
@@ -882,8 +817,8 @@ const approveSeedlingRequest =
           decisionAt: now,
           eventId,
           eventCreated: true,
-          inventoryDeducted: true,
-          inventoryReserved: true,
+          inventoryDeducted: false,
+          inventoryReserved: false,
           approvedItems,
           updatedAt: now,
         });
@@ -895,6 +830,7 @@ const approveSeedlingRequest =
           message: "Your seedling request has been approved. Please wait for release updates.",
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
+          relatedEventId: eventId,
           createdAt: now,
         });
       }
@@ -1008,258 +944,154 @@ const rejectSeedlingRequest =
 // Available is NOT deducted again.
 // ========================================
 
-const releaseSeedlingRequest =
-  async (
-    id,
-    releasedBy
-  ) => {
-    const requestRef =
-      db
-        .collection(COLLECTION)
-        .doc(id);
+const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
+  const submittedItems = releaseData?.items;
+  if (!Array.isArray(submittedItems) || submittedItems.length === 0) {
+    throw new Error("Release items are required.");
+  }
 
-    await db.runTransaction(
-      async (transaction) => {
-        // ========================================
-        // REQUEST
-        // ========================================
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const requestDoc = await transaction.get(requestRef);
+    if (!requestDoc.exists) throw new Error("Seedling request not found.");
+    const request = requestDoc.data();
+    if (request.inventoryReleased === true) return;
+    if (request.status !== "Approved") {
+      throw new Error("Only approved requests can be released.");
+    }
+    if (!request.eventId) throw new Error("Approved request has no linked event.");
 
-        const requestDoc =
-          await transaction.get(
-            requestRef
-          );
-
-        if (
-          !requestDoc.exists
-        ) {
-          throw new Error(
-            "Seedling request not found."
-          );
-        }
-
-        const currentRequest =
-          requestDoc.data();
-
-        if (currentRequest.status === "Released" && currentRequest.inventoryReleased === true) {
-          return;
-        }
-
-        if (
-          currentRequest.status !==
-          "Approved"
-        ) {
-          throw new Error(
-            "Only approved requests can be released."
-          );
-        }
-
-        if (
-          currentRequest
-            .inventoryReserved !==
-            true &&
-          currentRequest
-            .inventoryDeducted !==
-            true
-        ) {
-          throw new Error(
-            "Inventory was not reserved for this approved request."
-          );
-        }
-
-        if (
-          currentRequest
-            .inventoryReleased ===
-          true
-        ) {
-          throw new Error(
-            "Seedlings have already been released for this request."
-          );
-        }
-
-        const requestItems =
-          Array.isArray(currentRequest.approvedItems) && currentRequest.approvedItems.length > 0
-            ? currentRequest.approvedItems
-            : normalizeRequestItems(currentRequest);
-
-        validateItemStructure(
-          requestItems
-        );
-
-        // ========================================
-        // READ ALL INVENTORY FIRST
-        // ========================================
-
-        const inventoryRecords =
-          [];
-
-        for (
-          const item of requestItems
-        ) {
-          const inventoryRef =
-            db
-              .collection(
-                INVENTORY_COLLECTION
-              )
-              .doc(
-                item.inventoryId
-              );
-
-          const inventoryDoc =
-            await transaction.get(
-              inventoryRef
-            );
-
-          if (
-            !inventoryDoc.exists ||
-            inventoryDoc.data()
-              .isDeleted === true
-          ) {
-            throw new Error(
-              `Linked seedling inventory for ${item.species || "a requested item"} was not found.`
-            );
-          }
-
-          const inventoryData =
-            inventoryDoc.data();
-
-          const reservedQuantity =
-            Number(
-              inventoryData
-                .reservedQuantity ||
-                0
-            );
-
-          const quantityToRelease = Number(item.quantity || 0);
-
-          if (reservedQuantity < quantityToRelease) {
-            throw new Error(
-              `Reserved ${inventoryData.species} stock is inconsistent with this request.`
-            );
-          }
-
-          inventoryRecords.push({
-            item,
-            inventoryRef,
-            inventoryData,
-          });
-        }
-
-        const now =
-          Timestamp.now();
-
-        // ========================================
-        // RESERVED -> DISTRIBUTED
-        // ========================================
-
-        for (
-          const record of inventoryRecords
-        ) {
-          const {
-            item,
-            inventoryRef,
-            inventoryData,
-          } = record;
-          const quantityToRelease = Number(item.quantity || 0);
-
-          const reservedQuantity =
-            Number(
-              inventoryData
-                .reservedQuantity ||
-                0
-            );
-
-          const distributedQuantity =
-            Number(
-              inventoryData
-                .distributedQuantity ||
-                0
-            );
-
-          transaction.update(
-            inventoryRef,
-            {
-              reservedQuantity: reservedQuantity - quantityToRelease,
-
-              distributedQuantity: distributedQuantity + quantityToRelease,
-
-              updatedBy:
-                releasedBy,
-
-              updatedAt:
-                now,
-            }
-          );
-        }
-
-        // ========================================
-        // DISTRIBUTION RECORD
-        // ========================================
-
-        createDistributionRecordInTransaction(
-          transaction,
-          {
-            requestId:
-              id,
-
-            requestData: {
-              ...currentRequest,
-              items: requestItems,
-            },
-
-            releasedBy,
-
-            releasedAt:
-              now,
-          }
-        );
-
-        // ========================================
-        // REQUEST -> RELEASED
-        // ========================================
-
-        transaction.update(
-          requestRef,
-          {
-            status:
-              "Released",
-
-            releasedBy,
-
-            releasedAt:
-              now,
-
-            inventoryReleased:
-              true,
-
-            distributionId:
-              id,
-
-            updatedAt:
-              now,
-          }
-        );
-        createNotificationInTransaction(transaction, {
-          recipientUserId: currentRequest.participantId,
-          type: "request_released",
-          title: "Seedlings released",
-          message: "Seedlings for your request have been released.",
-          relatedRecordType: "seedlingRequest",
-          relatedRecordId: id,
-          createdAt: now,
-        });
+    const requestedItems = normalizeRequestItems(request);
+    validateItemStructure(requestedItems);
+    const requestedById = new Map(requestedItems.map((item) => [item.inventoryId, item]));
+    const releasedById = new Map();
+    for (const item of submittedItems) {
+      const inventoryId = cleanString(item?.inventoryId);
+      const releasedQuantity = Number(item?.releasedQuantity);
+      if (!requestedById.has(inventoryId) || releasedById.has(inventoryId)) {
+        throw new Error("Release items must match the request exactly.");
       }
-    );
+      if (!Number.isInteger(releasedQuantity) || releasedQuantity <= 0) {
+        throw new Error("Released quantity must be a positive whole number.");
+      }
+      const requestedQuantity = Number(requestedById.get(inventoryId).quantity);
+      if (releasedQuantity > requestedQuantity) {
+        throw new Error("Released quantity cannot exceed requested quantity.");
+      }
+      const shortReleaseReason = cleanString(item?.shortReleaseReason);
+      if (releasedQuantity < requestedQuantity && !shortReleaseReason) {
+        throw new Error("A short-release reason is required.");
+      }
+      releasedById.set(inventoryId, { releasedQuantity, shortReleaseReason });
+    }
+    if (releasedById.size !== requestedById.size) {
+      throw new Error("Release items must match the request exactly.");
+    }
 
-    const updatedDoc =
-      await requestRef.get();
+    const eventRef = db.collection("events").doc(request.eventId);
+    const distributionRef = db.collection("distributions").doc(id);
+    const eventDoc = await transaction.get(eventRef);
+    const distributionDoc = await transaction.get(distributionRef);
+    if (!eventDoc.exists || eventDoc.data().sourceRequestId !== id) {
+      throw new Error("Linked planting event not found.");
+    }
+    if (distributionDoc.exists) throw new Error("Seedlings have already been released for this request.");
 
-    return {
-      id:
-        updatedDoc.id,
+    const inventoryRows = [];
+    for (const requested of requestedItems) {
+      const ref = db.collection(INVENTORY_COLLECTION).doc(requested.inventoryId);
+      const doc = await transaction.get(ref);
+      if (!doc.exists || doc.data().isDeleted === true) {
+        throw new Error("Linked seedling inventory was not found.");
+      }
+      const stock = doc.data();
+      const entered = releasedById.get(requested.inventoryId);
+      const isLegacyReserved = request.inventoryReserved === true;
+      const available = Number(stock.availableQuantity || 0);
+      const reserved = Number(stock.reservedQuantity || 0);
+      if (isLegacyReserved) {
+        if (reserved < Number(requested.quantity)) {
+          throw new Error("Reserved inventory is inconsistent with this request.");
+        }
+      } else if (entered.releasedQuantity > available) {
+        throw new Error("Released quantity exceeds current available stock.");
+      }
+      inventoryRows.push({ ref, stock, requested, entered, isLegacyReserved });
+    }
 
-      ...updatedDoc.data(),
-    };
-  };
+    const now = Timestamp.now();
+    const releaseItems = inventoryRows.map(({ requested, entered, stock }) => ({
+      inventoryId: requested.inventoryId,
+      species: cleanString(stock.species),
+      scientificName: cleanString(stock.scientificName),
+      category: cleanString(stock.category),
+      requestedQuantity: Number(requested.quantity),
+      releasedQuantity: entered.releasedQuantity,
+      quantity: entered.releasedQuantity,
+      difference: Number(requested.quantity) - entered.releasedQuantity,
+      releaseType: entered.releasedQuantity === Number(requested.quantity) ? "Complete" : "Partial",
+      shortReleaseReason: entered.shortReleaseReason,
+    }));
+    const totalQuantityReleased = releaseItems.reduce((sum, item) => sum + item.releasedQuantity, 0);
+    for (const { ref, stock, requested, entered, isLegacyReserved } of inventoryRows) {
+      const available = Number(stock.availableQuantity || 0);
+      const reserved = Number(stock.reservedQuantity || 0);
+      const released = entered.releasedQuantity;
+      const remainder = Number(requested.quantity) - released;
+      const newAvailable = isLegacyReserved ? available + remainder : available - released;
+      transaction.update(ref, {
+        availableQuantity: newAvailable,
+        reservedQuantity: isLegacyReserved ? reserved - Number(requested.quantity) : reserved,
+        distributedQuantity: Number(stock.distributedQuantity || 0) + released,
+        status: calculateInventoryStatus(newAvailable, Number(stock.lowStockThreshold ?? 20)),
+        updatedBy: releasedBy,
+        updatedAt: now,
+      });
+    }
+
+    createDistributionRecordInTransaction(transaction, {
+      requestId: id,
+      requestData: { ...request, items: releaseItems },
+      releasedBy,
+      releasedAt: now,
+    });
+    transaction.update(eventRef, {
+      seedlingItems: releaseItems.map(({ inventoryId, species, scientificName, category, quantity }) =>
+        ({ inventoryId, species, scientificName, category, quantity })),
+      seedlingTotalQuantity: totalQuantityReleased,
+      seedlingQuantity: totalQuantityReleased,
+      recordedSeedlingQuantity: 0,
+      remainingSeedlingQuantity: totalQuantityReleased,
+      allocationReleasedAt: now,
+      updatedAt: now,
+    });
+    transaction.update(requestRef, {
+      inventoryReleased: true,
+      inventoryReserved: false,
+      inventoryDeducted: true,
+      releasedItems: releaseItems,
+      totalQuantityReleased,
+      releaseType: releaseItems.every((item) => item.releaseType === "Complete") ? "Complete" : "Partial",
+      releasedBy,
+      releasedAt: now,
+      distributionId: id,
+      updatedAt: now,
+    });
+    createNotificationInTransaction(transaction, {
+      recipientUserId: request.participantId,
+      type: "request_released",
+      title: "Seedlings released",
+      message: "Seedlings for your request have been released.",
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      relatedEventId: request.eventId,
+      relatedDistributionId: id,
+      createdAt: now,
+    });
+  });
+  const updatedDoc = await requestRef.get();
+  return { id: updatedDoc.id, ...updatedDoc.data() };
+};
 
 module.exports = {
   createSeedlingRequest,

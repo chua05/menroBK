@@ -1,4 +1,5 @@
 const { db } = require("../config/firebase");
+const { createNotificationInTransaction } = require("./notification.service");
 
 const {
   createVerificationLogInTransaction,
@@ -63,6 +64,41 @@ const reportCollection =
   db.collection(
     REPORT_COLLECTION
   );
+
+const reportRefFor = (id) => {
+  if (typeof id !== "string" || !id.trim() || id.includes("/")) {
+    throw new Error("Invalid planting report ID.");
+  }
+  return reportCollection.doc(id);
+};
+
+// Legacy unfinalized records are presented as pending without rewriting Firestore.
+const LEGACY_PENDING_STATUSES = [
+  "Passed Automated Check",
+  "Flagged",
+  "Reviewed",
+];
+
+const workflowStatus = (status) =>
+  LEGACY_PENDING_STATUSES.includes(status)
+    ? "Pending Review"
+    : status;
+
+const withWorkflowStatus = (doc) => {
+  const data = doc.data();
+  const legacyAutomatedStatus = ["Flagged", "Passed Automated Check"]
+    .includes(data.verificationStatus)
+    ? data.verificationStatus
+    : undefined;
+  return {
+    id: doc.id,
+    ...data,
+    verificationStatus: workflowStatus(data.verificationStatus),
+    ...(data.automatedVerificationStatus === undefined && legacyAutomatedStatus
+      ? { automatedVerificationStatus: legacyAutomatedStatus }
+      : {}),
+  };
+};
 
 
 // --------------------------------
@@ -1169,17 +1205,16 @@ if (submittedEventId) {
       suspiciousFlags,
 
 
-      // Keep original automated
-      // result even after Staff/Admin
-      // changes verificationStatus.
+      // Keep the original automated result after Staff makes a final decision.
       automatedVerificationStatus:
         automatedStatus,
 
       verificationStatus:
-        automatedStatus,
+        "Pending Review",
 
 
       reviewedBy: "",
+      reviewedByName: "",
       reviewRemarks: "",
       reviewedAt: null,
 
@@ -1262,14 +1297,7 @@ const getAllPlantingReports = async (
     await reportCollection.get();
 
   let reports =
-    snapshot.docs.map(
-      (doc) => ({
-        id:
-          doc.id,
-
-        ...doc.data(),
-      })
-    );
+    snapshot.docs.map(withWorkflowStatus);
 
   if (verificationStatus) {
     reports =
@@ -1328,8 +1356,7 @@ const getAllPlantingReports = async (
 const getPlantingReportById =
   async (id) => {
     const doc =
-      await reportCollection
-        .doc(id)
+      await reportRefFor(id)
         .get();
 
     if (!doc.exists) {
@@ -1338,12 +1365,7 @@ const getPlantingReportById =
       );
     }
 
-    return {
-      id:
-        doc.id,
-
-      ...doc.data(),
-    };
+    return withWorkflowStatus(doc);
   };
 
 
@@ -1363,14 +1385,7 @@ const getPlantingReportsByParticipantId =
         .get();
 
     const reports =
-      snapshot.docs.map(
-        (doc) => ({
-          id:
-            doc.id,
-
-          ...doc.data(),
-        })
-      );
+      snapshot.docs.map(withWorkflowStatus);
 
     reports.sort((a, b) => {
       const aSeconds =
@@ -1394,138 +1409,18 @@ const getPlantingReportsByParticipantId =
 
 
 // --------------------------------
-// STAFF REVIEW PLANTING REPORT
-// --------------------------------
-const reviewPlantingReport =
-  async (
-    id,
-    reviewedBy,
-    remarks
-  ) => {
-    const reportRef =
-      reportCollection.doc(id);
-
-    await db.runTransaction(
-      async (transaction) => {
-        const reportDoc =
-          await transaction.get(
-            reportRef
-          );
-
-        if (
-          !reportDoc.exists
-        ) {
-          throw new Error(
-            "Planting report not found."
-          );
-        }
-
-        const currentReport =
-          reportDoc.data();
-
-        const allowedStatuses = [
-          "Passed Automated Check",
-          "Flagged",
-        ];
-
-        if (
-          !allowedStatuses.includes(
-            currentReport
-              .verificationStatus
-          )
-        ) {
-          throw new Error(
-            "Only reports awaiting staff review can be reviewed."
-          );
-        }
-
-        const previousStatus =
-          currentReport
-            .verificationStatus;
-
-        const now =
-          Timestamp.now();
-
-        transaction.update(
-          reportRef,
-          {
-            automatedVerificationStatus:
-              currentReport
-                .automatedVerificationStatus ||
-              previousStatus,
-
-            verificationStatus:
-              "Reviewed",
-
-            reviewedBy,
-
-            reviewRemarks:
-              remarks?.trim() ||
-              "",
-
-            reviewedAt:
-              now,
-
-            updatedAt:
-              now,
-          }
-        );
-
-        createVerificationLogInTransaction(
-          transaction,
-          {
-            plantingReportId:
-              id,
-
-            action:
-              "Staff Review",
-
-            previousStatus,
-
-            newStatus:
-              "Reviewed",
-
-            performedBy:
-              reviewedBy,
-
-            performedByRole:
-              "staff",
-
-            remarks:
-              remarks?.trim() ||
-              "",
-
-            createdAt:
-              now,
-          }
-        );
-      }
-    );
-
-    const updatedDoc =
-      await reportRef.get();
-
-    return {
-      id:
-        updatedDoc.id,
-
-      ...updatedDoc.data(),
-    };
-  };
-
-
-// --------------------------------
-// ADMIN APPROVE
+// STAFF APPROVE
 // PLANTING REPORT
 // --------------------------------
 const approvePlantingReport =
   async (
     id,
     approvedBy,
-    remarks
+    remarks,
+    reviewedByName
   ) => {
     const reportRef =
-      reportCollection.doc(id);
+      reportRefFor(id);
 
     await db.runTransaction(
       async (transaction) => {
@@ -1545,13 +1440,9 @@ const approvePlantingReport =
         const currentReport =
           reportDoc.data();
 
-        if (
-          currentReport
-            .verificationStatus !==
-          "Reviewed"
-        ) {
+        if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
           throw new Error(
-            "Only reviewed planting reports can be approved."
+            "Only pending review planting reports can be approved."
           );
         }
 
@@ -1563,6 +1454,10 @@ const approvePlantingReport =
           {
             verificationStatus:
               "Approved",
+
+            reviewedBy: approvedBy,
+            reviewedByName: reviewedByName || "",
+            reviewedAt: now,
 
             approvedBy,
 
@@ -1594,10 +1489,10 @@ const approvePlantingReport =
               id,
 
             action:
-              "Admin Approval",
+              "Staff Approval",
 
             previousStatus:
-              "Reviewed",
+              currentReport.verificationStatus,
 
             newStatus:
               "Approved",
@@ -1606,7 +1501,7 @@ const approvePlantingReport =
               approvedBy,
 
             performedByRole:
-              "admin",
+              "staff",
 
             remarks:
               remarks?.trim() ||
@@ -1616,33 +1511,41 @@ const approvePlantingReport =
               now,
           }
         );
+        createNotificationInTransaction(transaction, {
+          recipientUserId: currentReport.participantId,
+          type: "planting_report_approved",
+          title: "Planting report approved",
+          message: "Your planting report has been approved.",
+          relatedRecordType: "plantingReport",
+          relatedRecordId: id,
+          createdAt: now,
+        });
       }
     );
 
     const updatedDoc =
       await reportRef.get();
 
-    return {
-      id:
-        updatedDoc.id,
-
-      ...updatedDoc.data(),
-    };
+    return withWorkflowStatus(updatedDoc);
   };
 
 
 // --------------------------------
-// ADMIN REJECT
+// STAFF REJECT
 // PLANTING REPORT
 // --------------------------------
 const rejectPlantingReport =
   async (
     id,
     rejectedBy,
-    remarks
+    remarks,
+    reviewedByName
   ) => {
+    if (typeof remarks !== "string" || !remarks.trim()) {
+      throw new Error("Rejection reason is required.");
+    }
     const reportRef =
-      reportCollection.doc(id);
+      reportRefFor(id);
 
     await db.runTransaction(
       async (transaction) => {
@@ -1662,13 +1565,9 @@ const rejectPlantingReport =
         const currentReport =
           reportDoc.data();
 
-        if (
-          currentReport
-            .verificationStatus !==
-          "Reviewed"
-        ) {
+        if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
           throw new Error(
-            "Only reviewed planting reports can be rejected."
+            "Only pending review planting reports can be rejected."
           );
         }
 
@@ -1681,11 +1580,14 @@ const rejectPlantingReport =
             verificationStatus:
               "Rejected",
 
+            reviewedBy: rejectedBy,
+            reviewedByName: reviewedByName || "",
+            reviewedAt: now,
+
             rejectedBy,
 
             rejectionRemarks:
-              remarks?.trim() ||
-              "",
+              remarks.trim(),
 
             rejectedAt:
               now,
@@ -1711,10 +1613,10 @@ const rejectPlantingReport =
               id,
 
             action:
-              "Admin Rejection",
+              "Staff Rejection",
 
             previousStatus:
-              "Reviewed",
+              currentReport.verificationStatus,
 
             newStatus:
               "Rejected",
@@ -1723,28 +1625,31 @@ const rejectPlantingReport =
               rejectedBy,
 
             performedByRole:
-              "admin",
+              "staff",
 
             remarks:
-              remarks?.trim() ||
-              "",
+              remarks.trim(),
 
             createdAt:
               now,
           }
         );
+        createNotificationInTransaction(transaction, {
+          recipientUserId: currentReport.participantId,
+          type: "planting_report_rejected",
+          title: "Planting report rejected",
+          message: `Your planting report was rejected. Reason: ${remarks.trim()}`,
+          relatedRecordType: "plantingReport",
+          relatedRecordId: id,
+          createdAt: now,
+        });
       }
     );
 
     const updatedDoc =
       await reportRef.get();
 
-    return {
-      id:
-        updatedDoc.id,
-
-      ...updatedDoc.data(),
-    };
+    return withWorkflowStatus(updatedDoc);
   };
 
 
@@ -1754,8 +1659,7 @@ const rejectPlantingReport =
 const getPlantingReportVerificationLogs =
   async (id) => {
     const reportDoc =
-      await reportCollection
-        .doc(id)
+      await reportRefFor(id)
         .get();
 
     if (
@@ -1777,7 +1681,6 @@ module.exports = {
   getAllPlantingReports,
   getPlantingReportById,
   getPlantingReportsByParticipantId,
-  reviewPlantingReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,

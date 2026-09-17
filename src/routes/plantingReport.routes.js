@@ -7,7 +7,6 @@ const {
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
-  reviewReport,
   approveReport,
   rejectReport,
   getVerificationLogs,
@@ -138,41 +137,31 @@ router.get(
 );
 
 
-// ADMIN AND STAFF VIEW BY ID
+// ADMIN AND STAFF VIEW ANY REPORT; PARTICIPANTS VIEW THEIR OWN
 router.get(
   "/:id",
   verifyToken,
   authorizeRoles(
     "admin",
-    "staff"
+    "staff",
+    "participant"
   ),
   getPlantingReport
 );
 
-
-// STAFF REVIEW REPORT
-router.patch(
-  "/:id/review",
-  verifyToken,
-  authorizeRoles("staff"),
-  reviewReport
-);
-
-
-// ADMIN APPROVE REPORT
+// STAFF FINAL APPROVAL
 router.patch(
   "/:id/approve",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   approveReport
 );
 
-
-// ADMIN REJECT REPORT
+// STAFF FINAL REJECTION
 router.patch(
   "/:id/reject",
   verifyToken,
-  authorizeRoles("admin"),
+  authorizeRoles("staff"),
   rejectReport
 );
 

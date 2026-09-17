@@ -40,6 +40,11 @@ const normalizeRequestItems = (
           Number(
             item.quantity || 0
           ),
+        requestedQuantity: Number(item.requestedQuantity ?? item.quantity ?? 0),
+        releasedQuantity: Number(item.releasedQuantity ?? item.quantity ?? 0),
+        difference: Number(item.difference ?? 0),
+        releaseType: item.releaseType || "Complete",
+        shortReleaseReason: item.shortReleaseReason || "",
       })
     );
   }
