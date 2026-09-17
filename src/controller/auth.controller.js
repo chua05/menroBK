@@ -12,7 +12,7 @@ const verifyUser = async (req, res) => {
   try {
 
     const profile = await authService.createUserProfile(
-      req.user
+      req.firebaseUser
     );
 
     return sendSuccess(

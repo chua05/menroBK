@@ -25,6 +25,8 @@ const {
 
   verifyToken,
 
+  verifyTokenForBootstrap,
+
 } = require(
   "../middleware/auth.middleware"
 );
@@ -71,7 +73,7 @@ router.post(
 
   "/verify",
 
-  verifyToken,
+  verifyTokenForBootstrap,
 
   verifyUser
 
