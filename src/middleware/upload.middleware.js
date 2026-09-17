@@ -75,6 +75,20 @@ const uploadPlantingPhoto = multer({
     imageFileFilter,
 });
 
+const uploadContributionEvidence = (req, res, next) =>
+  uploadPlantingPhoto.array("photos", 10)(req, res, (error) => {
+    if (!error) return next();
+    return res.status(400).json({
+      success: false,
+      message: error.code === "LIMIT_FILE_SIZE"
+        ? "Each planting evidence photo must not exceed 10 MB."
+        : error.code === "LIMIT_UNEXPECTED_FILE"
+          ? "A maximum of 10 planting evidence photos is allowed."
+          : error.message || "Invalid planting evidence photos.",
+    });
+  });
+
 module.exports = {
   uploadPlantingPhoto,
+  uploadContributionEvidence,
 };

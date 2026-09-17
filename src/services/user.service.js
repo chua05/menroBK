@@ -99,7 +99,7 @@ const updateUserStatus = async (uid, status) => {
   }
 
   await userRef.update({
-    status,
+    status: normalizedStatus,
     updatedAt: new Date(),
   });
 

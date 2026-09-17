@@ -7,6 +7,7 @@ const {
   getAllSites,
   getArchivedSites,
   getSiteById,
+  updateSite,
   archiveSite,
   restoreSite,
 } = require(
@@ -104,6 +105,13 @@ router.get(
   "/:id",
   verifyToken,
   getSiteById
+);
+
+router.patch(
+  "/:id",
+  verifyToken,
+  authorizeRoles("admin", "staff"),
+  updateSite
 );
 
 module.exports = router;

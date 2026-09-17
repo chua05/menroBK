@@ -4,6 +4,8 @@ const { authorizeRoles } = require("../middleware/role.middleware");
 const { sendSuccess, sendError } = require("../utils/response.util");
 const guest = require("../services/guestEvent.service");
 const contributions = require("../services/plantingContribution.service");
+const { attachEvidence } = require("../services/plantingEvidence.service");
+const { uploadContributionEvidence } = require("../middleware/upload.middleware");
 
 router.get("/invitation/:eventId", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -26,12 +28,18 @@ router.get("/session", async (req, res) => {
 });
 
 router.get("/session/contributions", async (req, res) => {
+  let session;
   try {
-    const session = await guest.validateGuestSession(req.headers.authorization);
+    session = await guest.validateGuestSession(req.headers.authorization);
+  } catch {
+    return sendError(res, 401, "Invalid guest session.");
+  }
+  try {
     const data = await contributions.getOwnContributions(session.eventId, session.participantId);
     return sendSuccess(res, 200, "Contributions retrieved", data);
   } catch (error) {
-    return sendError(res, 401, "Invalid guest session.");
+    console.error(error);
+    return sendError(res, 500, "Failed to retrieve contributions.");
   }
 });
 
@@ -54,6 +62,27 @@ router.post("/session/contributions", async (req, res) => {
     }
     console.error(error);
     return sendError(res, 500, "Failed to record contribution.");
+  }
+});
+
+router.post("/session/contributions/:id/evidence", async (req, res, next) => {
+  try {
+    req.guestSession = await guest.validateGuestSession(req.headers.authorization);
+    return next();
+  } catch {
+    return sendError(res, 401, "Invalid guest session.");
+  }
+}, uploadContributionEvidence, async (req, res) => {
+  try {
+    const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
+      req.params.id, req.files, req.body);
+    return sendSuccess(res, 200, "Planting evidence recorded", data);
+  } catch (error) {
+    const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates/i
+      .test(error.message);
+    if (!expected) console.error(error);
+    return sendError(res, expected ? 400 : 500,
+      expected ? error.message : "Failed to record planting evidence.");
   }
 });
 

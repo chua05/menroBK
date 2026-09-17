@@ -12,6 +12,7 @@ function table(name) {
 function reference(name, id) {
   return {
     id,
+    collectionName: name,
     async get() {
       const value = table(name).get(id);
       return { id, exists: value !== undefined, data: () => value };
@@ -45,11 +46,12 @@ const db = {
       get: (ref) => ref.get(),
       update(ref, value) { writes.push(["update", ref, value]); },
       set(ref, value) { writes.push(["set", ref, value]); },
+      create(ref, value) { writes.push(["create", ref, value]); },
     };
     await callback(transaction);
     for (const [operation, ref, value] of writes) {
       const target = table(ref === undefined ? "" : ref.collectionName || "plantingReports");
-      if (operation === "set") table("verificationLogs").set(ref.id, value);
+      if (operation === "set" || operation === "create") table(ref.collectionName).set(ref.id, value);
       else target.set(ref.id, { ...target.get(ref.id), ...value });
     }
   },
@@ -65,6 +67,8 @@ const service = require("../src/services/plantingReport.service");
 const routes = require("../src/routes/plantingReport.routes");
 const controller = require("../src/controller/plantingReport.controller");
 const inventoryRoutes = require("../src/routes/inventory.routes");
+const eventRoutes = require("../src/routes/event.routes");
+const guestRoutes = require("../src/routes/guestEvent.routes");
 
 function seed(id, status = "Pending Review") {
   table("plantingReports").set(id, {
@@ -168,4 +172,16 @@ test("specific inventory archived route precedes item ID route", () => {
   const paths = inventoryRoutes.stack.filter((layer) => layer.route?.methods.get)
     .map((layer) => layer.route.path);
   assert.ok(paths.indexOf("/archived") < paths.indexOf("/:id"));
+});
+
+test("Staff and Admin can read event participants; guests have no decision route", async () => {
+  const route = eventRoutes.stack.find((layer) =>
+    layer.route?.path === "/:id/participants" && layer.route.methods.get);
+  assert.ok(route);
+  const roleGuard = route.route.stack[1].handle;
+  assert.equal((await authorize(roleGuard, "staff")).allowed, true);
+  assert.equal((await authorize(roleGuard, "admin")).allowed, true);
+  assert.equal((await authorize(roleGuard, "participant")).result.code, 403);
+  assert.equal(guestRoutes.stack.some((layer) =>
+    /approve|reject/.test(layer.route?.path || "")), false);
 });

@@ -9,6 +9,7 @@ const {
 } = require(
   "../services/plantingReport.service"
 );
+const { finalizeParent } = require("../services/parentPlantingReport.service");
 
 
 // --------------------------------
@@ -69,6 +70,7 @@ const submitPlantingReport = async (
 
     const {
       distributionId,
+      inventoryId,
       siteId,
 
       participantType,
@@ -263,6 +265,7 @@ const submitPlantingReport = async (
       await createPlantingReport(
         {
           distributionId,
+          inventoryId,
           siteId,
           participantId,
 
@@ -369,6 +372,12 @@ const submitPlantingReport = async (
       "The uploaded file is not a valid image.",
       "The selected planting site is inactive.",
       "The selected planting site has invalid coordinates.",
+      "Selected event does not match the released distribution.",
+      "Select a released seedling item for this submission.",
+      "Seedling item has not been released for this event.",
+      "Quantity planted exceeds the remaining event allocation.",
+      "Requester has already submitted planting evidence for this event.",
+      "This planting report has already been finalized.",
       "Latitude must be between -90 and 90.",
       "Longitude must be between -180 and 180.",
     ];
@@ -409,7 +418,7 @@ const getPlantingReports = async (
       distributionId,
     } = req.query;
 
-    if (verificationStatus && !["Pending Review", "Approved", "Rejected"].includes(verificationStatus)) {
+    if (verificationStatus && !["Draft", "Pending Review", "Approved", "Rejected"].includes(verificationStatus)) {
       return res.status(400).json({ success: false, message: "Invalid planting report status filter." });
     }
 
@@ -494,6 +503,21 @@ const getMyPlantingReports =
       });
     }
   };
+
+const finalizeReport = async (req, res) => {
+  try {
+    const report = await finalizeParent(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, message: "Planting report submitted for review.", data: report });
+  } catch (error) {
+    const expected = ["Planting report not found.", "Only draft planting reports can be finalized.",
+      "The report has no recorded planting contributions.",
+      "Every planting contribution needs evidence photos before finalization."].includes(error.message);
+    if (!expected) console.error(error);
+    return res.status(error.message === "Planting report not found." ? 404 : expected ? 409 : 500).json({
+      success: false, message: expected ? error.message : "Failed to finalize planting report.",
+    });
+  }
+};
 
 
 // STAFF APPROVE REPORT
@@ -648,6 +672,7 @@ module.exports = {
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
+  finalizeReport,
   approveReport,
   rejectReport,
   getVerificationLogs,

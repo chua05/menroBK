@@ -29,6 +29,7 @@ const {
 );
 const { createNotificationInTransaction } = require("./notification.service");
 const { createInvitationInTransaction } = require("./guestEvent.service");
+const { parentForEventInTransaction } = require("./parentPlantingReport.service");
 
 const COLLECTION =
   "seedlingRequests";
@@ -310,6 +311,11 @@ const createSeedlingRequest =
     const site = await siteService.getSiteById(
       plantingSiteId
     );
+
+    if (normalizeBarangay(site.barangay) !==
+        normalizeBarangay(requestData.eventProposal?.barangay)) {
+      throw new Error("Selected planting site does not belong to the event barangay.");
+    }
 
     if (String(site.status || "").trim().toLowerCase() !== "active") {
       throw new Error("Selected planting site is archived.");
@@ -1033,6 +1039,9 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       shortReleaseReason: entered.shortReleaseReason,
     }));
     const totalQuantityReleased = releaseItems.reduce((sum, item) => sum + item.releasedQuantity, 0);
+    await parentForEventInTransaction(transaction, request.eventId, {
+      ...eventDoc.data(), seedlingTotalQuantity: totalQuantityReleased,
+    }, now);
     for (const { ref, stock, requested, entered, isLegacyReserved } of inventoryRows) {
       const available = Number(stock.availableQuantity || 0);
       const reserved = Number(stock.reservedQuantity || 0);

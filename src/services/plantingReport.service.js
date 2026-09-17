@@ -1,5 +1,6 @@
 const { db } = require("../config/firebase");
 const { createNotificationInTransaction } = require("./notification.service");
+const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
 
 const {
   createVerificationLogInTransaction,
@@ -53,6 +54,8 @@ const SITE_COLLECTION =
 
 const EVENT_COLLECTION =
   "events";
+const contributionCollection = db.collection("plantingContributions");
+const evidenceHashCollection = db.collection("plantingEvidenceHashes");
 
 const SITE_GPS_TOLERANCE_METERS =
   20;
@@ -153,7 +156,12 @@ const findReportByImageHash = async (
   if (
     multiPhotoSnapshot.empty
   ) {
-    return null;
+    const contributionSnapshot = await contributionCollection
+      .where("imageHashes", "array-contains", imageHash).limit(1).get();
+    return contributionSnapshot.empty ? null : {
+      id: contributionSnapshot.docs[0].id,
+      ...contributionSnapshot.docs[0].data(),
+    };
   }
 
   const doc =
@@ -317,10 +325,9 @@ const createPlantingReport = async (
       data.quantityPlanted
     );
 
-  const quantityReleased =
-    Number(
-      distribution.quantityReleased
-    );
+  const quantityReleased = Number(
+    distribution.totalQuantityReleased ?? distribution.quantityReleased
+  );
 
   if (
     !Number.isInteger(
@@ -362,9 +369,7 @@ const createPlantingReport = async (
       data.distributionId
     );
 
-  if (
-    existingDistributionReport
-  ) {
+  if (existingDistributionReport && !distribution.eventId) {
     throw new Error(
       "A planting report already exists for this distribution."
     );
@@ -435,10 +440,10 @@ const createPlantingReport = async (
 // VALIDATE EVENT RELATIONSHIP
 let linkedEvent = null;
 
-const submittedEventId =
-  String(
-    data.eventId || ""
-  ).trim();
+const submittedEventId = String(data.eventId || distribution.eventId || "").trim();
+if (distribution.eventId && submittedEventId !== distribution.eventId) {
+  throw new Error("Selected event does not match the released distribution.");
+}
 
 if (submittedEventId) {
   const eventRef = db
@@ -833,6 +838,7 @@ if (submittedEventId) {
   // 14. SAVE ALL PHOTOS
   // --------------------------------
   const uploadedPhotos = [];
+  let persisted = false;
 
   try {
     for (
@@ -1237,18 +1243,104 @@ if (submittedEventId) {
     // --------------------------------
     // 17. SAVE TO FIRESTORE
     // --------------------------------
-    const docRef =
-      await reportCollection.add(
-        reportData
-      );
+    if (linkedEvent?.sourceRequestId) {
+      const allocatedItems = linkedEvent.seedlingItems || [];
+      const inventoryId = data.inventoryId ||
+        (allocatedItems.length === 1 ? allocatedItems[0].inventoryId : "");
+      if (!inventoryId) throw new Error("Select a released seedling item for this submission.");
+      const allocation = allocatedItems.find((item) => item.inventoryId === inventoryId);
+      if (!allocation || !linkedEvent.allocationReleasedAt) {
+        throw new Error("Seedling item has not been released for this event.");
+      }
+      const contributionRef = contributionCollection.doc();
+      let parentId;
+      await db.runTransaction(async (transaction) => {
+        const eventRef = db.collection(EVENT_COLLECTION).doc(submittedEventId);
+        const eventDoc = await transaction.get(eventRef);
+        if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
+        const event = eventDoc.data();
+        const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
+        if (!event.allocationReleasedAt || !currentAllocation) {
+          throw new Error("Seedling item has not been released for this event.");
+        }
+        const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
+        if (current + quantityPlanted > Number(currentAllocation.quantity)) {
+          throw new Error("Quantity planted exceeds the remaining event allocation.");
+        }
+        parentId = `event_${submittedEventId}`;
+        const existingSubmissions = await transaction.get(contributionCollection
+          .where("reportId", "==", parentId));
+        const hashDocs = await Promise.all(uploadedPhotos.map((photo) =>
+          transaction.get(evidenceHashCollection.doc(photo.imageHash))));
+        if (hashDocs.some((doc) => doc.exists)) {
+          throw new Error("Duplicate planting image detected.");
+        }
+        if (existingSubmissions.docs.some((doc) =>
+          doc.data().contributorId === data.participantId ||
+          doc.data().participantType === "requester")) {
+          throw new Error("Requester has already submitted planting evidence for this event.");
+        }
+        const parent = await parentForEventInTransaction(
+          transaction, submittedEventId, event, now, quantityPlanted
+        );
+        if (parent.data.verificationStatus !== "Draft") {
+          throw new Error("This planting report has already been finalized.");
+        }
+        const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
+        recorded[inventoryId] = current + quantityPlanted;
+        transaction.update(eventRef, {
+          recordedSeedlingsByInventory: recorded,
+          recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + quantityPlanted,
+          remainingSeedlingQuantity: Number(event.seedlingTotalQuantity || 0) -
+            Number(event.recordedSeedlingQuantity || 0) - quantityPlanted,
+          updatedAt: now,
+        });
+        if (!parent.created) {
+          transaction.update(parent.ref, {
+            quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
+            updatedAt: now,
+          });
+        }
+        transaction.create(contributionRef, {
+          reportId: parentId,
+          requestId: event.sourceRequestId,
+          eventId: submittedEventId,
+          participantId: data.participantId,
+          contributorId: data.participantId,
+          contributorName: distribution.participantName || "",
+          participantType: "requester",
+          inventoryId,
+          species: currentAllocation.species,
+          quantity: quantityPlanted,
+          recordedAt: now,
+          photos: uploadedPhotos,
+          imageHashes: uploadedPhotos.map((photo) => photo.imageHash),
+          automatedVerificationStatus: automatedStatus,
+          suspiciousFlags,
+          plantingDate: data.plantingDate,
+          latitude: submittedLatitude,
+          longitude: submittedLongitude,
+          siteGpsValid,
+        });
+        for (const photo of uploadedPhotos) {
+          transaction.create(evidenceHashCollection.doc(photo.imageHash), {
+            reportId: parentId,
+            contributionId: contributionRef.id,
+            eventId: submittedEventId,
+            createdAt: now,
+          });
+        }
+      });
+      persisted = true;
+      const doc = await reportCollection.doc(parentId).get();
+      return reportDetails(doc.id, doc.data());
+    }
 
-    return {
-      id:
-        docRef.id,
-
-      ...reportData,
-    };
+    const docRef = await reportCollection.add(reportData);
+    persisted = true;
+    return { id: docRef.id, ...reportData };
   } catch (error) {
+    if (persisted) throw error;
     // --------------------------------
     // REMOVE ALL PHOTOS ALREADY
     // SAVED IF ANY LATER STEP FAILS
@@ -1346,7 +1438,9 @@ const getAllPlantingReports = async (
     );
   });
 
-  return reports;
+  return Promise.all(reports.map((report) =>
+    report.reportType === "parent" ? reportDetails(report.id, report) : report
+  ));
 };
 
 
@@ -1365,7 +1459,7 @@ const getPlantingReportById =
       );
     }
 
-    return withWorkflowStatus(doc);
+    return reportDetails(doc.id, withWorkflowStatus(doc));
   };
 
 
@@ -1404,7 +1498,9 @@ const getPlantingReportsByParticipantId =
       );
     });
 
-    return reports;
+    return Promise.all(reports.map((report) =>
+      report.reportType === "parent" ? reportDetails(report.id, report) : report
+    ));
   };
 
 

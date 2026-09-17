@@ -207,14 +207,18 @@ const submitSeedlingRequest = async (
       barangay,
       plantingSiteId,
       proposedDate,
-      proposedStartTime,
-      proposedEndTime,
+      proposedStartTime: submittedProposedStartTime,
+      proposedEndTime: submittedProposedEndTime,
       eventLocation,
       latitude,
       longitude,
       expectedParticipants,
-      description,
+      description: submittedDescription,
     } = eventProposal;
+
+    const proposedStartTime = submittedProposedStartTime ?? eventProposal.startTime;
+    const proposedEndTime = submittedProposedEndTime ?? eventProposal.endTime;
+    const description = submittedDescription ?? eventProposal.eventDescription;
 
     if (
       !cleanString(eventName) ||
@@ -554,6 +558,10 @@ const getSeedlingRequest = async (
       await getSeedlingRequestById(
         req.params.id
       );
+
+    if (req.user.role === "participant" && request.participantId !== req.user.uid) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
 
     return res.status(200).json({
       success: true,

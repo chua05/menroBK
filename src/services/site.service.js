@@ -98,8 +98,8 @@ function computeUtilizationFields(siteData) {
 function formatSiteDocument(doc) {
   const data = doc.data ? doc.data() : doc;
   const base = {
-    id: doc.id || data.siteId || data.id,
     ...data,
+    id: doc.id || data.siteId || data.id,
   };
 
   const util = computeUtilizationFields(base);
@@ -289,6 +289,61 @@ const getSiteById = async (siteId) => {
   return formatSiteDocument(doc);
 };
 
+// Edit the same site document while preserving workflow and audit fields.
+const updateSite = async (siteId, input, updatedBy) => {
+  const siteRef = db.collection(SITE_COLLECTION).doc(siteId);
+  const existing = await siteRef.get();
+  if (!existing.exists) throw new Error("Site not found.");
+
+  const changes = {};
+  const requiredStrings = ["siteName", "barangay", "siteType", "locationDescription"];
+  const optionalStrings = ["ownershipType", "coordinator", "coordinatorContact", "notes"];
+  for (const field of requiredStrings) {
+    if (Object.prototype.hasOwnProperty.call(input || {}, field)) {
+      const value = cleanString(input[field]);
+      if (!value) throw new Error(`${field} is required.`);
+      changes[field] = value;
+    }
+  }
+  for (const field of optionalStrings) {
+    if (Object.prototype.hasOwnProperty.call(input || {}, field)) {
+      changes[field] = cleanString(input[field]);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(input || {}, "areaHectares")) {
+    const area = Number(input.areaHectares);
+    if (!Number.isFinite(area) || area <= 0) throw new Error("Site area must be greater than 0.");
+    changes.areaHectares = area;
+  }
+  if (Object.prototype.hasOwnProperty.call(input || {}, "maximumCapacity")) {
+    const capacity = Number(input.maximumCapacity);
+    if (!Number.isInteger(capacity) || capacity <= 0) {
+      throw new Error("Maximum seedling capacity must be a whole number greater than 0.");
+    }
+    if (capacity < Number(existing.data().planted || 0)) {
+      throw new Error("Maximum seedling capacity cannot be below the planted count.");
+    }
+    changes.maximumCapacity = capacity;
+    changes.targetTrees = capacity;
+  }
+  if (["latitude", "longitude"].some((field) => Object.prototype.hasOwnProperty.call(input || {}, field))) {
+    const latitude = Object.prototype.hasOwnProperty.call(input, "latitude") ? input.latitude : existing.data().latitude;
+    const longitude = Object.prototype.hasOwnProperty.call(input, "longitude") ? input.longitude : existing.data().longitude;
+    if (latitude === null || latitude === "" || longitude === null || longitude === "") {
+      throw new Error("Valid site coordinates are required.");
+    }
+    Object.assign(changes, validateCoordinates(latitude, longitude));
+  }
+  if (Object.prototype.hasOwnProperty.call(input || {}, "polygon")) {
+    if (!Array.isArray(input.polygon)) throw new Error("A valid planting site boundary is required.");
+    changes.polygon = normalizePolygon(input.polygon);
+  }
+  if (!Object.keys(changes).length) throw new Error("No editable site fields provided.");
+
+  await siteRef.update({ ...changes, updatedBy, updatedAt: Timestamp.now() });
+  return formatSiteDocument(await siteRef.get());
+};
+
 // --------------------------------
 // ARCHIVE SITE
 // --------------------------------
@@ -360,6 +415,7 @@ module.exports = {
   getAllSites,
   getArchivedSites,
   getSiteById,
+  updateSite,
   archiveSite,
   restoreSite,
 };

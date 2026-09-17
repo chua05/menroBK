@@ -26,6 +26,8 @@ const {
 const guestService = require("../services/guestEvent.service");
 const contributionService = require("../services/plantingContribution.service");
 const { sendSuccess, sendError } = require("../utils/response.util");
+const { attachEvidence } = require("../services/plantingEvidence.service");
+const { uploadContributionEvidence } = require("../middleware/upload.middleware");
 
 router.post("/:id/join", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -35,6 +37,17 @@ router.post("/:id/join", verifyToken, authorizeRoles("participant"), async (req,
     if (error.message === "Event not found.") return sendError(res, 404, error.message);
     console.error(error);
     return sendError(res, 500, "Failed to join event.");
+  }
+});
+
+router.get("/:id/participants", verifyToken, authorizeRoles("staff", "admin"), async (req, res) => {
+  try {
+    const data = await guestService.getEventParticipants(req.params.id);
+    return sendSuccess(res, 200, "Event participants retrieved", data);
+  } catch (error) {
+    if (error.message === "Event not found.") return sendError(res, 404, error.message);
+    console.error(error);
+    return sendError(res, 500, "Failed to retrieve event participants.");
   }
 });
 
@@ -61,6 +74,22 @@ router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), as
     return sendError(res, 500, "Failed to record contribution.");
   }
 });
+
+router.post("/:id/contributions/:contributionId/evidence", verifyToken,
+  authorizeRoles("participant"), uploadContributionEvidence, async (req, res) => {
+    try {
+      const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);
+      const data = await attachEvidence(req.params.id, participantId,
+        req.params.contributionId, req.files, req.body);
+      return sendSuccess(res, 200, "Planting evidence recorded", data);
+    } catch (error) {
+      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates/i
+        .test(error.message);
+      if (!expected) console.error(error);
+      return sendError(res, expected ? 400 : 500,
+        expected ? error.message : "Failed to record planting evidence.");
+    }
+  });
 
 // GET ALL ACTIVE EVENTS
 // Participant, staff, and admin may view events.

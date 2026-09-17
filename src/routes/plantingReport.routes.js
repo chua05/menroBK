@@ -7,6 +7,7 @@ const {
   getPlantingReports,
   getPlantingReport,
   getMyPlantingReports,
+  finalizeReport,
   approveReport,
   rejectReport,
   getVerificationLogs,
@@ -148,6 +149,9 @@ router.get(
   ),
   getPlantingReport
 );
+
+// STAFF FINAL APPROVAL
+router.patch("/:id/finalize", verifyToken, authorizeRoles("participant"), finalizeReport);
 
 // STAFF FINAL APPROVAL
 router.patch(

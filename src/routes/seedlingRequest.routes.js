@@ -139,7 +139,8 @@ router.get(
   verifyToken,
   authorizeRoles(
     "admin",
-    "staff"
+    "staff",
+    "participant"
   ),
   getSeedlingRequest
 );

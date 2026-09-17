@@ -20,6 +20,7 @@ const monitoringRoutes = require("./routes/monitoring.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const analyticsRoutes = require("./routes/analytics.routes");
 const guestEventRoutes = require("./routes/guestEvent.routes");
+const reportRoutes = require("./routes/report.routes");
 
 const app = express();
 
@@ -110,6 +111,7 @@ app.use("/api/guest-events", guestEventRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes);
+app.use("/api/reports", reportRoutes);
 
 // ---------------------------------------------
 // 404

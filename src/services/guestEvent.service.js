@@ -164,6 +164,36 @@ async function joinRegistered(eventId, user) {
   return { eventId, participantId: ref.id };
 }
 
+async function getEventParticipants(eventId) {
+  const eventDoc = await events.doc(eventId).get();
+  if (!eventDoc.exists) throw new Error("Event not found.");
+  const [participantSnapshot, contributionSnapshot] = await Promise.all([
+    participants.where("eventId", "==", eventId).get(),
+    db.collection("plantingContributions").where("eventId", "==", eventId).get(),
+  ]);
+  const byParticipant = new Map();
+  for (const doc of contributionSnapshot.docs) {
+    const entry = doc.data();
+    const value = byParticipant.get(entry.participantId) || { quantityPlanted: 0, submissionCount: 0 };
+    value.quantityPlanted += Number(entry.quantity || 0);
+    value.submissionCount += 1;
+    byParticipant.set(entry.participantId, value);
+  }
+  return participantSnapshot.docs.map((doc) => {
+    const item = doc.data();
+    return {
+      id: doc.id,
+      eventId,
+      participantType: item.participantType,
+      userId: item.userId || null,
+      fullName: item.fullName || "",
+      organizationBarangay: item.organizationBarangay || "",
+      joinedAt: item.joinedAt,
+      ...(byParticipant.get(doc.id) || { quantityPlanted: 0, submissionCount: 0 }),
+    };
+  });
+}
+
 module.exports = {
   createInvitationInTransaction,
   getInvitationForRequester,
@@ -174,4 +204,5 @@ module.exports = {
   validateGuestSession,
   registeredParticipantId,
   joinRegistered,
+  getEventParticipants,
 };

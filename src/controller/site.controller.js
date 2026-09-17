@@ -23,7 +23,9 @@ function getErrorStatus(error) {
     message.includes("required") ||
     message.includes("must") ||
     message.includes("valid") ||
-    message.includes("greater than")
+    message.includes("greater than") ||
+    message.includes("cannot") ||
+    message.includes("no editable")
   ) {
     return 400;
   }
@@ -212,11 +214,23 @@ const restoreSite = async (
   }
 };
 
+const updateSite = async (req, res) => {
+  try {
+    const site = await siteService.updateSite(req.params.id, req.body, req.user.uid);
+    return sendSuccess(res, 200, "Site updated", site);
+  } catch (error) {
+    const status = getErrorStatus(error);
+    if (status === 500) console.error(error);
+    return sendError(res, status, status === 500 ? "Failed to update site." : error.message);
+  }
+};
+
 module.exports = {
   createSite,
   getAllSites,
   getArchivedSites,
   getSiteById,
+  updateSite,
   archiveSite,
   restoreSite,
 };

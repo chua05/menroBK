@@ -1,5 +1,6 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
+const { parentForEventInTransaction } = require("./parentPlantingReport.service");
 
 const events = db.collection("events");
 const participants = db.collection("eventParticipants");
@@ -26,6 +27,13 @@ async function recordContribution(eventId, participantId, inventoryId, quantity)
     }
     const allocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
     if (!allocation) throw new Error("Seedling item is not allocated to this event.");
+    const now = Timestamp.now();
+    const parent = event.sourceRequestId
+      ? await parentForEventInTransaction(transaction, eventId, event, now, Number(quantity))
+      : null;
+    if (parent && parent.data.verificationStatus !== "Draft") {
+      throw new Error("This planting report has already been finalized.");
+    }
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
     const existing = Number(recorded[inventoryId] || 0);
     const remaining = Number(allocation.quantity) - existing;
@@ -38,16 +46,26 @@ async function recordContribution(eventId, participantId, inventoryId, quantity)
       recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + Number(quantity),
       remainingSeedlingQuantity: Number(event.seedlingTotalQuantity || 0) -
         Number(event.recordedSeedlingQuantity || 0) - Number(quantity),
-      updatedAt: Timestamp.now(),
+      updatedAt: now,
     });
+    if (parent && !parent.created) {
+      transaction.update(parent.ref, {
+        quantityPlanted: Number(parent.data.quantityPlanted || 0) + Number(quantity),
+        updatedAt: now,
+      });
+    }
     transaction.create(contributionRef, {
+      ...(parent ? { reportId: parent.ref.id, requestId: event.sourceRequestId } : {}),
       eventId,
       participantId,
-      participantType: participantDoc.data().participantType,
+      contributorId: participantDoc.data().userId || participantId,
+      participantType: parent && participantDoc.data().userId === parent.data.participantId
+        ? "requester" : participantDoc.data().participantType,
+      contributorName: participantDoc.data().fullName || "",
       inventoryId,
       species: allocation.species,
       quantity: Number(quantity),
-      recordedAt: Timestamp.now(),
+      recordedAt: now,
     });
   });
   const doc = await contributionRef.get();
