@@ -802,15 +802,8 @@ const approveSeedlingRequest =
             }
           );
 
-        let invitationCreationError = null;
         if (Number(proposal.expectedParticipants || 0) > 0) {
-          try {
-            createInvitationInTransaction(transaction, eventId, id, now);
-          } catch (err) {
-            // Don't fail the entire approval if guest invitation secret is misconfigured.
-            // Record the error so it can be surfaced on the request for admins.
-            invitationCreationError = String(err && err.message ? err.message : err);
-          }
+          createInvitationInTransaction(transaction, eventId, id, now);
         }
 
         // ========================================
@@ -822,7 +815,7 @@ const approveSeedlingRequest =
         // ========================================
 
         // Store approvedItems on the request for later release and auditing.
-        const requestUpdatePayload = {
+        transaction.update(requestRef, {
           status: "Approved",
           approvedBy,
           approvedAt: now,
@@ -834,14 +827,7 @@ const approveSeedlingRequest =
           inventoryReserved: false,
           approvedItems,
           updatedAt: now,
-        };
-
-        if (invitationCreationError) {
-          requestUpdatePayload.invitationCreationFailed = true;
-          requestUpdatePayload.invitationCreationError = invitationCreationError;
-        }
-
-        transaction.update(requestRef, requestUpdatePayload);
+        });
 
         createNotificationInTransaction(transaction, {
           recipientUserId: currentRequest.participantId,

@@ -96,7 +96,8 @@ const withWorkflowStatus = (doc) => {
   return {
     id: doc.id,
     ...data,
-    verificationStatus: workflowStatus(data.verificationStatus),
+    verificationStatus: data.reportType === "parent" && data.verificationStatus === "Draft"
+      ? "Pending" : workflowStatus(data.verificationStatus),
     ...(data.automatedVerificationStatus === undefined && legacyAutomatedStatus
       ? { automatedVerificationStatus: legacyAutomatedStatus }
       : {}),
@@ -316,6 +317,13 @@ const createPlantingReport = async (
     );
   }
 
+  const plantingDate = data.plantingDate;
+  if (typeof plantingDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(plantingDate) ||
+      Number.isNaN(Date.parse(`${plantingDate}T00:00:00Z`)) ||
+      new Date(`${plantingDate}T00:00:00Z`).toISOString().slice(0, 10) !== plantingDate) {
+    throw new Error("A valid planting date is required.");
+  }
+
 
   // --------------------------------
   // 5. VALIDATE QUANTITY
@@ -465,6 +473,14 @@ if (submittedEventId) {
 
   linkedEvent =
     eventDoc.data();
+
+  if (linkedEvent.sourceRequestId && linkedEvent.sourceRequestId !== distribution.requestId) {
+    throw new Error("Selected event does not match the released distribution.");
+  }
+
+  if (distribution.plantingSiteId && distribution.plantingSiteId !== data.siteId) {
+    throw new Error("Selected planting site does not match the released distribution.");
+  }
 
   if (
     linkedEvent.archived === true
@@ -1281,9 +1297,9 @@ if (submittedEventId) {
           throw new Error("Requester has already submitted planting evidence for this event.");
         }
         const parent = await parentForEventInTransaction(
-          transaction, submittedEventId, event, now, quantityPlanted
+          transaction, submittedEventId, event, now, quantityPlanted, "Pending Review"
         );
-        if (parent.data.verificationStatus !== "Draft") {
+        if (!parent.created && !["Draft", "Pending"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
         }
         const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
@@ -1298,6 +1314,8 @@ if (submittedEventId) {
         if (!parent.created) {
           transaction.update(parent.ref, {
             quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
+            verificationStatus: "Pending Review",
+            submittedAt: now,
             updatedAt: now,
           });
         }

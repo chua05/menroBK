@@ -22,10 +22,15 @@ const db = {
   collection(name) {
     return {
       doc(id = `generated-${++generated}`) { return ref(name, id); },
+      async get() {
+        const docs = [...table(name)].map(([id, data]) => ({ id, data: () => data }));
+        return { docs, empty: docs.length === 0 };
+      },
       where(field, operator, value) {
-        assert.equal(operator, "==");
+        assert.ok(["==", "array-contains"].includes(operator));
         return { limit() { return this; }, async get() {
-          const docs = [...table(name)].filter(([, data]) => data[field] === value)
+          const docs = [...table(name)].filter(([, data]) => operator === "array-contains"
+            ? Array.isArray(data[field]) && data[field].includes(value) : data[field] === value)
             .map(([id, data]) => ({ id, data: () => data }));
           return { docs, empty: docs.length === 0 };
         } };
@@ -74,6 +79,48 @@ function seedApproved(id, eventId, available = 250) {
   });
 }
 
+test("Admin approval creates a scheduled event and only needed secure invitations", async () => {
+  const originalSecret = process.env.GUEST_INVITATION_SECRET;
+  const seedReviewed = (id, expectedParticipants) => {
+    table("seedlingRequests").set(id, {
+      status: "Reviewed", participantId: "participant-1", participantName: "Participant One",
+      items: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 10 }],
+      eventProposal: {
+        eventName: "Planting", barangay: "Bacolod", plantingSiteId: "site-approval",
+        proposedDate: "2026-10-20", proposedStartTime: "08:00", proposedEndTime: "10:00",
+        expectedParticipants,
+      },
+    });
+    table("seedlingInventory").set("calamansi", { species: "Calamansi", availableQuantity: 100 });
+    table("sites").set("site-approval", { status: "active", siteName: "Site", barangay: "Bacolod", maximumCapacity: 100, planted: 0 });
+  };
+  try {
+    delete process.env.GUEST_INVITATION_SECRET;
+    seedReviewed("approve-zero", 0);
+    const withoutGuests = await requestService.approveSeedlingRequest("approve-zero", "admin-1");
+    assert.equal(withoutGuests.status, "Approved");
+    assert.equal(table("events").get(withoutGuests.eventId).recordStatus, "scheduled");
+    assert.equal(table("events").get(withoutGuests.eventId).sourceRequestId, "approve-zero");
+    assert.equal(table("events").get(withoutGuests.eventId).seedlingTotalQuantity, 0);
+    assert.equal(table("eventInvitations").has(withoutGuests.eventId), false);
+
+    seedReviewed("approve-guests", 4);
+    await assert.rejects(requestService.approveSeedlingRequest("approve-guests", "admin-1"), /GUEST_INVITATION_SECRET/);
+    assert.equal(table("seedlingRequests").get("approve-guests").status, "Reviewed");
+    process.env.GUEST_INVITATION_SECRET = originalSecret;
+    const withGuests = await requestService.approveSeedlingRequest("approve-guests", "admin-1");
+    assert.equal(withGuests.status, "Approved");
+    assert.equal(table("eventInvitations").get(withGuests.eventId).active, true);
+    assert.equal(table("eventInvitations").get(withGuests.eventId).tokenHash.length, 64);
+    assert.equal(JSON.stringify(withGuests).includes(originalSecret), false);
+    const count = table("events").size;
+    await requestService.approveSeedlingRequest("approve-guests", "admin-1");
+    assert.equal(table("events").size, count);
+  } finally {
+    process.env.GUEST_INVITATION_SECRET = originalSecret;
+  }
+});
+
 test("partial release updates real stock, distribution, event allocation, and notification once", async () => {
   seedApproved("request-1", "EVT-2026-001");
   const input = { items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged seedlings" }] };
@@ -85,11 +132,12 @@ test("partial release updates real stock, distribution, event allocation, and no
   assert.equal(table("distributions").get("request-1").items[0].releasedQuantity, 90);
   assert.equal(table("events").get("EVT-2026-001").seedlingItems[0].quantity, 90);
   assert.equal(table("plantingReports").get("event_EVT-2026-001").quantityReleased, 90);
-  assert.equal(table("plantingReports").get("event_EVT-2026-001").verificationStatus, "Draft");
+  assert.equal(table("plantingReports").get("event_EVT-2026-001").verificationStatus, "Pending");
   assert.equal(table("notifications").get("request_released_request-1").relatedEventId, "EVT-2026-001");
+  const notificationCount = table("notifications").size;
   await requestService.releaseSeedlingRequest("request-1", "staff-1", input);
   assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 160);
-  assert.equal(table("notifications").size, 1);
+  assert.equal(table("notifications").size, notificationCount);
   assert.equal([...table("plantingReports")].filter(([, report]) => report.eventId === "EVT-2026-001").length, 1);
 });
 
@@ -105,6 +153,93 @@ test("invalid release leaves inventory, event, and distribution unchanged", asyn
   assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 80);
   assert.equal(table("distributions").has("request-2"), false);
   assert.deepEqual(table("events").get("EVT-2026-002").seedlingItems, []);
+});
+
+test("own released distributions expose each species and actual partial quantities", async () => {
+  seedApproved("request-multi", "EVT-2026-MULTI");
+  table("seedlingRequests").get("request-multi").items.push({ inventoryId: "narra", species: "Narra", quantity: 50 });
+  table("seedlingInventory").set("narra", {
+    species: "Narra", availableQuantity: 60, reservedQuantity: 0, distributedQuantity: 0,
+  });
+  await requestService.releaseSeedlingRequest("request-multi", "staff-1", {
+    items: [
+      { inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged" },
+      { inventoryId: "narra", releasedQuantity: 40, shortReleaseReason: "Ten damaged" },
+    ],
+  });
+  const controller = require("../src/controller/distribution.controller");
+  const res = { result: {}, status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; } };
+  await controller.getMyDistributions({ user: { uid: "participant-1" }, query: { participantId: "other" } }, res);
+  assert.equal(res.result.code, 200);
+  const distribution = res.result.body.data.find((item) => item.id === "request-multi");
+  assert.deepEqual(distribution.items.map((item) => [item.species, item.releasedQuantity]),
+    [["Calamansi", 90], ["Narra", 40]]);
+  assert.equal(distribution.totalQuantityReleased, 130);
+  assert.equal(res.result.body.data.some((item) => item.participantId !== "participant-1"), false);
+});
+
+test("requester evidence moves a released parent from Pending to Pending Review once", async () => {
+  const sharp = require("sharp");
+  const reportService = require("../src/services/plantingReport.service");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  const reportId = "event_EVT-2026-001";
+  const event = table("events").get("EVT-2026-001");
+  Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
+  table("sites").set("site-1", { status: "active", siteName: "Site One", barangay: "Bacolod", latitude: 12, longitude: 123 });
+  const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } }).png().toBuffer();
+  const payload = {
+    distributionId: "request-1", inventoryId: "calamansi", siteId: "site-1",
+    participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
+    quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
+    latitude: 12, longitude: 123, eventId: "EVT-2026-001",
+  };
+  assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
+  await assert.rejects(reportService.createPlantingReport(payload, []), /photo is required/);
+  assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
+  await assert.rejects(reportService.createPlantingReport({ ...payload, plantingDate: "2026-02-30" },
+    [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]), /valid planting date/);
+  assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
+  let submitted;
+  try {
+    submitted = await reportService.createPlantingReport(payload,
+      [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]);
+    assert.equal(submitted.verificationStatus, "Pending Review");
+    assert.ok(submitted.submittedAt);
+    assert.equal(submitted.submissions.length, 1);
+    assert.equal(submitted.submissions[0].plantingDate, "2026-09-17");
+    assert.equal(submitted.submissions[0].photos.length, 1);
+    assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending Review");
+    await assert.rejects(reportService.createPlantingReport(payload,
+      [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]));
+    assert.equal(table("plantingContributions").size, 1);
+  } finally {
+    for (const item of submitted?.submissions || []) {
+      for (const photo of item.photos || []) await deletePlantingPhoto(photo.photoPath);
+    }
+  }
+});
+
+test("participant monitoring returns only own records and accepts an empty history", async () => {
+  const controller = require("../src/controller/monitoring.controller");
+  const routes = require("../src/routes/monitoring.routes");
+  const ownRoute = routes.stack.find((layer) => layer.route?.path === "/my-records" && layer.route.methods.get);
+  assert.ok(ownRoute);
+  let allowed = false;
+  ownRoute.route.stack[1].handle({ user: { role: "participant" } }, {}, () => { allowed = true; });
+  assert.equal(allowed, true);
+  const response = () => ({ result: {}, status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; } });
+  const empty = response();
+  await controller.getMyMonitoringRecords({ user: { uid: "participant-no-records" } }, empty);
+  assert.equal(empty.result.code, 200);
+  assert.deepEqual(empty.result.body.data, []);
+  table("monitoringRecords").set("own-1", { participantId: "participant-1", healthyCount: 8 });
+  table("monitoringRecords").set("other-1", { participantId: "participant-2", healthyCount: 5 });
+  const own = response();
+  await controller.getMyMonitoringRecords({ user: { uid: "participant-1" } }, own);
+  assert.equal(own.result.code, 200);
+  assert.deepEqual(own.result.body.data.map((item) => item.id), ["own-1"]);
 });
 
 test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {
@@ -134,8 +269,12 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   assert.equal(first.quantity, 85);
   await assert.rejects(contributionService.recordContribution("EVT-2026-003", joined.participantId, "calamansi", 10), /Only 5/);
   assert.equal(table("events").get("EVT-2026-003").recordedSeedlingQuantity, 85);
-  assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Draft");
+  assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
   assert.equal(table("plantingContributions").get(first.id).reportId, "event_EVT-2026-003");
+  table("plantingContributions").get(first.id).photos = [{ imageHash: "guest-only-photo" }];
+  const parentService = require("../src/services/parentPlantingReport.service");
+  await assert.rejects(parentService.finalizeParent("event_EVT-2026-003", "participant-1"), /Requester planting evidence/);
+  assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
 });
 
 test("one parent groups multiple contributors and separate events get separate parents", async () => {
@@ -186,10 +325,10 @@ test("one parent groups multiple contributors and separate events get separate p
   }
   const finalized = await parentService.finalizeParent(one.reportId, "same-requester");
   assert.equal(finalized.verificationStatus, "Pending Review");
-  await assert.rejects(contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1),
-    /already been finalized/);
   const plantingReportService = require("../src/services/plantingReport.service");
   const approved = await plantingReportService.approvePlantingReport(one.reportId, "staff-1", "", "MENRO Staff");
   assert.equal(approved.verificationStatus, "Approved");
-  assert.equal(table("plantingReports").get(three.reportId).verificationStatus, "Draft");
+  await assert.rejects(contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1),
+    /already been finalized/);
+  assert.equal(table("plantingReports").get(three.reportId).verificationStatus, "Pending");
 });

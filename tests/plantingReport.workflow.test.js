@@ -120,6 +120,13 @@ test("Staff approval is final and preserves automated findings", async () => {
   await assert.rejects(service.approvePlantingReport("approve-1", "staff-2", ""), /Only pending review/);
 });
 
+test("Staff cannot decide an available but unsubmitted Pending report", async () => {
+  seed("unsubmitted", "Pending");
+  await assert.rejects(service.approvePlantingReport("unsubmitted", "staff-1", ""), /Only pending review/);
+  await assert.rejects(service.rejectPlantingReport("unsubmitted", "staff-1", "Evidence missing"), /Only pending review/);
+  assert.equal(table("plantingReports").get("unsubmitted").verificationStatus, "Pending");
+});
+
 test("rejection requires a reason and persists the authenticated reviewer", async () => {
   seed("reject-1");
   await assert.rejects(service.rejectPlantingReport("reject-1", "staff-1", "  "), /Rejection reason is required/);

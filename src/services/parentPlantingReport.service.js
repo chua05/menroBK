@@ -13,7 +13,7 @@ function parentRef(eventId) {
   return reports.doc(`event_${eventId}`);
 }
 
-async function parentForEventInTransaction(transaction, eventId, event, now, initialQuantity = 0) {
+async function parentForEventInTransaction(transaction, eventId, event, now, initialQuantity = 0, initialStatus = "Pending") {
   const requestId = event.sourceRequestId;
   if (!requestId) throw new Error("Event has no linked seedling request.");
   const ref = parentRef(eventId);
@@ -54,7 +54,8 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     eventDate: event.date || "",
     quantityReleased: Number(event.seedlingTotalQuantity || 0),
     quantityPlanted: initialQuantity,
-    verificationStatus: "Draft",
+    verificationStatus: initialStatus,
+    ...(initialStatus === "Pending Review" ? { submittedAt: now } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -112,8 +113,9 @@ async function finalizeParent(id, requesterId) {
         reportDoc.data().participantId !== requesterId) {
       throw new Error("Planting report not found.");
     }
-    if (reportDoc.data().verificationStatus !== "Draft") {
-      throw new Error("Only draft planting reports can be finalized.");
+    if (reportDoc.data().verificationStatus === "Pending Review") return;
+    if (!["Draft", "Pending"].includes(reportDoc.data().verificationStatus)) {
+      throw new Error("Only pending planting reports can be submitted for review.");
     }
     const eventDoc = await transaction.get(events.doc(reportDoc.data().eventId));
     const submissionSnapshot = await transaction.get(submissions.where("reportId", "==", id));
@@ -123,6 +125,11 @@ async function finalizeParent(id, requesterId) {
     }
     if (submissionSnapshot.empty || submissionSnapshot.docs.some((doc) => !doc.data().photos?.length)) {
       throw new Error("Every planting contribution needs evidence photos before finalization.");
+    }
+    if (!submissionSnapshot.docs.some((doc) =>
+      doc.data().participantType === "requester" &&
+      (doc.data().contributorId === requesterId || doc.data().participantId === requesterId))) {
+      throw new Error("Requester planting evidence is required before review.");
     }
     const now = Timestamp.now();
     transaction.update(ref, {

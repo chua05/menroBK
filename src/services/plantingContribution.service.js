@@ -31,7 +31,7 @@ async function recordContribution(eventId, participantId, inventoryId, quantity)
     const parent = event.sourceRequestId
       ? await parentForEventInTransaction(transaction, eventId, event, now, Number(quantity))
       : null;
-    if (parent && parent.data.verificationStatus !== "Draft") {
+    if (parent && !["Draft", "Pending", "Pending Review"].includes(parent.data.verificationStatus)) {
       throw new Error("This planting report has already been finalized.");
     }
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
