@@ -169,36 +169,18 @@ const submitPlantingReport = async (
     // Testing: device GPS may be unavailable even when the image is valid.
     const hasLatitude = latitude !== undefined && latitude !== null && latitude !== "";
     const hasLongitude = longitude !== undefined && longitude !== null && longitude !== "";
-    if (hasLatitude !== hasLongitude) {
-      return res.status(400).json({ success: false, message: "Provide both captured coordinates or neither." });
-    }
-    const parsedLatitude = hasLatitude ? Number(latitude) : null;
-
-    if (
-      hasLatitude && (!Number.isFinite(parsedLatitude) || parsedLatitude < -90 || parsedLatitude > 90)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "The captured latitude is invalid.",
-      });
-    }
+    const rawLatitude = hasLatitude ? Number(latitude) : null;
 
 
     // --------------------------------
     // LONGITUDE
     // --------------------------------
-    const parsedLongitude = hasLongitude ? Number(longitude) : null;
-
-    if (
-      hasLongitude && (!Number.isFinite(parsedLongitude) || parsedLongitude < -180 || parsedLongitude > 180)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "The captured longitude is invalid.",
-      });
-    }
+    const rawLongitude = hasLongitude ? Number(longitude) : null;
+    const validCapturedGps = hasLatitude && hasLongitude &&
+      Number.isFinite(rawLatitude) && rawLatitude >= -90 && rawLatitude <= 90 &&
+      Number.isFinite(rawLongitude) && rawLongitude >= -180 && rawLongitude <= 180;
+    const parsedLatitude = validCapturedGps ? rawLatitude : null;
+    const parsedLongitude = validCapturedGps ? rawLongitude : null;
 
 
     // --------------------------------
@@ -220,11 +202,7 @@ const submitPlantingReport = async (
         ) ||
         parsedAccuracy < 0
       ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "The captured GPS accuracy is invalid.",
-        });
+        parsedAccuracy = null;
       }
     }
 

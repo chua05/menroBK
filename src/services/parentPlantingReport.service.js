@@ -94,8 +94,11 @@ async function reportDetails(id, data) {
     contributorCount: new Set(contributions.map((entry) => entry.participantId)).size,
     evidenceCount: evidence.length,
     automatedVerificationStatus: evidence.length === 0 ? null
-      : (suspiciousFlags.length > 0 || evidence.some((photo) => photo.automatedStatus === "Flagged"))
-        ? "Flagged" : "Passed Automated Check",
+      : evidence.some((photo) => photo.automatedStatus === "Flagged" ||
+          (photo.automatedStatus === undefined && photo.suspiciousFlags?.length))
+        ? "Flagged"
+        : evidence.every((photo) => photo.automatedStatus === "Passed Automated Check")
+          ? "Passed Automated Check" : null,
     suspiciousFlags,
     submissions: contributions.map((entry) => ({
       ...entry,

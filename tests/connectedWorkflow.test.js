@@ -239,6 +239,7 @@ test("valid camera-style image submits without captured GPS and preserves missin
     distributionId: "request-no-gps", inventoryId: "calamansi", siteId: "site-no-gps",
     participantType: "requester", participantBarangay: "Bacolod", quantityPlanted: 20,
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
+    accuracy: "unavailable",
   };
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "other" }, [file]), /another participant/);
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
@@ -254,6 +255,8 @@ test("valid camera-style image submits without captured GPS and preserves missin
     assert.equal(report.submissions[0].photos[0].gpsMetadataPresent, false);
     assert.equal(report.submissions[0].photos[0].gpsValid, false);
     assert.ok(report.submissions[0].photos[0].suspiciousFlags.includes("GPS_METADATA_MISSING"));
+    assert.equal(report.submissions[0].photos[0].automatedStatus, null);
+    assert.equal(report.automatedVerificationStatus, null);
     assert.ok(report.submissions[0].photos[0].photoPath);
   } finally {
     for (const submission of res.result.body?.data?.submissions || []) {
@@ -262,7 +265,7 @@ test("valid camera-style image submits without captured GPS and preserves missin
   }
 });
 
-test("out-of-site captured coordinates remain flagged but do not block evidence", async () => {
+test("out-of-site captured coordinates remain informational and do not block evidence", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -286,6 +289,7 @@ test("out-of-site captured coordinates remain flagged but do not block evidence"
     assert.equal(report.verificationStatus, "Pending Review");
     assert.equal(report.submissions[0].siteGpsValid, false);
     assert.ok(report.submissions[0].suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
+    assert.equal(report.automatedVerificationStatus, null);
     assert.equal(table("sites").get("site-outside").latitude, 12);
   } finally {
     for (const submission of report?.submissions || []) {

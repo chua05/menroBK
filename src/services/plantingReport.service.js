@@ -63,6 +63,20 @@ const SITE_GPS_TOLERANCE_METERS =
 const MAX_EVIDENCE_PHOTOS =
   10;
 
+// Temporary testing rule: keep actual GPS/EXIF findings without turning
+// missing or mismatched location into a blocking technical Flagged result.
+const INFORMATIONAL_TESTING_FLAGS = new Set([
+  "GPS_METADATA_MISSING",
+  "GPS_MISMATCH",
+  "OUTSIDE_REGISTERED_SITE",
+  "TIMESTAMP_METADATA_MISSING",
+]);
+
+const testingVerificationStatus = (flags) =>
+  flags.some((flag) => !INFORMATIONAL_TESTING_FLAGS.has(flag))
+    ? "Flagged"
+    : flags.length > 0 ? null : "Passed Automated Check";
+
 const reportCollection =
   db.collection(
     REPORT_COLLECTION
@@ -576,34 +590,20 @@ if (submittedEventId) {
   // Testing: absent captured GPS stays null; real photo/site findings remain informational.
   const hasSubmittedLatitude = data.latitude !== undefined && data.latitude !== null && data.latitude !== "";
   const hasSubmittedLongitude = data.longitude !== undefined && data.longitude !== null && data.longitude !== "";
-  if (hasSubmittedLatitude !== hasSubmittedLongitude) {
-    throw new Error("Provide both captured coordinates or neither.");
-  }
-  const submittedLatitude = hasSubmittedLatitude ? Number(data.latitude) : null;
-  const submittedLongitude = hasSubmittedLongitude ? Number(data.longitude) : null;
-
-  if (
-    hasSubmittedLatitude && (!Number.isFinite(submittedLatitude) || submittedLatitude < -90 || submittedLatitude > 90)
-  ) {
-    throw new Error(
-      "Latitude must be between -90 and 90."
-    );
-  }
-
-  if (
-    hasSubmittedLongitude && (!Number.isFinite(submittedLongitude) || submittedLongitude < -180 || submittedLongitude > 180)
-  ) {
-    throw new Error(
-      "Longitude must be between -180 and 180."
-    );
-  }
+  const rawLatitude = hasSubmittedLatitude ? Number(data.latitude) : null;
+  const rawLongitude = hasSubmittedLongitude ? Number(data.longitude) : null;
+  const validCapturedGps = hasSubmittedLatitude && hasSubmittedLongitude &&
+    Number.isFinite(rawLatitude) && rawLatitude >= -90 && rawLatitude <= 90 &&
+    Number.isFinite(rawLongitude) && rawLongitude >= -180 && rawLongitude <= 180;
+  const submittedLatitude = validCapturedGps ? rawLatitude : null;
+  const submittedLongitude = validCapturedGps ? rawLongitude : null;
 
 
   // --------------------------------
   // 9. COMPARE CAPTURED GPS
   // WITH REGISTERED SITE
   // --------------------------------
-  const siteGpsDistanceMeters = hasSubmittedLatitude
+  const siteGpsDistanceMeters = validCapturedGps
     ? calculateDistanceMeters(submittedLatitude, submittedLongitude, siteLatitude, siteLongitude)
     : null;
 
@@ -714,8 +714,8 @@ if (submittedEventId) {
     // photo verification
     const photoVerification =
       validatePlantingReport({
-        submittedLatitude: hasSubmittedLatitude ? submittedLatitude : siteLatitude,
-        submittedLongitude: hasSubmittedLongitude ? submittedLongitude : siteLongitude,
+        submittedLatitude: validCapturedGps ? submittedLatitude : siteLatitude,
+        submittedLongitude: validCapturedGps ? submittedLongitude : siteLongitude,
         plantingDate:
           data.plantingDate,
         metadata,
@@ -748,11 +748,7 @@ if (submittedEventId) {
     }
 
 
-    const photoAutomatedStatus =
-      photoFlags.length > 0
-        ? "Flagged"
-        : photoVerification
-            .automatedStatus;
+    const photoAutomatedStatus = testingVerificationStatus(photoFlags);
 
 
     preparedPhotos.push({
@@ -815,7 +811,7 @@ if (submittedEventId) {
     }
   );
 
-  if (!siteGpsValid) {
+  if (siteGpsDistanceMeters !== null && !siteGpsValid) {
     reportFlags.add(
       "OUTSIDE_REGISTERED_SITE"
     );
@@ -826,15 +822,7 @@ if (submittedEventId) {
       reportFlags
     );
 
-  const automatedStatus =
-    suspiciousFlags.length > 0 ||
-    preparedPhotos.some(
-      (photo) =>
-        photo.automatedStatus ===
-        "Flagged"
-    )
-      ? "Flagged"
-      : "Passed Automated Check";
+  const automatedStatus = testingVerificationStatus(suspiciousFlags);
 
 
   // --------------------------------
