@@ -129,9 +129,14 @@ const createDistributionRecordInTransaction = (
   const proposal =
     requestData.eventProposal ||
     {};
+  const distributionNumber = /^REQ-\d{4}-\d{3,}$/.test(requestData.requestNumber || "")
+    ? requestData.requestNumber.replace(/^REQ-/, "DIST-")
+    : "";
 
   const distributionData = {
+    distributionNumber,
     requestId,
+    requestNumber: requestData.requestNumber || "",
 
     participantId:
       requestData.participantId,

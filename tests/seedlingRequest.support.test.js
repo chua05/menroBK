@@ -6,21 +6,27 @@ const records = {
   seedlingInventory: new Map(),
   users: new Map(),
   sites: new Map(),
+  counters: new Map(),
+  notifications: new Map(),
 };
+
+let generatedDocumentId = 0;
+let transactionTail = Promise.resolve();
 
 const db = {
   collection(name) {
     return {
       doc(id) {
+        const resolvedId = id || `new-${++generatedDocumentId}`;
         return {
-          id,
+          id: resolvedId,
           name,
           async get() {
-            const data = records[name].get(id);
-            return { id, exists: data !== undefined, data: () => data };
+            const data = records[name].get(resolvedId);
+            return { id: resolvedId, exists: data !== undefined, data: () => data };
           },
           async update(data) {
-            records[name].set(id, { ...records[name].get(id), ...data });
+            records[name].set(resolvedId, { ...records[name].get(resolvedId), ...data });
           },
         };
       },
@@ -40,15 +46,22 @@ const db = {
       },
     };
   },
-  async runTransaction(callback) {
-    const writes = [];
-    await callback({
-      get: (ref) => ref.get(),
-      update(ref, data) { writes.push([ref, data]); },
-    });
-    for (const [ref, data] of writes) {
-      records[ref.name].set(ref.id, { ...records[ref.name].get(ref.id), ...data });
-    }
+  runTransaction(callback) {
+    const execute = async () => {
+      const writes = [];
+      await callback({
+        get: (ref) => ref.get(),
+        update(ref, data) { writes.push([ref, data]); },
+        set(ref, data) { writes.push([ref, data]); },
+        create(ref, data) { writes.push([ref, data]); },
+      });
+      for (const [ref, data] of writes) {
+        records[ref.name].set(ref.id, { ...records[ref.name].get(ref.id), ...data });
+      }
+    };
+    const result = transactionTail.then(execute, execute);
+    transactionTail = result.then(() => undefined, () => undefined);
+    return result;
   },
 };
 
@@ -66,6 +79,14 @@ const siteRoutes = require("../src/routes/site.routes");
 const seedlingRoutes = require("../src/routes/seedlingRequest.routes");
 const authRoutes = require("../src/routes/auth.routes");
 const authController = require("../src/controller/auth.controller");
+
+const futureDate = new Date();
+futureDate.setDate(futureDate.getDate() + 1);
+const validPreferredReleaseDate = [
+  futureDate.getFullYear(),
+  String(futureDate.getMonth() + 1).padStart(2, "0"),
+  String(futureDate.getDate()).padStart(2, "0"),
+].join("-");
 
 function response() {
   const result = {};
@@ -99,7 +120,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
     reviewedBy: "staff-1", reviewedByName: "Staff Name",
     items: [{ inventoryId: "inventory-1", quantity: 12, species: "Forged" }],
     purpose: "Planting", plantingLocation: "Juban",
-    preferredReleaseDate: "2026-09-20", reviewRemarks: "Verified site and quantity",
+    preferredReleaseDate: validPreferredReleaseDate, reviewRemarks: "Verified site and quantity",
   };
   const result = await service.reviewSeedlingRequest("request-1", review);
   assert.equal(result.status, "Reviewed");
@@ -109,7 +130,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
   await assert.rejects(service.reviewSeedlingRequest("request-1", review), /Only pending requests/);
 });
 
-test("current frontend reviewFindings payload is accepted and stored as reviewRemarks", async () => {
+test("Staff review confirmation requires no findings or observation", async () => {
   records.seedlingRequests.set("request-frontend", { status: "Pending" });
   records.seedlingInventory.set("inventory-1", { species: "Narra" });
   const res = response();
@@ -119,11 +140,134 @@ test("current frontend reviewFindings payload is accepted and stored as reviewRe
     body: {
       items: [{ inventoryId: "inventory-1", quantity: 2 }],
       purpose: "Planting", plantingLocation: "Juban",
-      preferredReleaseDate: "2026-09-20", reviewFindings: "  Site verified  ",
+      preferredReleaseDate: validPreferredReleaseDate,
     },
   }, res);
   assert.equal(res.result.code, 200);
-  assert.equal(res.result.body.data.reviewRemarks, "Site verified");
+  assert.equal(res.result.body.data.reviewRemarks, "");
+});
+
+test("site creation assigns unique year-scoped readable IDs while retaining internal document IDs", async () => {
+  const input = {
+    siteName: "Readable Site",
+    barangay: "Bacolod",
+    siteType: "Public Land",
+    locationDescription: "Bacolod, Juban",
+    areaHectares: 1,
+    maximumCapacity: 100,
+    latitude: 12.82,
+    longitude: 124,
+    polygon: [
+      { lat: 12.82, lng: 124 },
+      { lat: 12.83, lng: 124 },
+      { lat: 12.82, lng: 124.01 },
+    ],
+    createdBy: "staff-1",
+  };
+
+  const first = await siteService.createSite(input);
+  const second = await siteService.createSite({ ...input, siteName: "Readable Site Two" });
+  const [third, fourth] = await Promise.all([
+    siteService.createSite({ ...input, siteName: "Concurrent Site A" }),
+    siteService.createSite({ ...input, siteName: "Concurrent Site B" }),
+  ]);
+  const year = siteService.getJubanYear();
+
+  assert.match(first.id, /^new-\d+$/);
+  assert.equal(first.siteId, `SITE-${year}-001`);
+  assert.equal(second.siteId, `SITE-${year}-002`);
+  assert.notEqual(first.id, first.siteId);
+  assert.notEqual(first.siteId, second.siteId);
+  assert.notEqual(third.siteId, fourth.siteId);
+  assert.deepEqual(
+    [third.siteId, fourth.siteId].sort(),
+    [`SITE-${year}-003`, `SITE-${year}-004`]
+  );
+});
+
+test("Staff return and participant resubmission preserve the same request and review history", async () => {
+  records.seedlingRequests.set("request-returned", {
+    status: "Pending",
+    participantId: "participant-1",
+    participantName: "Participant One",
+    requestNumber: "REQ-2026-001",
+    inventoryDeducted: false,
+    inventoryReserved: false,
+    reviewHistory: [],
+  });
+  records.seedlingInventory.set("inventory-returned", {
+    species: "Narra",
+    scientificName: "Pterocarpus indicus",
+    category: "Native",
+    availableQuantity: 20,
+  });
+  records.sites.set("site-returned", {
+    siteName: "Revision Site",
+    status: "active",
+    barangay: "Bacolod",
+    maximumCapacity: 100,
+    planted: 10,
+    latitude: 12.82,
+    longitude: 124,
+  });
+
+  await assert.rejects(
+    service.returnSeedlingRequest("request-returned", "staff-1", "MENRO Staff", "   "),
+    /Please provide a reason/
+  );
+
+  const returned = await service.returnSeedlingRequest(
+    "request-returned",
+    "staff-1",
+    "MENRO Staff",
+    "  Please correct the selected planting site.  "
+  );
+  assert.equal(returned.status, "Returned");
+  assert.equal(returned.returnReason, "Please correct the selected planting site.");
+  assert.equal(returned.returnedBy, "staff-1");
+  assert.equal(returned.reviewHistory.at(-1).action, "returned");
+  assert.equal(records.notifications.size, 1);
+  await assert.rejects(
+    service.returnSeedlingRequest("request-returned", "staff-1", "MENRO Staff", "Again"),
+    /Only pending requests/
+  );
+
+  const inventoryBefore = { ...records.seedlingInventory.get("inventory-returned") };
+  const data = {
+    items: [{ inventoryId: "inventory-returned", quantity: 8 }],
+    purpose: "Community planting",
+    plantingLocation: "Revision Site, Bacolod",
+    preferredReleaseDate: validPreferredReleaseDate,
+    eventProposal: {
+      eventName: "Revised Event",
+      barangay: "Bacolod",
+      plantingSiteId: "site-returned",
+      proposedDate: validPreferredReleaseDate,
+      proposedStartTime: "08:00",
+      proposedEndTime: "10:00",
+      expectedParticipants: 12,
+      description: "Corrected request",
+    },
+  };
+
+  await assert.rejects(
+    service.resubmitSeedlingRequest("request-returned", "participant-2", data),
+    /only edit your own/
+  );
+  const resubmitted = await service.resubmitSeedlingRequest(
+    "request-returned",
+    "participant-1",
+    data
+  );
+  assert.equal(resubmitted.status, "Pending");
+  assert.equal(resubmitted.requestNumber, "REQ-2026-001");
+  assert.equal(resubmitted.returnReason, "");
+  assert.equal(resubmitted.reviewHistory.at(-1).action, "resubmitted");
+  assert.deepEqual(records.seedlingInventory.get("inventory-returned"), inventoryBefore);
+  await assert.rejects(
+    service.resubmitSeedlingRequest("request-returned", "participant-1", data),
+    /status has changed/
+  );
 });
 
 test("details return full stored data and missing requests return 404", async () => {
@@ -158,6 +302,9 @@ test("site edit updates only permitted fields and keeps the same record for list
   assert.equal(updated.planted, 20);
   assert.equal(updated.targetTrees, 80);
   assert.equal(updated.polygon.length, 3);
+  const readableLegacySite = await siteService.getSiteById("site-1");
+  assert.match(readableLegacySite.siteId, /^SITE-\d{4}-\d{3,}$/);
+  assert.equal(readableLegacySite.id, "site-1");
   await assert.rejects(siteService.updateSite("site-1", { maximumCapacity: 10 }, "staff-1"), /below the planted count/);
   const route = siteRoutes.stack.find((layer) => layer.route?.path === "/:id" && layer.route.methods.patch);
   assert.ok(route);
@@ -186,6 +333,10 @@ test("request submission rejects a real site in a different barangay", async () 
   await assert.rejects(service.createSeedlingRequest(payload), /does not belong/);
   const created = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: " bacolod " } });
   assert.equal(created.eventProposal.plantingSiteId, "site-2");
+  assert.match(created.requestNumber, /^REQ-\d{4}-\d{3,}$/);
+  const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bacolod" } });
+  assert.match(next.requestNumber, /^REQ-\d{4}-\d{3,}$/);
+  assert.notEqual(next.requestNumber, created.requestNumber);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
     .some((request) => request.id === created.id));
 });
@@ -196,14 +347,14 @@ test("review and decision roles remain separate", () => {
     assert.ok(layer);
     return layer.route.stack[1].handle;
   }
-  for (const [path, role] of [["/:id/review", "staff"], ["/:id/approve", "admin"], ["/:id/reject", "admin"]]) {
+  for (const [path, role] of [["/:id/review", "staff"], ["/:id/return", "staff"], ["/:id/resubmit", "participant"], ["/:id/approve", "admin"], ["/:id/reject", "admin"]]) {
     const handler = roleFor(path);
     const allowed = response();
     let nextCalled = false;
     handler({ user: { role } }, allowed, () => { nextCalled = true; });
     assert.equal(nextCalled, true);
     const denied = response();
-    handler({ user: { role: "participant" } }, denied, () => {});
+    handler({ user: { role: role === "participant" ? "staff" : "participant" } }, denied, () => {});
     assert.equal(denied.result.code, 403);
   }
 });

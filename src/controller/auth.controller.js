@@ -87,7 +87,7 @@ const updateProfile = async (req, res) => {
 
   try {
 
-    await authService.updateUserProfile(
+    const profile = await authService.updateUserProfile(
 
       req.user.uid,
 
@@ -102,7 +102,9 @@ const updateProfile = async (req, res) => {
 
       200,
 
-      "Profile updated"
+      "Profile updated",
+
+      profile
 
     );
 
@@ -112,15 +114,7 @@ const updateProfile = async (req, res) => {
 
     console.error(error);
 
-    return sendError(
-
-      res,
-
-      500,
-
-      error.message
-
-    );
+    return sendError(res, 400, error.message);
 
   }
 
@@ -139,7 +133,9 @@ const register = async (req, res) => {
       email,
       contactNumber,
       password,
-      organization
+      userType,
+      userTypeDetail,
+      barangay
 
     } = req.body || {};
 
@@ -157,7 +153,7 @@ const register = async (req, res) => {
 
       typeof password !== "string" || !password ||
 
-      typeof organization !== "string" || !organization.trim()
+      typeof userType !== "string" || !userType.trim()
 
     ) {
 
@@ -196,7 +192,9 @@ const register = async (req, res) => {
       email: normalizedEmail,
       contactNumber: normalizedContactNumber,
       password,
-      organization: organization.trim()
+      userType,
+      userTypeDetail,
+      barangay
     });
     return sendSuccess(
 
@@ -218,6 +216,9 @@ const register = async (req, res) => {
     }
     if (error.code === "auth/invalid-email" || error.code === "auth/invalid-password") {
       return sendError(res, 400, "Invalid registration details.");
+    }
+    if (/^Please (select|enter|specify)/.test(error.message || "")) {
+      return sendError(res, 400, error.message);
     }
     console.error("Registration failed:", error);
     return sendError(res, 500, "Registration failed. Please try again.");

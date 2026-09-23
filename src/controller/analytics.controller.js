@@ -3,10 +3,15 @@ const { sendSuccess, sendError } = require("../utils/response.util");
 
 async function dashboard(req, res) {
   try {
-    return sendSuccess(res, 200, "Dashboard analytics retrieved", await getDashboard());
+    return sendSuccess(res, 200, "Dashboard analytics retrieved", await getDashboard(req.query));
   } catch (error) {
     console.error(error);
-    return sendError(res, 500, "Failed to retrieve dashboard analytics.");
+    const isFilterError = /date filter|Date From/.test(error.message || "");
+    return sendError(
+      res,
+      isFilterError ? 400 : 500,
+      isFilterError ? error.message : "Failed to retrieve dashboard analytics."
+    );
   }
 }
 

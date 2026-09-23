@@ -100,6 +100,14 @@ const extractImageMetadata =
           metadata?.Model ??
           "",
 
+        software:
+          metadata?.Software ??
+          "",
+
+        orientation:
+          metadata?.Orientation ??
+          null,
+
       };
 
     }
@@ -118,10 +126,27 @@ const extractImageMetadata =
 
         deviceModel: "",
 
+        software: "",
+
+        orientation: null,
+
       };
 
     }
 
+};
+
+const isClearlyScreenshot = ({ fileName, metadata }) => {
+  const name = String(fileName || "").toLowerCase();
+  const software = String(metadata?.software || "").toLowerCase();
+  const strongSoftwareSignal = /(screenshot|snipping tool|screen capture|greenshot|lightshot|sharex)/.test(software);
+  const weakFilenameSignal = /(screenshot|screen[_ -]?shot|snip)/.test(name);
+  const lacksCameraProvenance = !metadata?.deviceMake && !metadata?.deviceModel;
+  const lacksGps = metadata?.latitude === null || metadata?.longitude === null ||
+    !Number.isFinite(Number(metadata?.latitude)) ||
+    !Number.isFinite(Number(metadata?.longitude));
+  return strongSoftwareSignal ||
+    (weakFilenameSignal && lacksCameraProvenance && lacksGps);
 };
 
 module.exports = {
@@ -131,5 +156,7 @@ module.exports = {
   validateImageBuffer,
 
   extractImageMetadata,
+
+  isClearlyScreenshot,
 
 };

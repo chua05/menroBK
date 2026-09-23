@@ -63,7 +63,8 @@ require.cache[storagePath] = {
 };
 const { attachEvidence } = require("../src/services/plantingEvidence.service");
 const { validatePlantingReport } = require("../src/utils/plantingVerification.util");
-const { validateImageBuffer } = require("../src/utils/imageVerification.util");
+const { validateImageBuffer, isClearlyScreenshot } = require("../src/utils/imageVerification.util");
+const { isPointInPolygon } = require("../src/utils/geo.util");
 
 test("GPS mismatches stay truthful findings and invalid image bytes remain rejected", async () => {
   const result = validatePlantingReport({
@@ -73,6 +74,32 @@ test("GPS mismatches stay truthful findings and invalid image bytes remain rejec
   assert.equal(result.gpsValid, false);
   assert.ok(result.suspiciousFlags.includes("GPS_MISMATCH"));
   await assert.rejects(validateImageBuffer(Buffer.from("not an image")), /not a valid image/);
+});
+
+test("screenshot detection requires a strong signal or combined weak signals", () => {
+  assert.equal(isClearlyScreenshot({
+    fileName: "Screenshot_20260922.png",
+    metadata: { latitude: null, longitude: null, deviceMake: "", deviceModel: "", software: "" },
+  }), true);
+  assert.equal(isClearlyScreenshot({
+    fileName: "original-photo.jpg",
+    metadata: { latitude: null, longitude: null, deviceMake: "", deviceModel: "", software: "" },
+  }), false);
+  assert.equal(isClearlyScreenshot({
+    fileName: "photo.jpg",
+    metadata: { latitude: 12, longitude: 123, deviceMake: "", deviceModel: "", software: "Snipping Tool" },
+  }), true);
+});
+
+test("photo coordinates are checked against the registered site polygon", () => {
+  const polygon = [
+    { lat: 12, lng: 123 },
+    { lat: 12, lng: 124 },
+    { lat: 13, lng: 124 },
+    { lat: 13, lng: 123 },
+  ];
+  assert.equal(isPointInPolygon(12.5, 123.5, polygon), true);
+  assert.equal(isPointInPolygon(14, 123.5, polygon), false);
 });
 
 test("evidence stays with its contributor and records real missing-metadata findings", async () => {

@@ -58,10 +58,14 @@ const serializeUser = (user) => {
 
   return {
     uid: user.uid || "",
+    userNumber: user.userNumber || "",
     fullName: user.fullName || "",
     username: user.username || "",
     email: user.email || "",
     contactNumber: user.contactNumber || "",
+    userType: user.userType || "",
+    userTypeDetail: user.userTypeDetail || "",
+    affiliationName: user.affiliationName || user.organization || "",
     organization: user.organization || "",
     barangay: user.barangay || "",
     role: normalizedRole,

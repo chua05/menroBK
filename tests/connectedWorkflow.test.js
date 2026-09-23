@@ -103,6 +103,9 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     assert.equal(table("events").get(withoutGuests.eventId).sourceRequestId, "approve-zero");
     assert.equal(table("events").get(withoutGuests.eventId).seedlingTotalQuantity, 0);
     assert.equal(table("eventInvitations").has(withoutGuests.eventId), false);
+    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 90);
+    assert.equal(table("seedlingInventory").get("calamansi").reservedQuantity, 10);
+    assert.equal(withoutGuests.inventoryDeducted, true);
 
     seedReviewed("approve-guests", 4);
     await assert.rejects(requestService.approveSeedlingRequest("approve-guests", "admin-1"), /GUEST_INVITATION_SECRET/);
@@ -116,6 +119,16 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     const count = table("events").size;
     await requestService.approveSeedlingRequest("approve-guests", "admin-1");
     assert.equal(table("events").size, count);
+    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 90);
+
+    seedReviewed("approve-insufficient", 0);
+    table("seedlingInventory").get("calamansi").availableQuantity = 9;
+    await assert.rejects(
+      requestService.approveSeedlingRequest("approve-insufficient", "admin-1"),
+      /Insufficient available sapling stock for Calamansi/
+    );
+    assert.equal(table("seedlingRequests").get("approve-insufficient").status, "Reviewed");
+    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 9);
   } finally {
     process.env.GUEST_INVITATION_SECRET = originalSecret;
   }
@@ -132,6 +145,10 @@ test("partial release updates real stock, distribution, event allocation, and no
   assert.equal(table("distributions").get("request-1").items[0].releasedQuantity, 90);
   assert.equal(table("events").get("EVT-2026-001").seedlingItems[0].quantity, 90);
   assert.equal(table("plantingReports").get("event_EVT-2026-001").quantityReleased, 90);
+  assert.match(
+    table("plantingReports").get("event_EVT-2026-001").reportNumber,
+    /^RPT-\d{4}-\d{3,}$/
+  );
   assert.equal(table("plantingReports").get("event_EVT-2026-001").verificationStatus, "Pending");
   assert.equal(table("notifications").get("request_released_request-1").relatedEventId, "EVT-2026-001");
   const notificationCount = table("notifications").size;
@@ -187,7 +204,16 @@ test("requester evidence moves a released parent from Pending to Pending Review 
   const event = table("events").get("EVT-2026-001");
   Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
   table("sites").set("site-1", { status: "active", siteName: "Site One", barangay: "Bacolod", latitude: 12, longitude: 123 });
-  const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } }).png().toBuffer();
+  const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } })
+    .jpeg()
+    .withExif({
+      IFD0: { Make: "Test Camera", Model: "Geo Test" },
+      IFD3: {
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 0/1 0/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 0/1 0/1",
+      },
+    })
+    .toBuffer();
   const payload = {
     distributionId: "request-1", inventoryId: "calamansi", siteId: "site-1",
     participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
@@ -198,12 +224,12 @@ test("requester evidence moves a released parent from Pending to Pending Review 
   await assert.rejects(reportService.createPlantingReport(payload, []), /photo is required/);
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   await assert.rejects(reportService.createPlantingReport({ ...payload, plantingDate: "2026-02-30" },
-    [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]), /valid planting date/);
+    [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]), /valid planting date/);
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   let submitted;
   try {
     submitted = await reportService.createPlantingReport(payload,
-      [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]);
+      [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]);
     assert.equal(submitted.verificationStatus, "Pending Review");
     assert.ok(submitted.submittedAt);
     assert.equal(submitted.submissions.length, 1);
@@ -211,7 +237,7 @@ test("requester evidence moves a released parent from Pending to Pending Review 
     assert.equal(submitted.submissions[0].photos.length, 1);
     assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending Review");
     await assert.rejects(reportService.createPlantingReport(payload,
-      [{ buffer: image, mimetype: "image/png", originalname: "evidence.png" }]));
+      [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]));
     assert.equal(table("plantingContributions").size, 1);
   } finally {
     for (const item of submitted?.submissions || []) {
@@ -220,7 +246,7 @@ test("requester evidence moves a released parent from Pending to Pending Review 
   }
 });
 
-test("valid camera-style image submits without captured GPS and preserves missing metadata", async () => {
+test("image without EXIF GPS is rejected even when client coordinates are supplied", async () => {
   const sharp = require("sharp");
   const controller = require("../src/controller/plantingReport.controller");
   const reportService = require("../src/services/plantingReport.service");
@@ -245,27 +271,14 @@ test("valid camera-style image submits without captured GPS and preserves missin
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
   const res = { result: {}, status(code) { this.result.code = code; return this; },
     json(value) { this.result.body = value; return this; } };
-  try {
-    await controller.submitPlantingReport({ body, user: { uid: "participant-1" }, files: { photo: [file] } }, res);
-    assert.equal(res.result.code, 201);
-    const report = res.result.body.data;
-    assert.equal(report.verificationStatus, "Pending Review");
-    assert.equal(report.submissions[0].latitude, null);
-    assert.equal(report.submissions[0].longitude, null);
-    assert.equal(report.submissions[0].photos[0].gpsMetadataPresent, false);
-    assert.equal(report.submissions[0].photos[0].gpsValid, false);
-    assert.ok(report.submissions[0].photos[0].suspiciousFlags.includes("GPS_METADATA_MISSING"));
-    assert.equal(report.submissions[0].photos[0].automatedStatus, null);
-    assert.equal(report.automatedVerificationStatus, null);
-    assert.ok(report.submissions[0].photos[0].photoPath);
-  } finally {
-    for (const submission of res.result.body?.data?.submissions || []) {
-      for (const photo of submission.photos || []) await deletePlantingPhoto(photo.photoPath);
-    }
-  }
+  body.latitude = 12;
+  body.longitude = 123;
+  await controller.submitPlantingReport({ body, user: { uid: "participant-1" }, files: { photo: [file] } }, res);
+  assert.equal(res.result.code, 400);
+  assert.match(res.result.body.message, /does not contain GPS location metadata/);
 });
 
-test("out-of-site captured coordinates remain informational and do not block evidence", async () => {
+test("client device coordinates never substitute for missing photo EXIF GPS", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -278,24 +291,16 @@ test("out-of-site captured coordinates remain informational and do not block evi
   });
   table("sites").set("site-outside", { status: "active", siteName: "Site", barangay: "Bacolod", latitude: 12, longitude: 123 });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "red" } }).png().toBuffer();
-  let report;
-  try {
-    report = await reportService.createPlantingReport({
+  await assert.rejects(
+    reportService.createPlantingReport({
       distributionId: "request-outside", inventoryId: "calamansi", siteId: "site-outside",
       participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
       quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site",
       latitude: 0, longitude: 0, eventId: "EVT-OUTSIDE",
-    }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]);
-    assert.equal(report.verificationStatus, "Pending Review");
-    assert.equal(report.submissions[0].siteGpsValid, false);
-    assert.ok(report.submissions[0].suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
-    assert.equal(report.automatedVerificationStatus, null);
-    assert.equal(table("sites").get("site-outside").latitude, 12);
-  } finally {
-    for (const submission of report?.submissions || []) {
-      for (const photo of submission.photos || []) await deletePlantingPhoto(photo.photoPath);
-    }
-  }
+    }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]),
+    /does not contain GPS location metadata/
+  );
+  assert.equal(table("sites").get("site-outside").latitude, 12);
 });
 
 test("participant monitoring returns only own records and accepts an empty history", async () => {
@@ -317,7 +322,8 @@ test("participant monitoring returns only own records and accepts an empty histo
   const own = response();
   await controller.getMyMonitoringRecords({ user: { uid: "participant-1" } }, own);
   assert.equal(own.result.code, 200);
-  assert.deepEqual(own.result.body.data.map((item) => item.id), ["own-1"]);
+  assert.deepEqual(own.result.body.data.map((item) => item.id), ["legacy-own-1"]);
+  assert.deepEqual(own.result.body.data[0].history.map((item) => item.id), ["own-1"]);
 });
 
 test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {

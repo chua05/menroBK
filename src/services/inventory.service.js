@@ -7,6 +7,7 @@ const {
 } = require(
   "firebase-admin/firestore"
 );
+const { nextRecordNumber } = require("../utils/recordNumber.util");
 
 const COLLECTION =
   "seedlingInventory";
@@ -136,13 +137,21 @@ const createInventory = async (
     updatedAt: now,
   };
 
-  const docRef =
-    await inventoryCollection.add(
-      inventoryData
-    );
+  const docRef = inventoryCollection.doc();
+  let inventoryNumber = "";
+  await db.runTransaction(async (transaction) => {
+    inventoryNumber = await nextRecordNumber(transaction, {
+      prefix: "INV",
+      counterKey: "seedlingInventory",
+      date: now.toDate(),
+      timestamp: now,
+    });
+    transaction.create(docRef, { ...inventoryData, inventoryNumber });
+  });
 
   return {
     id: docRef.id,
+    inventoryNumber,
     ...inventoryData,
   };
 };
@@ -238,6 +247,7 @@ const getAvailableInventoryItems =
       )
       .map((item) => ({
         id: item.id,
+        inventoryNumber: item.inventoryNumber || "",
 
         species:
           item.species || "",

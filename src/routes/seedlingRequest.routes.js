@@ -16,6 +16,8 @@ const {
   getSeedlingRequest,
   getMySeedlingRequests,
   markRequestReviewed,
+  returnRequestForRevision,
+  resubmitRequest,
   approveRequest,
   rejectRequest,
   releaseRequest,
@@ -71,6 +73,22 @@ router.patch(
   verifyToken,
   authorizeRoles("staff"),
   markRequestReviewed
+);
+
+// Staff may return only a currently pending request for participant revision.
+router.patch(
+  "/:id/return",
+  verifyToken,
+  authorizeRoles("staff"),
+  returnRequestForRevision
+);
+
+// Participant updates and resubmits the same returned request document.
+router.patch(
+  "/:id/resubmit",
+  verifyToken,
+  authorizeRoles("participant"),
+  resubmitRequest
 );
 
 // ========================================

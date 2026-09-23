@@ -5,10 +5,16 @@ const {
   getSeedlingRequestsByStatus,
   getSeedlingRequestsByParticipantId,
   reviewSeedlingRequest,
+  returnSeedlingRequest,
+  resubmitSeedlingRequest,
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
 } = require("../services/seedlingRequest.service");
+const {
+  validatePreferredReleaseDate,
+  validateProposedEventDate,
+} = require("../utils/requestDate.util");
 
 // ========================================
 // HELPER — CLEAN STRING
@@ -124,6 +130,97 @@ const validateRequestItems = (
   );
 };
 
+const validateResubmissionPayload = (body = {}) => {
+  const {
+    items,
+    purpose,
+    plantingLocation,
+    preferredReleaseDate,
+    eventProposal,
+  } = body;
+
+  if (
+    !cleanString(purpose) ||
+    !cleanString(plantingLocation) ||
+    !preferredReleaseDate ||
+    !eventProposal
+  ) {
+    throw new Error("All seedling request and event proposal fields are required.");
+  }
+
+  const validatedItems = validateRequestItems(items);
+  const proposedStartTime =
+    eventProposal.proposedStartTime ?? eventProposal.startTime;
+  const proposedEndTime =
+    eventProposal.proposedEndTime ?? eventProposal.endTime;
+  const description =
+    eventProposal.description ?? eventProposal.eventDescription;
+  const expectedParticipants = Number(eventProposal.expectedParticipants ?? 0);
+  const latitude = Number(eventProposal.latitude);
+  const longitude = Number(eventProposal.longitude);
+
+  if (
+    !cleanString(eventProposal.eventName) ||
+    !cleanString(eventProposal.barangay) ||
+    !cleanString(eventProposal.plantingSiteId) ||
+    !eventProposal.proposedDate ||
+    !proposedStartTime ||
+    !proposedEndTime ||
+    !cleanString(eventProposal.eventLocation) ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude)
+  ) {
+    throw new Error("All required event proposal fields must be provided.");
+  }
+
+  if (latitude < -90 || latitude > 90) {
+    throw new Error("Event latitude must be between -90 and 90.");
+  }
+
+  if (longitude < -180 || longitude > 180) {
+    throw new Error("Event longitude must be between -180 and 180.");
+  }
+
+  if (!Number.isInteger(expectedParticipants) || expectedParticipants < 0) {
+    throw new Error("Expected participants must be a nonnegative integer.");
+  }
+
+  const preferredDateError = validatePreferredReleaseDate(preferredReleaseDate);
+  if (preferredDateError) throw new Error(preferredDateError);
+
+  const proposedDateError = validateProposedEventDate(eventProposal.proposedDate);
+  if (proposedDateError) throw new Error(proposedDateError);
+
+  const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
+  if (!timePattern.test(proposedStartTime) || !timePattern.test(proposedEndTime)) {
+    throw new Error("Event time must use HH:MM format.");
+  }
+
+  if (proposedStartTime >= proposedEndTime) {
+    throw new Error("Event end time must be later than the start time.");
+  }
+
+  return {
+    items: validatedItems,
+    purpose: cleanString(purpose),
+    plantingLocation: cleanString(plantingLocation),
+    preferredReleaseDate,
+    eventProposal: {
+      eventName: cleanString(eventProposal.eventName),
+      barangay: cleanString(eventProposal.barangay),
+      plantingSiteId: cleanString(eventProposal.plantingSiteId),
+      proposedDate: eventProposal.proposedDate,
+      proposedStartTime,
+      proposedEndTime,
+      eventLocation: cleanString(eventProposal.eventLocation),
+      latitude,
+      longitude,
+      expectedParticipants,
+      description: cleanString(description),
+    },
+  };
+};
+
 // ========================================
 // PARTICIPANT — SUBMIT REQUEST
 // ========================================
@@ -137,26 +234,31 @@ const submitSeedlingRequest = async (
       req.user.uid;
 
     const {
-      participantName =
-        req.user.fullName ||
-        req.user.name ||
-        "",
-
-      organization =
-        req.user.organization ||
-        req.user.barangay ||
-        "",
-
-      contactNumber =
-        req.user.contactNumber ||
-        "",
-
       items,
       purpose,
       plantingLocation,
       preferredReleaseDate,
       eventProposal,
     } = req.body || {};
+
+    // Profile identity is server-owned; never trust request-body overrides.
+    const participantName = req.user.fullName || req.user.name || "";
+    const organization = req.user.organization || "";
+    const contactNumber = req.user.contactNumber || "";
+
+    if (!cleanString(organization)) {
+      return res.status(400).json({
+        success: false,
+        message: "Your organization information is missing from your profile. Please update your profile before submitting this request.",
+      });
+    }
+
+    if (!cleanString(contactNumber)) {
+      return res.status(400).json({
+        success: false,
+        message: "Your contact number is missing from your profile. Please update your profile before submitting this request.",
+      });
+    }
 
     // ========================================
     // BASIC REQUEST VALIDATION
@@ -307,31 +409,19 @@ const submitSeedlingRequest = async (
     // DATE VALIDATION
     // ========================================
 
-    const parsedEventDate =
-      new Date(
-        `${proposedDate}T00:00:00`
-      );
-
-    if (
-      Number.isNaN(
-        parsedEventDate.getTime()
-      )
-    ) {
+    const preferredDateError = validatePreferredReleaseDate(preferredReleaseDate);
+    if (preferredDateError) {
       return res.status(400).json({
         success: false,
-        message:
-          "Invalid proposed event date.",
+        message: preferredDateError,
       });
     }
 
-    // Proposed date must not be in the past (local date comparison)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    if (parsedEventDate.getTime() < today.getTime()) {
+    const proposedDateError = validateProposedEventDate(proposedDate);
+    if (proposedDateError) {
       return res.status(400).json({
         success: false,
-        message: "Proposed event date cannot be in the past.",
+        message: proposedDateError,
       });
     }
 
@@ -622,11 +712,7 @@ const markRequestReviewed =
         purpose,
         plantingLocation,
         preferredReleaseDate,
-        reviewRemarks,
-        reviewFindings,
       } = req.body || {};
-
-      const findings = reviewRemarks ?? reviewFindings;
 
       if (
         !cleanString(
@@ -636,12 +722,19 @@ const markRequestReviewed =
           plantingLocation
         ) ||
         !preferredReleaseDate
-        || !cleanString(findings)
       ) {
         return res.status(400).json({
           success: false,
           message:
             "All review fields are required.",
+        });
+      }
+
+      const preferredDateError = validatePreferredReleaseDate(preferredReleaseDate);
+      if (preferredDateError) {
+        return res.status(400).json({
+          success: false,
+          message: preferredDateError,
         });
       }
 
@@ -660,7 +753,6 @@ const markRequestReviewed =
             purpose: cleanString(purpose),
             plantingLocation: cleanString(plantingLocation),
             preferredReleaseDate,
-            reviewRemarks: cleanString(findings),
           }
         );
 
@@ -678,7 +770,6 @@ const markRequestReviewed =
         "At least one seedling must be selected.",
         "A maximum of 10 seedling types may be requested at a time.",
         "The same seedling inventory cannot be selected more than once.",
-        "Review findings/remarks are required.",
         "One of the linked seedling inventory records was not found.",
       ].includes(error.message) || /^Seedling item \d+ (has no selected inventory|must have a positive whole-number quantity)\.$/.test(error.message);
       const statusCode = notFound ? 404 : conflict ? 409 : invalid ? 400 : 500;
@@ -690,6 +781,74 @@ const markRequestReviewed =
       });
     }
   };
+
+const returnRequestForRevision = async (req, res) => {
+  try {
+    const reason = cleanString(req.body?.reason);
+
+    if (!reason) {
+      return res.status(400).json({
+        success: false,
+        message: "Please provide a reason so the participant knows what needs to be corrected.",
+      });
+    }
+
+    if (reason.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: "Reason for return must be 500 characters or fewer.",
+      });
+    }
+
+    const request = await returnSeedlingRequest(
+      req.params.id,
+      req.user.uid,
+      req.user.fullName || req.user.name || "",
+      reason
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Request returned to the participant for revision.",
+      data: request,
+    });
+  } catch (error) {
+    const notFound = error.message === "Seedling request not found.";
+    const conflict = error.message === "Only pending requests can be returned for revision.";
+    const statusCode = notFound ? 404 : conflict ? 409 : 400;
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || "Unable to return the request for revision.",
+    });
+  }
+};
+
+const resubmitRequest = async (req, res) => {
+  try {
+    const requestData = validateResubmissionPayload(req.body);
+    const request = await resubmitSeedlingRequest(
+      req.params.id,
+      req.user.uid,
+      requestData
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Request resubmitted successfully for MENRO Staff review.",
+      data: request,
+    });
+  } catch (error) {
+    const notFound = error.message === "Seedling request not found.";
+    const forbidden = error.message === "You can only edit your own returned request.";
+    const conflict = error.message === "This request can no longer be edited because its status has changed.";
+    const statusCode = notFound ? 404 : forbidden ? 403 : conflict ? 409 : 400;
+
+    return res.status(statusCode).json({
+      success: false,
+      message: error.message || "Unable to resubmit the request. Please try again.",
+    });
+  }
+};
 
 // ========================================
 // ADMIN — FINAL APPROVAL
@@ -815,6 +974,8 @@ module.exports = {
   getSeedlingRequest,
   getMySeedlingRequests,
   markRequestReviewed,
+  returnRequestForRevision,
+  resubmitRequest,
   approveRequest,
   rejectRequest,
   releaseRequest,

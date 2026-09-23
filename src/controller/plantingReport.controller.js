@@ -81,11 +81,6 @@ const submitPlantingReport = async (
       plantingDate,
       plantingLocation,
 
-      latitude,
-      longitude,
-      accuracy,
-      locationCapturedAt,
-
       eventId,
       eventName,
 
@@ -164,73 +159,6 @@ const submitPlantingReport = async (
 
 
     // --------------------------------
-    // LATITUDE
-    // --------------------------------
-    // Testing: device GPS may be unavailable even when the image is valid.
-    const hasLatitude = latitude !== undefined && latitude !== null && latitude !== "";
-    const hasLongitude = longitude !== undefined && longitude !== null && longitude !== "";
-    const rawLatitude = hasLatitude ? Number(latitude) : null;
-
-
-    // --------------------------------
-    // LONGITUDE
-    // --------------------------------
-    const rawLongitude = hasLongitude ? Number(longitude) : null;
-    const validCapturedGps = hasLatitude && hasLongitude &&
-      Number.isFinite(rawLatitude) && rawLatitude >= -90 && rawLatitude <= 90 &&
-      Number.isFinite(rawLongitude) && rawLongitude >= -180 && rawLongitude <= 180;
-    const parsedLatitude = validCapturedGps ? rawLatitude : null;
-    const parsedLongitude = validCapturedGps ? rawLongitude : null;
-
-
-    // --------------------------------
-    // OPTIONAL GPS ACCURACY
-    // --------------------------------
-    let parsedAccuracy = null;
-
-    if (
-      accuracy !== undefined &&
-      accuracy !== null &&
-      accuracy !== ""
-    ) {
-      parsedAccuracy =
-        Number(accuracy);
-
-      if (
-        !Number.isFinite(
-          parsedAccuracy
-        ) ||
-        parsedAccuracy < 0
-      ) {
-        parsedAccuracy = null;
-      }
-    }
-
-
-    // --------------------------------
-    // LOCATION CAPTURE TIME
-    // --------------------------------
-    if (locationCapturedAt) {
-      const capturedDate =
-        new Date(
-          locationCapturedAt
-        );
-
-      if (
-        Number.isNaN(
-          capturedDate.getTime()
-        )
-      ) {
-        return res.status(400).json({
-          success: false,
-          message:
-            "The location capture timestamp is invalid.",
-        });
-      }
-    }
-
-
-    // --------------------------------
     // CREATE REPORT
     // --------------------------------
     const report =
@@ -264,19 +192,6 @@ const submitPlantingReport = async (
           plantingDate,
 
           plantingLocation,
-
-          latitude:
-            parsedLatitude,
-
-          longitude:
-            parsedLongitude,
-
-          accuracy:
-            parsedAccuracy,
-
-          locationCapturedAt:
-            locationCapturedAt ||
-            null,
 
           eventId:
             eventId || "",
@@ -342,6 +257,8 @@ const submitPlantingReport = async (
       "At least one planting evidence photo is required.",
       "A maximum of 10 planting evidence photos is allowed.",
       "The uploaded file is not a valid image.",
+      "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information.",
+      "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo.",
       "The selected planting site is inactive.",
       "The selected planting site has invalid coordinates.",
       "Selected event does not match the released distribution.",

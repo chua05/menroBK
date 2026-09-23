@@ -10,6 +10,7 @@ function rows(name) {
 function doc(name, id) {
   return {
     id,
+    name,
     async get() {
       const value = rows(name).get(id);
       return { id, exists: value !== undefined, data: () => value };
@@ -28,9 +29,27 @@ function collection(name) {
   };
 }
 const firebasePath = require.resolve("../src/config/firebase");
+const db = {
+  collection,
+  async runTransaction(callback) {
+    const writes = [];
+    await callback({
+      get: (reference) => reference.get(),
+      create(reference, value) { writes.push(["create", reference, value]); },
+      update(reference, value) { writes.push(["update", reference, value]); },
+    });
+    for (const [operation, reference, value] of writes) {
+      const target = rows(reference.name);
+      target.set(
+        reference.id,
+        operation === "update" ? { ...target.get(reference.id), ...value } : value
+      );
+    }
+  },
+};
 require.cache[firebasePath] = {
   id: firebasePath, filename: firebasePath, loaded: true,
-  exports: { db: { collection } },
+  exports: { db },
 };
 const service = require("../src/services/generatedReport.service");
 
@@ -59,6 +78,7 @@ test("event participation report uses real guest records without exporting conta
   assert.equal(JSON.stringify(reportRows).includes("09123456789"), false);
   const generated = await service.generateReport(filters, { uid: "staff-1", fullName: "MENRO Staff" });
   assert.equal(generated.generatedBy, "staff-1");
+  assert.match(generated.reportNumber, /^RPT-\d{4}-\d{3,}$/);
   assert.ok(generated.generatedAt.toDate());
   const pdf = await service.generatedPdf(generated.id);
   assert.equal(pdf.bytes.subarray(0, 8).toString(), "%PDF-1.4");

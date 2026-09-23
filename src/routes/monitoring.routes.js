@@ -1,7 +1,4 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
 const multer = require("multer");
 
 const router =
@@ -35,63 +32,9 @@ const {
 // MONITORING PHOTO STORAGE
 // ========================================
 
-const monitoringUploadDir =
-  path.join(
-    process.cwd(),
-    "uploads",
-    "monitoring"
-  );
-
-fs.mkdirSync(
-  monitoringUploadDir,
-  {
-    recursive: true,
-  }
-);
-
-const storage =
-  multer.diskStorage({
-    destination: (
-      req,
-      file,
-      callback
-    ) => {
-      callback(
-        null,
-        monitoringUploadDir
-      );
-    },
-
-    filename: (
-      req,
-      file,
-      callback
-    ) => {
-      const extension =
-        path
-          .extname(
-            file.originalname
-          )
-          .toLowerCase() ||
-        ".jpg";
-
-      const uniqueName =
-        `${Date.now()}-${crypto
-          .randomBytes(8)
-          .toString(
-            "hex"
-          )}${extension}`;
-
-      callback(
-        null,
-        uniqueName
-      );
-    },
-  });
-
 const upload =
   multer({
-    storage,
+    storage: multer.memoryStorage(),
 
     limits: {
       fileSize:

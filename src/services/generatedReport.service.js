@@ -1,6 +1,7 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { pdfFromLines } = require("../utils/simplePdf.util");
+const { nextRecordNumber } = require("../utils/recordNumber.util");
 
 const history = db.collection("generatedReports");
 const TYPES = new Set([
@@ -100,18 +101,21 @@ async function buildRows(filters) {
         : record.releasedAt || record.submittedAt || record.createdAt
     ), filters)).map((record) => {
       if (type === "seedling-distribution") return {
-        distributionId: record.id, requestId: record.requestId || "",
+        distributionId: record.distributionNumber || record.id,
+        requestId: record.requestNumber || record.requestId || "",
         participant: record.participantName || "", date: isoDate(record.releasedAt),
         quantityReleased: Number(record.totalQuantityReleased ?? record.quantityReleased ?? 0),
         status: record.status || "",
       };
       if (type === "planting-activity") return {
-        reportId: record.id, requestId: record.requestId || "", eventId: record.eventId || "",
+        reportId: record.reportNumber || record.id,
+        requestId: record.requestNumber || record.requestId || "", eventId: record.eventId || "",
         requester: record.participantName || "", date: isoDate(record.submittedAt || record.createdAt),
         quantityPlanted: Number(record.quantityPlanted || 0), status: record.verificationStatus || "",
       };
       return {
-        monitoringId: record.id, reportId: record.plantingReportId || "",
+        monitoringId: record.monitoringNumber || record.id,
+        reportId: record.plantingReportNumber || record.plantingReportId || "",
         date: isoDate(record.monitoringDate || record.createdAt),
         healthyCount: record.healthyCount ?? null,
         damagedCount: record.damagedCount ?? null,
@@ -164,6 +168,7 @@ async function generateReport(input, user) {
     await ref.collection("chunks").doc(String(index / chunkSize).padStart(6, "0"))
       .create({ rows: rows.slice(index, index + chunkSize) });
   }
+  let reportNumber = "";
   const record = {
     type: filters.type,
     filters,
@@ -173,9 +178,19 @@ async function generateReport(input, user) {
     rowCount: rows.length,
     chunkCount: Math.ceil(rows.length / chunkSize),
     status: "Generated",
-    fileName: `${filters.type}-${ref.id}.pdf`,
+    fileName: "",
   };
-  await ref.create(record);
+  await db.runTransaction(async (transaction) => {
+    reportNumber = await nextRecordNumber(transaction, {
+      prefix: "RPT",
+      counterKey: "plantingReports",
+      date: generatedAt.toDate(),
+      timestamp: generatedAt,
+    });
+    record.reportNumber = reportNumber;
+    record.fileName = `${reportNumber}.pdf`;
+    transaction.create(ref, record);
+  });
   return { id: ref.id, ...record, downloadPath: `/api/reports/${ref.id}/download` };
 }
 

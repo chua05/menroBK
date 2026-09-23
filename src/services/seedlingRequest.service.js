@@ -40,6 +40,9 @@ const INVENTORY_COLLECTION =
 const SITES_COLLECTION =
   "sites";
 
+const COUNTERS_COLLECTION = "counters";
+const REQUEST_COUNTER_DOCUMENT = "seedlingRequests";
+
 // ========================================
 // HELPERS
 // ========================================
@@ -285,6 +288,17 @@ const createSeedlingRequest =
 
       updatedAt:
         now,
+
+      reviewHistory: [
+        ...(Array.isArray(data.reviewHistory) ? data.reviewHistory : []),
+        {
+          action: "submitted",
+          actorId: cleanString(data.participantId),
+          actorName: cleanString(data.participantName),
+          actorRole: "participant",
+          at: now,
+        },
+      ],
     };
 
     // Remove legacy client values if supplied.
@@ -328,10 +342,36 @@ const createSeedlingRequest =
       throw new Error("Selected planting site is already full.");
     }
 
-    const docRef =
-      await db
-        .collection(COLLECTION)
-        .add(requestData);
+    const docRef = db.collection(COLLECTION).doc();
+    const requestYear = Number(new Intl.DateTimeFormat("en", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+    }).format(new Date()));
+    const counterRef = db.collection(COUNTERS_COLLECTION)
+      .doc(`${REQUEST_COUNTER_DOCUMENT}_${requestYear}`);
+
+    await db.runTransaction(async (transaction) => {
+      const counterDoc = await transaction.get(counterRef);
+      const currentValue = counterDoc.exists
+        ? Number(counterDoc.data()?.lastNumber || 0)
+        : 0;
+      const nextValue = currentValue + 1;
+      if (!Number.isSafeInteger(nextValue) || nextValue <= 0) {
+        throw new Error("Unable to generate the next request number.");
+      }
+
+      const requestNumber = `REQ-${requestYear}-${String(nextValue).padStart(3, "0")}`;
+      transaction.set(counterRef, {
+        year: requestYear,
+        lastNumber: nextValue,
+        updatedAt: now,
+      }, { merge: true });
+      transaction.create(docRef, {
+        ...requestData,
+        requestNumber,
+      });
+      requestData.requestNumber = requestNumber;
+    });
 
     return {
       id:
@@ -464,12 +504,6 @@ const reviewSeedlingRequest =
 
     validateItemStructure(reviewItems);
 
-    const reviewRemarks = cleanString(reviewData.reviewRemarks || "");
-
-    if (!reviewRemarks) {
-      throw new Error("Review findings/remarks are required.");
-    }
-
     await db.runTransaction(async (transaction) => {
       const doc = await transaction.get(docRef);
 
@@ -477,7 +511,9 @@ const reviewSeedlingRequest =
         throw new Error("Seedling request not found.");
       }
 
-      if (doc.data().status !== "Pending") {
+      const currentRequest = doc.data();
+
+      if (currentRequest.status !== "Pending") {
         throw new Error("Only pending requests can be reviewed.");
       }
 
@@ -516,10 +552,22 @@ const reviewSeedlingRequest =
         preferredReleaseDate: reviewData.preferredReleaseDate,
         reviewedBy: reviewData.reviewedBy,
         reviewedByName: reviewData.reviewedByName || "",
-        reviewRemarks,
+        reviewRemarks: "",
         reviewedAt: now,
         status: "Reviewed",
         updatedAt: now,
+        reviewHistory: [
+          ...(Array.isArray(currentRequest.reviewHistory)
+            ? currentRequest.reviewHistory
+            : []),
+          {
+            action: "reviewed",
+            actorId: reviewData.reviewedBy,
+            actorName: reviewData.reviewedByName || "",
+            actorRole: "staff",
+            at: now,
+          },
+        ],
       });
     });
 
@@ -533,6 +581,214 @@ const reviewSeedlingRequest =
       ...updatedDoc.data(),
     };
   };
+
+// ========================================
+// STAFF RETURN FOR REVISION
+//
+// Pending -> Returned
+// No inventory or event mutation occurs here.
+// ========================================
+
+const returnSeedlingRequest = async (
+  id,
+  returnedBy,
+  returnedByName,
+  reason
+) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  const returnReason = cleanString(reason);
+
+  if (!returnReason) {
+    throw new Error("Please provide a reason so the participant knows what needs to be corrected.");
+  }
+
+  await db.runTransaction(async (transaction) => {
+    const requestDoc = await transaction.get(requestRef);
+
+    if (!requestDoc.exists) {
+      throw new Error("Seedling request not found.");
+    }
+
+    const request = requestDoc.data();
+
+    if (request.status !== "Pending") {
+      throw new Error("Only pending requests can be returned for revision.");
+    }
+
+    const now = Timestamp.now();
+    const existingHistory = Array.isArray(request.reviewHistory)
+      ? request.reviewHistory
+      : [];
+    const revisionNumber = existingHistory.filter(
+      (entry) => entry?.action === "returned"
+    ).length + 1;
+
+    transaction.update(requestRef, {
+      status: "Returned",
+      returnReason,
+      returnedBy,
+      returnedByName: cleanString(returnedByName),
+      returnedAt: now,
+      updatedAt: now,
+      reviewHistory: [
+        ...existingHistory,
+        {
+          action: "returned",
+          actorId: returnedBy,
+          actorName: cleanString(returnedByName),
+          actorRole: "staff",
+          reason: returnReason,
+          at: now,
+        },
+      ],
+    });
+
+    createNotificationInTransaction(transaction, {
+      notificationId: `request_returned_${id}_${revisionNumber}`,
+      recipientUserId: request.participantId,
+      type: "request_returned",
+      title: "Request Returned for Revision",
+      message: `Your request ${request.requestNumber || id} was returned by MENRO Staff. Please review the reason, make the necessary corrections, and resubmit your request.`,
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      requestNumber: request.requestNumber || "",
+      reason: returnReason,
+      returnedAt: now,
+      createdAt: now,
+    });
+  });
+
+  const updatedDoc = await requestRef.get();
+  return { id: updatedDoc.id, ...updatedDoc.data() };
+};
+
+// ========================================
+// PARTICIPANT RESUBMISSION
+//
+// Returned -> Pending on the same request document.
+// No inventory or event mutation occurs here.
+// ========================================
+
+const resubmitSeedlingRequest = async (id, participantId, data) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  const submittedItems = normalizeRequestItems(data);
+  validateItemStructure(submittedItems);
+
+  await db.runTransaction(async (transaction) => {
+    const requestDoc = await transaction.get(requestRef);
+
+    if (!requestDoc.exists) {
+      throw new Error("Seedling request not found.");
+    }
+
+    const request = requestDoc.data();
+
+    if (request.participantId !== participantId) {
+      throw new Error("You can only edit your own returned request.");
+    }
+
+    if (request.status !== "Returned") {
+      throw new Error("This request can no longer be edited because its status has changed.");
+    }
+
+    const canonicalItems = [];
+    for (const item of submittedItems) {
+      const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
+      const inventoryDoc = await transaction.get(inventoryRef);
+
+      if (!inventoryDoc.exists || inventoryDoc.data().isDeleted === true) {
+        throw new Error("One of the selected seedling inventory records was not found.");
+      }
+
+      const inventory = inventoryDoc.data();
+      canonicalItems.push({
+        inventoryId: inventoryDoc.id,
+        species: cleanString(inventory.species),
+        scientificName: cleanString(inventory.scientificName),
+        category: cleanString(inventory.category),
+        quantity: item.quantity,
+      });
+    }
+
+    const proposal = data.eventProposal || {};
+    const siteRef = db.collection(SITES_COLLECTION).doc(
+      cleanString(proposal.plantingSiteId)
+    );
+    const siteDoc = await transaction.get(siteRef);
+
+    if (!siteDoc.exists) {
+      throw new Error("Planting site not found.");
+    }
+
+    const site = siteDoc.data();
+    if (cleanString(site.status || "active").toLowerCase() !== "active") {
+      throw new Error("Selected planting site is archived.");
+    }
+
+    if (normalizeBarangay(site.barangay) !== normalizeBarangay(proposal.barangay)) {
+      throw new Error("Selected planting site does not belong to the event barangay.");
+    }
+
+    const capacity = Number(site.maximumCapacity || 0);
+    const planted = Number(site.planted || 0);
+    if (capacity > 0 && Math.round((planted / capacity) * 100) >= 90) {
+      throw new Error("Selected planting site is already full.");
+    }
+
+    const now = Timestamp.now();
+    const totalQuantity = canonicalItems.reduce(
+      (total, item) => total + item.quantity,
+      0
+    );
+
+    transaction.update(requestRef, {
+      items: canonicalItems,
+      totalQuantity,
+      purpose: cleanString(data.purpose),
+      plantingLocation: cleanString(data.plantingLocation),
+      preferredReleaseDate: data.preferredReleaseDate,
+      eventProposal: {
+        eventName: cleanString(proposal.eventName),
+        barangay: cleanString(proposal.barangay),
+        plantingSiteId: siteDoc.id,
+        plantingSiteName: cleanString(site.siteName || site.name),
+        proposedDate: proposal.proposedDate,
+        proposedStartTime: proposal.proposedStartTime,
+        proposedEndTime: proposal.proposedEndTime,
+        eventLocation: cleanString(data.plantingLocation),
+        latitude: Number(site.latitude),
+        longitude: Number(site.longitude),
+        expectedParticipants: Number(proposal.expectedParticipants),
+        description: cleanString(proposal.description),
+        status: "Proposed",
+      },
+      status: "Pending",
+      returnReason: "",
+      returnedBy: "",
+      returnedByName: "",
+      returnedAt: null,
+      reviewedBy: "",
+      reviewedByName: "",
+      reviewedAt: null,
+      reviewRemarks: "",
+      resubmittedAt: now,
+      updatedAt: now,
+      reviewHistory: [
+        ...(Array.isArray(request.reviewHistory) ? request.reviewHistory : []),
+        {
+          action: "resubmitted",
+          actorId: participantId,
+          actorName: cleanString(request.participantName),
+          actorRole: "participant",
+          at: now,
+        },
+      ],
+    });
+  });
+
+  const updatedDoc = await requestRef.get();
+  return { id: updatedDoc.id, ...updatedDoc.data() };
+};
 
 // ========================================
 // ADMIN FINAL APPROVAL
@@ -576,7 +832,11 @@ const approveSeedlingRequest =
         const currentRequest =
           requestDoc.data();
 
-        if (currentRequest.status === "Approved" && currentRequest.eventId) {
+        if (
+          currentRequest.status === "Approved" &&
+          currentRequest.eventId &&
+          currentRequest.inventoryDeducted === true
+        ) {
           return;
         }
 
@@ -630,7 +890,7 @@ const approveSeedlingRequest =
 
         const inventoryRecords = [];
 
-        // Read inventory metadata; stock is checked and deducted at release.
+        // Re-read and validate authoritative stock inside the approval transaction.
         for (const item of requestItems) {
           const inventoryRef = db.collection(INVENTORY_COLLECTION).doc(item.inventoryId);
 
@@ -647,6 +907,17 @@ const approveSeedlingRequest =
           const requestedQty = Number(item.quantity || 0);
 
           const approvedQuantity = requestedQty;
+
+          if (!Number.isInteger(approvedQuantity) || approvedQuantity <= 0) {
+            throw new Error(`Invalid approved sapling quantity for ${cleanString(inventoryData.species) || "a requested item"}.`);
+          }
+
+          const availableQuantity = Number(inventoryData.availableQuantity || 0);
+          if (approvedQuantity > availableQuantity) {
+            throw new Error(
+              `Insufficient available sapling stock for ${cleanString(inventoryData.species) || item.species || "the requested item"}. Please review the approved quantity.`
+            );
+          }
 
           inventoryRecords.push({ item, inventoryRef, inventoryData, approvedQuantity });
         }
@@ -807,7 +1078,24 @@ const approveSeedlingRequest =
         }
 
         // ========================================
-        // Approval schedules the event without moving inventory.
+        // Final approval accounts for stock exactly once. Reserved quantity
+        // tracks approved saplings that are still awaiting physical release.
+        for (const record of inventoryRecords) {
+          const currentAvailable = Number(record.inventoryData.availableQuantity || 0);
+          const currentReserved = Number(record.inventoryData.reservedQuantity || 0);
+          const newAvailable = currentAvailable - record.approvedQuantity;
+
+          transaction.update(record.inventoryRef, {
+            availableQuantity: newAvailable,
+            reservedQuantity: currentReserved + record.approvedQuantity,
+            status: calculateInventoryStatus(
+              newAvailable,
+              Number(record.inventoryData.lowStockThreshold ?? 20)
+            ),
+            updatedBy: approvedBy,
+            updatedAt: now,
+          });
+        }
         // ========================================
 
         // ========================================
@@ -823,8 +1111,8 @@ const approveSeedlingRequest =
           decisionAt: now,
           eventId,
           eventCreated: true,
-          inventoryDeducted: false,
-          inventoryReserved: false,
+          inventoryDeducted: true,
+          inventoryReserved: true,
           approvedItems,
           updatedAt: now,
         });
@@ -1109,6 +1397,8 @@ module.exports = {
   getSeedlingRequestsByStatus,
   getSeedlingRequestsByParticipantId,
   reviewSeedlingRequest,
+  returnSeedlingRequest,
+  resubmitSeedlingRequest,
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,

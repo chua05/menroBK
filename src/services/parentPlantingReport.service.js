@@ -1,5 +1,6 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
+const { nextRecordNumber } = require("../utils/recordNumber.util");
 
 const reports = db.collection("plantingReports");
 const submissions = db.collection("plantingContributions");
@@ -40,9 +41,17 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     return { ref: legacyDoc.ref || reports.doc(legacyDoc.id), data: legacyDoc.data(), created: false };
   }
   const request = requestDoc.data();
+  const reportNumber = await nextRecordNumber(transaction, {
+    prefix: "RPT",
+    counterKey: "plantingReports",
+    date: typeof now?.toDate === "function" ? now.toDate() : new Date(),
+    timestamp: now,
+  });
   const data = {
+    reportNumber,
     reportType: "parent",
     requestId,
+    requestNumber: request.requestNumber || "",
     eventId,
     distributionId: requestId,
     participantId: request.participantId,

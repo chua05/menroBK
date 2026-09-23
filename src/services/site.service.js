@@ -2,6 +2,80 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 
 const SITE_COLLECTION = "sites";
+const COUNTER_COLLECTION = "counters";
+
+function getJubanYear(date = new Date()) {
+  return Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+    }).format(date)
+  );
+}
+
+function formatSiteNumber(year, sequence) {
+  return `SITE-${year}-${String(sequence).padStart(3, "0")}`;
+}
+
+function isReadableSiteId(value) {
+  return /^SITE-\d{4}-\d{3,}$/.test(cleanString(value));
+}
+
+function getSiteCreationYear(data) {
+  const createdAt = data?.createdAt;
+  const date = typeof createdAt?.toDate === "function"
+    ? createdAt.toDate()
+    : createdAt
+      ? new Date(createdAt)
+      : new Date();
+
+  return getJubanYear(Number.isNaN(date.getTime()) ? new Date() : date);
+}
+
+async function ensureReadableSiteId(doc) {
+  const initialData = doc.data();
+  if (isReadableSiteId(initialData.siteId)) return doc;
+
+  const siteRef = db.collection(SITE_COLLECTION).doc(doc.id);
+  let siteId = "";
+
+  await db.runTransaction(async (transaction) => {
+    const currentDoc = await transaction.get(siteRef);
+    if (!currentDoc.exists) throw new Error("Site not found.");
+
+    const currentData = currentDoc.data();
+    if (isReadableSiteId(currentData.siteId)) {
+      siteId = currentData.siteId;
+      return;
+    }
+
+    const year = getSiteCreationYear(currentData);
+    const counterRef = db
+      .collection(COUNTER_COLLECTION)
+      .doc(`plantingSites_${year}`);
+    const counterDoc = await transaction.get(counterRef);
+    const nextSequence = Number(counterDoc.data()?.lastSequence || 0) + 1;
+
+    if (!Number.isSafeInteger(nextSequence) || nextSequence <= 0) {
+      throw new Error("Unable to generate the next planting site ID.");
+    }
+
+    siteId = formatSiteNumber(year, nextSequence);
+    const now = Timestamp.now();
+
+    transaction.set(counterRef, {
+      lastSequence: nextSequence,
+      year,
+      updatedAt: now,
+    }, { merge: true });
+    transaction.update(siteRef, { siteId, updatedAt: now });
+  });
+
+  return {
+    id: doc.id,
+    data: () => ({ ...initialData, siteId }),
+  };
+}
 
 function cleanString(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -163,14 +237,15 @@ const createSite = async (data) => {
 
   const polygon = normalizePolygon(data.polygon);
 
-  // Firestore/backend creates the Site ID.
+  // Keep the auto-generated Firestore document ID as the relationship key.
   const siteRef = db.collection(SITE_COLLECTION).doc();
-
   const now = Timestamp.now();
+  const year = getJubanYear(now.toDate());
+  const counterRef = db
+    .collection(COUNTER_COLLECTION)
+    .doc(`plantingSites_${year}`);
 
   const site = {
-    siteId: siteRef.id,
-
     siteName,
     barangay,
 
@@ -231,10 +306,35 @@ const createSite = async (data) => {
     updatedAt: now,
   };
 
-  await siteRef.set(site);
+  let siteId = "";
+
+  await db.runTransaction(async (transaction) => {
+    const counterDoc = await transaction.get(counterRef);
+    const lastSequence = counterDoc.exists
+      ? Number(counterDoc.data()?.lastSequence || 0)
+      : 0;
+    const nextSequence = lastSequence + 1;
+
+    siteId = formatSiteNumber(year, nextSequence);
+
+    transaction.set(
+      counterRef,
+      {
+        lastSequence: nextSequence,
+        year,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+    transaction.create(siteRef, {
+      ...site,
+      siteId,
+    });
+  });
 
   return {
     id: siteRef.id,
+    siteId,
     ...site,
   };
 };
@@ -246,7 +346,10 @@ const getAllSites = async () => {
   const snapshot = await db
     .collection(SITE_COLLECTION)
     .get();
-  return snapshot.docs
+  const documents = await Promise.all(
+    snapshot.docs.map((doc) => ensureReadableSiteId(doc))
+  );
+  return documents
     .map((doc) => formatSiteDocument(doc))
     .filter(
       (site) =>
@@ -263,7 +366,10 @@ const getArchivedSites = async () => {
   const snapshot = await db
     .collection(SITE_COLLECTION)
     .get();
-  return snapshot.docs
+  const documents = await Promise.all(
+    snapshot.docs.map((doc) => ensureReadableSiteId(doc))
+  );
+  return documents
     .map((doc) => formatSiteDocument(doc))
     .filter(
       (site) =>
@@ -286,7 +392,7 @@ const getSiteById = async (siteId) => {
     throw new Error("Site not found.");
   }
 
-  return formatSiteDocument(doc);
+  return formatSiteDocument(await ensureReadableSiteId(doc));
 };
 
 // Edit the same site document while preserving workflow and audit fields.
@@ -418,4 +524,7 @@ module.exports = {
   updateSite,
   archiveSite,
   restoreSite,
+  formatSiteNumber,
+  getJubanYear,
+  isReadableSiteId,
 };

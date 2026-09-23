@@ -540,7 +540,6 @@ const createEvent = async (
           barangay,
 
           plantingSiteId:
-            site.siteId ||
             plantingSiteId,
 
           plantingSiteName:
@@ -893,6 +892,9 @@ const createTreePlantingEventInTransaction =
       sourceRequestId:
         requestId,
 
+      sourceRequestNumber:
+        requestData.requestNumber || "",
+
       // ========================================
       // MULTI-SEEDLING ALLOCATION
       //
@@ -966,16 +968,30 @@ const createTreePlantingEventInTransaction =
 
 const getAllEvents =
   async () => {
-    const snapshot =
-      await db
-        .collection(
-          EVENTS_COLLECTION
-        )
-        .get();
+    const [snapshot, participantSnapshot, requestSnapshot] = await Promise.all([
+      db.collection(EVENTS_COLLECTION).get(),
+      db.collection("eventParticipants").get(),
+      db.collection("seedlingRequests").get(),
+    ]);
+
+    const participantCounts = new Map();
+    participantSnapshot.docs.forEach((doc) => {
+      const eventId = doc.data().eventId;
+      participantCounts.set(eventId, (participantCounts.get(eventId) || 0) + 1);
+    });
+    const requestNumbers = new Map(requestSnapshot.docs.map((doc) => [doc.id, doc.data().requestNumber || ""]));
 
     return snapshot.docs
       .map(
-        (doc) => ({ id: doc.id, ...doc.data() })
+        (doc) => {
+          const event = doc.data();
+          return {
+            id: doc.id,
+            ...event,
+            actualParticipants: participantCounts.get(doc.id) || 0,
+            sourceRequestNumber: event.sourceRequestNumber || requestNumbers.get(event.sourceRequestId) || "",
+          };
+        }
       )
       .filter(
         (event) =>
@@ -1031,7 +1047,19 @@ const getEventById =
       );
     }
 
-    return { id: eventDoc.id, ...eventDoc.data() };
+    const event = eventDoc.data();
+    const [participants, requestDoc] = await Promise.all([
+      db.collection("eventParticipants").where("eventId", "==", cleanEventId).get(),
+      event.sourceRequestId
+        ? db.collection("seedlingRequests").doc(event.sourceRequestId).get()
+        : Promise.resolve(null),
+    ]);
+    return {
+      id: eventDoc.id,
+      ...event,
+      actualParticipants: participants.size,
+      sourceRequestNumber: event.sourceRequestNumber || (requestDoc?.exists ? requestDoc.data().requestNumber || "" : ""),
+    };
   };
 
 // ========================================
@@ -1167,7 +1195,6 @@ const updateEvent = async (
     barangay,
 
     plantingSiteId:
-      site.siteId ||
       plantingSiteId,
 
     plantingSiteName:

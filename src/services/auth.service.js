@@ -1,359 +1,126 @@
-const {
-  auth,
-  db,
-} = require("../config/firebase");
+const { auth, db } = require("../config/firebase");
+const { validateParticipantProfile, isParticipantProfileComplete } = require("../utils/userProfile.util");
+const { nextRecordNumber } = require("../utils/recordNumber.util");
 
+const users = db.collection("users");
+const clean = (value) => typeof value === "string" ? value.trim() : "";
+const withCompleteness = (profile) => ({
+  ...profile,
+  profileComplete: isParticipantProfileComplete(profile),
+});
 
-// =====================================================
-// CREATE / VERIFY USER PROFILE
-// =====================================================
-
-const createUserProfile = async (
-  user
-) => {
-
-  const userRef =
-    db
-      .collection("users")
-      .doc(user.uid);
-
-
-  const doc =
-    await userRef.get();
-
-
-  const now =
-    new Date();
-
-
+async function createUserProfile(user) {
+  const ref = users.doc(user.uid);
+  const doc = await ref.get();
+  const now = new Date();
   if (!doc.exists) {
-
-    await userRef.set({
-
-      uid:
-        user.uid,
-
-      fullName:
-        user.name ||
-        user.displayName ||
-        user.fullName ||
-        "",
-
-      email:
-        user.email || "",
-
-      username:
-        user.username || "",
-
-      role:
-        "participant",
-
-      organization:
-        "",
-
-      contactNumber:
-        "",
-
-      barangay:
-        "",
-
-      status:
-        "active",
-
-      photoURL:
-        user.picture ||
-        user.photoURL ||
-        "",
-
-      createdAt:
-        now,
-
-      updatedAt:
-        now,
-
-      lastLoginAt:
-        now,
-
+    await db.runTransaction(async (transaction) => {
+      const current = await transaction.get(ref);
+      if (current.exists) return;
+      const userNumber = await nextRecordNumber(transaction, {
+        prefix: "USR",
+        counterKey: "users",
+        date: now,
+        timestamp: now,
+      });
+      transaction.create(ref, {
+        uid: user.uid,
+        userNumber,
+        fullName: user.name || user.displayName || user.fullName || "",
+        email: user.email || "",
+        username: user.username || "",
+        role: "participant",
+        userType: "",
+        userTypeDetail: "",
+        affiliationName: "",
+        organization: "",
+        contactNumber: "",
+        barangay: "",
+        profileComplete: false,
+        status: "active",
+        photoURL: user.picture || user.photoURL || "",
+        createdAt: now,
+        updatedAt: now,
+        lastLoginAt: now,
+      });
     });
-
+  } else {
+    await ref.update({ lastLoginAt: now, updatedAt: now });
   }
+  return withCompleteness((await ref.get()).data());
+}
 
-  else {
+async function getUserProfile(uid) {
+  const doc = await users.doc(uid).get();
+  if (!doc.exists) throw new Error("User not found");
+  return withCompleteness(doc.data());
+}
 
-    await userRef.update({
-
-      lastLoginAt:
-        now,
-
-      updatedAt:
-        now,
-
-    });
-
+async function updateUserProfile(uid, data = {}) {
+  const ref = users.doc(uid);
+  const doc = await ref.get();
+  if (!doc.exists) throw new Error("User not found");
+  const current = doc.data();
+  const updates = {};
+  for (const field of ["fullName", "username", "photoURL"]) {
+    if (data[field] !== undefined) updates[field] = clean(data[field]);
   }
-
-
-  return (
-    await userRef.get()
-  ).data();
-
-};
-
-
-// =====================================================
-// GET PROFILE
-// =====================================================
-
-const getUserProfile = async (
-  uid
-) => {
-
-  const doc =
-    await db
-      .collection("users")
-      .doc(uid)
-      .get();
-
-
-  if (!doc.exists) {
-
-    throw new Error(
-      "User not found"
-    );
-
+  if (data.contactNumber !== undefined) {
+    const contactNumber = clean(data.contactNumber);
+    if (!/^09\d{9}$/.test(contactNumber)) throw new Error("Invalid contact number");
+    updates.contactNumber = contactNumber;
   }
-
-
-  return doc.data();
-
-};
-
-
-// =====================================================
-// UPDATE PROFILE
-// =====================================================
-
-const updateUserProfile = async (
-  uid,
-  data
-) => {
-
-  const allowedUpdates = {};
-
-
-  if (
-    data.fullName !== undefined
-  ) {
-
-    allowedUpdates.fullName =
-      data.fullName;
-
+  if (data.userType !== undefined || data.userTypeDetail !== undefined || data.barangay !== undefined) {
+    Object.assign(updates, validateParticipantProfile({
+      userType: data.userType ?? current.userType,
+      userTypeDetail: data.userTypeDetail ?? current.userTypeDetail,
+      barangay: data.barangay ?? current.barangay,
+    }));
   }
+  updates.profileComplete = isParticipantProfileComplete({ ...current, ...updates });
+  updates.updatedAt = new Date();
+  await ref.update(updates);
+  return withCompleteness((await ref.get()).data());
+}
 
-
-  if (
-    data.username !== undefined
-  ) {
-
-    allowedUpdates.username =
-      data.username;
-
-  }
-
-
-  if (
-    data.contactNumber !== undefined
-  ) {
-
-    allowedUpdates.contactNumber =
-      data.contactNumber;
-
-  }
-
-
-  if (
-    data.organization !== undefined
-  ) {
-
-    allowedUpdates.organization =
-      data.organization;
-
-  }
-
-
-  if (
-    data.barangay !== undefined
-  ) {
-
-    allowedUpdates.barangay =
-      data.barangay;
-
-  }
-
-
-  if (
-    data.photoURL !== undefined
-  ) {
-
-    allowedUpdates.photoURL =
-      data.photoURL;
-
-  }
-
-
-  allowedUpdates.updatedAt =
-    new Date();
-
-
-  await db
-    .collection("users")
-    .doc(uid)
-    .update(
-      allowedUpdates
-    );
-
-
-  return true;
-
-};
-
-
-// =====================================================
-// REGISTER USER
-// =====================================================
-
-const registerUser = async ({
-
-  fullName,
-
-  username,
-
-  email,
-
-  contactNumber,
-
-  password,
-
-  organization,
-
-  barangay,
-
-}) => {
-
-
-  const firebaseUser =
-    await auth.createUser({
-
-      email,
-
-      password,
-
-      displayName:
-        fullName,
-
-    });
-
-
-  const role =
-    "participant";
-
-
-  const status =
-    "active";
-
-
-  const now =
-    new Date();
-
-
+async function registerUser({ fullName, username, email, contactNumber, password, userType, userTypeDetail, barangay }) {
+  const participantProfile = validateParticipantProfile({ userType, userTypeDetail, barangay });
+  const firebaseUser = await auth.createUser({ email, password, displayName: fullName });
+  const now = new Date();
+  const profile = {
+    uid: firebaseUser.uid,
+    fullName,
+    username,
+    email,
+    role: "participant",
+    ...participantProfile,
+    contactNumber: contactNumber || "",
+    profileComplete: true,
+    status: "active",
+    photoURL: "",
+    createdAt: now,
+    updatedAt: now,
+    lastLoginAt: null,
+  };
   try {
-  await db
-    .collection("users")
-    .doc(firebaseUser.uid)
-    .set({
-
-      uid:
-        firebaseUser.uid,
-
-      fullName,
-
-      username,
-
-      email,
-
-      role,
-
-      organization:
-        organization || "",
-
-      contactNumber:
-        contactNumber || "",
-
-      barangay:
-        barangay || "",
-
-      status,
-
-      photoURL:
-        "",
-
-      createdAt:
-        now,
-
-      updatedAt:
-        now,
-
-      lastLoginAt:
-        null,
-
+    const ref = users.doc(firebaseUser.uid);
+    await db.runTransaction(async (transaction) => {
+      const userNumber = await nextRecordNumber(transaction, {
+        prefix: "USR",
+        counterKey: "users",
+        date: now,
+        timestamp: now,
+      });
+      transaction.create(ref, { ...profile, userNumber });
+      profile.userNumber = userNumber;
     });
   } catch (error) {
-    try {
-      await auth.deleteUser(firebaseUser.uid);
-    } catch (cleanupError) {
+    try { await auth.deleteUser(firebaseUser.uid); } catch (cleanupError) {
       console.error("Failed to remove incomplete Firebase Auth account:", cleanupError);
     }
     throw new Error("User profile could not be created.");
   }
+  return profile;
+}
 
-
-  return {
-
-    uid:
-      firebaseUser.uid,
-
-    fullName,
-
-    username,
-
-    email,
-
-    role,
-
-    organization:
-      organization || "",
-
-    contactNumber:
-      contactNumber || "",
-
-    barangay:
-      barangay || "",
-
-    status,
-
-  };
-
-};
-
-
-module.exports = {
-
-  registerUser,
-
-  createUserProfile,
-
-  getUserProfile,
-
-  updateUserProfile,
-
-};
+module.exports = { registerUser, createUserProfile, getUserProfile, updateUserProfile };

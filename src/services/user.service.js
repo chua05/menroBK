@@ -130,6 +130,11 @@ const updateUserProfile = async (uid, data) => {
     allowedUpdates.organization = data.organization;
   }
 
+  if (data.userType !== undefined) allowedUpdates.userType = data.userType;
+  if (data.userTypeDetail !== undefined) allowedUpdates.userTypeDetail = data.userTypeDetail;
+  if (data.affiliationName !== undefined) allowedUpdates.affiliationName = data.affiliationName;
+  if (data.barangay !== undefined) allowedUpdates.barangay = data.barangay;
+
   allowedUpdates.updatedAt = new Date();
 
   const userRef = db

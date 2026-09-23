@@ -1,4 +1,5 @@
 const { db } = require("../config/firebase");
+const { nextRecordNumber } = require("../utils/recordNumber.util");
 const { createNotificationInTransaction } = require("./notification.service");
 const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
 
@@ -26,6 +27,7 @@ const {
   generateImageHash,
   validateImageBuffer,
   extractImageMetadata,
+  isClearlyScreenshot,
 } = require(
   "../utils/imageVerification.util"
 );
@@ -38,6 +40,7 @@ const {
 
 const {
   calculateDistanceMeters,
+  isPointInPolygon,
 } = require(
   "../utils/geo.util"
 );
@@ -63,19 +66,8 @@ const SITE_GPS_TOLERANCE_METERS =
 const MAX_EVIDENCE_PHOTOS =
   10;
 
-// Temporary testing rule: keep actual GPS/EXIF findings without turning
-// missing or mismatched location into a blocking technical Flagged result.
-const INFORMATIONAL_TESTING_FLAGS = new Set([
-  "GPS_METADATA_MISSING",
-  "GPS_MISMATCH",
-  "OUTSIDE_REGISTERED_SITE",
-  "TIMESTAMP_METADATA_MISSING",
-]);
-
-const testingVerificationStatus = (flags) =>
-  flags.some((flag) => !INFORMATIONAL_TESTING_FLAGS.has(flag))
-    ? "Flagged"
-    : flags.length > 0 ? null : "Passed Automated Check";
+const automatedVerificationStatus = (flags) =>
+  flags.length === 0 ? "Passed Automated Check" : "Flagged";
 
 const reportCollection =
   db.collection(
@@ -585,67 +577,6 @@ if (submittedEventId) {
 
 
   // --------------------------------
-  // 8. VALIDATE SUBMITTED GPS
-  // --------------------------------
-  // Testing: absent captured GPS stays null; real photo/site findings remain informational.
-  const hasSubmittedLatitude = data.latitude !== undefined && data.latitude !== null && data.latitude !== "";
-  const hasSubmittedLongitude = data.longitude !== undefined && data.longitude !== null && data.longitude !== "";
-  const rawLatitude = hasSubmittedLatitude ? Number(data.latitude) : null;
-  const rawLongitude = hasSubmittedLongitude ? Number(data.longitude) : null;
-  const validCapturedGps = hasSubmittedLatitude && hasSubmittedLongitude &&
-    Number.isFinite(rawLatitude) && rawLatitude >= -90 && rawLatitude <= 90 &&
-    Number.isFinite(rawLongitude) && rawLongitude >= -180 && rawLongitude <= 180;
-  const submittedLatitude = validCapturedGps ? rawLatitude : null;
-  const submittedLongitude = validCapturedGps ? rawLongitude : null;
-
-
-  // --------------------------------
-  // 9. COMPARE CAPTURED GPS
-  // WITH REGISTERED SITE
-  // --------------------------------
-  const siteGpsDistanceMeters = validCapturedGps
-    ? calculateDistanceMeters(submittedLatitude, submittedLongitude, siteLatitude, siteLongitude)
-    : null;
-
-  const siteGpsValid =
-    siteGpsDistanceMeters !== null && siteGpsDistanceMeters <=
-    SITE_GPS_TOLERANCE_METERS;
-
-
-  // --------------------------------
-  // 10. PARSE LOCATION
-  // CAPTURE TIME
-  // --------------------------------
-  const locationCapturedAtTimestamp =
-    toTimestampOrNull(
-      data.locationCapturedAt
-    );
-
-
-  // --------------------------------
-  // 11. PARSE GPS ACCURACY
-  // --------------------------------
-  const parsedAccuracy =
-    data.accuracy !==
-      undefined &&
-    data.accuracy !==
-      null &&
-    data.accuracy !== ""
-      ? Number(
-          data.accuracy
-        )
-      : null;
-
-  const gpsAccuracyMeters =
-    Number.isFinite(
-      parsedAccuracy
-    ) &&
-    parsedAccuracy >= 0
-      ? parsedAccuracy
-      : null;
-
-
-  // --------------------------------
   // 12. VALIDATE ALL PHOTOS
   // BEFORE SAVING ANYTHING
   // --------------------------------
@@ -709,13 +640,33 @@ if (submittedEventId) {
         file.buffer
       );
 
+    if (isClearlyScreenshot({ fileName: file.originalname, metadata, imageDetails })) {
+      throw new Error(
+        "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo."
+      );
+    }
+
+    const photoLatitude = metadata.latitude === null ? NaN : Number(metadata.latitude);
+    const photoLongitude = metadata.longitude === null ? NaN : Number(metadata.longitude);
+    const hasValidPhotoGps =
+      Number.isFinite(photoLatitude) && photoLatitude >= -90 && photoLatitude <= 90 &&
+      Number.isFinite(photoLongitude) && photoLongitude >= -180 && photoLongitude <= 180;
+
+    if (!hasValidPhotoGps) {
+      throw new Error(
+        "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information."
+      );
+    }
+
 
     // Existing automated
     // photo verification
     const photoVerification =
       validatePlantingReport({
-        submittedLatitude: validCapturedGps ? submittedLatitude : siteLatitude,
-        submittedLongitude: validCapturedGps ? submittedLongitude : siteLongitude,
+        // The shared validator handles metadata presence and capture-time checks.
+        // Site verification is performed below against the saved polygon/center.
+        submittedLatitude: photoLatitude,
+        submittedLongitude: photoLongitude,
         plantingDate:
           data.plantingDate,
         metadata,
@@ -734,8 +685,19 @@ if (submittedEventId) {
     ];
 
 
-    // Registered site check
-    if (siteGpsDistanceMeters !== null && !siteGpsValid) {
+    const photoSiteDistanceMeters = calculateDistanceMeters(
+      photoLatitude,
+      photoLongitude,
+      siteLatitude,
+      siteLongitude
+    );
+    const hasSitePolygon = Array.isArray(site.polygon) && site.polygon.length >= 3;
+    const photoSiteValid = hasSitePolygon
+      ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon)
+      : photoSiteDistanceMeters <= SITE_GPS_TOLERANCE_METERS;
+
+    // Registered site check using authoritative photo EXIF coordinates.
+    if (!photoSiteValid) {
       if (
         !photoFlags.includes(
           "OUTSIDE_REGISTERED_SITE"
@@ -748,7 +710,7 @@ if (submittedEventId) {
     }
 
 
-    const photoAutomatedStatus = testingVerificationStatus(photoFlags);
+    const photoAutomatedStatus = automatedVerificationStatus(photoFlags);
 
 
     preparedPhotos.push({
@@ -768,13 +730,9 @@ if (submittedEventId) {
         photoVerification
           .timestampMetadataPresent,
 
-      gpsDistanceMeters:
-        photoVerification
-          .gpsDistanceMeters,
+      gpsDistanceMeters: photoSiteDistanceMeters,
 
-      gpsValid:
-        photoVerification
-          .gpsValid,
+      gpsValid: photoSiteValid,
 
       timestampValid:
         photoVerification
@@ -811,18 +769,12 @@ if (submittedEventId) {
     }
   );
 
-  if (siteGpsDistanceMeters !== null && !siteGpsValid) {
-    reportFlags.add(
-      "OUTSIDE_REGISTERED_SITE"
-    );
-  }
-
   const suspiciousFlags =
     Array.from(
       reportFlags
     );
 
-  const automatedStatus = testingVerificationStatus(suspiciousFlags);
+  const automatedStatus = automatedVerificationStatus(suspiciousFlags);
 
 
   // --------------------------------
@@ -830,6 +782,7 @@ if (submittedEventId) {
   // --------------------------------
   const uploadedPhotos = [];
   let persisted = false;
+  const now = Timestamp.now();
 
   try {
     for (
@@ -906,7 +859,15 @@ if (submittedEventId) {
               .metadata
               .deviceModel ||
             "",
+
+          software:
+            preparedPhoto.metadata.software || "",
+
+          orientation:
+            preparedPhoto.metadata.orientation ?? null,
         },
+
+        uploadedAt: now,
 
         gpsMetadataPresent:
           preparedPhoto
@@ -939,10 +900,6 @@ if (submittedEventId) {
     }
 
 
-    const now =
-      Timestamp.now();
-
-
     // --------------------------------
     // 15. BACKWARD-COMPATIBLE
     // PRIMARY PHOTO
@@ -954,6 +911,12 @@ if (submittedEventId) {
     // --------------------------------
     const primaryPhoto =
       uploadedPhotos[0];
+
+    const photoLatitude = Number(primaryPhoto.metadata.latitude);
+    const photoLongitude = Number(primaryPhoto.metadata.longitude);
+    const photoTakenAt = toTimestampOrNull(primaryPhoto.metadata.capturedAt);
+    const siteGpsDistanceMeters = Number(primaryPhoto.gpsDistanceMeters);
+    const siteGpsValid = primaryPhoto.gpsValid === true;
 
 
     // --------------------------------
@@ -1020,6 +983,10 @@ if (submittedEventId) {
 
       requestId:
         distribution.requestId ||
+        "",
+
+      requestNumber:
+        distribution.requestNumber ||
         "",
 
       inventoryId:
@@ -1103,18 +1070,20 @@ if (submittedEventId) {
 
 
       // --------------------------------
-      // GPS CAPTURED BY PARTICIPANT
+      // AUTHORITATIVE GPS EXTRACTED FROM PRIMARY PHOTO EXIF
       // --------------------------------
       latitude:
-        submittedLatitude,
+        photoLatitude,
 
       longitude:
-        submittedLongitude,
+        photoLongitude,
 
-      gpsAccuracyMeters,
+      gpsAccuracyMeters: null,
 
       locationCapturedAt:
-        locationCapturedAtTimestamp,
+        photoTakenAt,
+
+      photoTakenAt,
 
 
       // --------------------------------
@@ -1311,8 +1280,8 @@ if (submittedEventId) {
           automatedVerificationStatus: automatedStatus,
           suspiciousFlags,
           plantingDate: data.plantingDate,
-          latitude: submittedLatitude,
-          longitude: submittedLongitude,
+          latitude: photoLatitude,
+          longitude: photoLongitude,
           siteGpsValid,
         });
         for (const photo of uploadedPhotos) {
@@ -1329,9 +1298,19 @@ if (submittedEventId) {
       return reportDetails(doc.id, doc.data());
     }
 
-    const docRef = await reportCollection.add(reportData);
+    const docRef = reportCollection.doc();
+    let reportNumber = "";
+    await db.runTransaction(async (transaction) => {
+      reportNumber = await nextRecordNumber(transaction, {
+        prefix: "RPT",
+        counterKey: "plantingReports",
+        date: typeof now?.toDate === "function" ? now.toDate() : new Date(),
+        timestamp: now,
+      });
+      transaction.create(docRef, { ...reportData, reportNumber });
+    });
     persisted = true;
-    return { id: docRef.id, ...reportData };
+    return { id: docRef.id, ...reportData, reportNumber };
   } catch (error) {
     if (persisted) throw error;
     // --------------------------------
