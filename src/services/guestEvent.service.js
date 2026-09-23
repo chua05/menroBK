@@ -5,6 +5,8 @@ const { Timestamp } = require("firebase-admin/firestore");
 const invitations = db.collection("eventInvitations");
 const participants = db.collection("eventParticipants");
 const events = db.collection("events");
+const sites = db.collection("sites");
+const requests = db.collection("seedlingRequests");
 
 function secret() {
   const value = process.env.GUEST_INVITATION_SECRET;
@@ -66,7 +68,27 @@ async function validateInvitation(token) {
   return { eventId, event: eventDoc.data() };
 }
 
-function publicEvent(eventId, event) {
+async function publicEvent(eventId, event) {
+  const [siteDoc, requestDoc] = await Promise.all([
+    event.plantingSiteId ? sites.doc(event.plantingSiteId).get() : Promise.resolve(null),
+    event.sourceRequestId ? requests.doc(event.sourceRequestId).get() : Promise.resolve(null),
+  ]);
+  const site = siteDoc?.exists ? siteDoc.data() : {};
+  const request = requestDoc?.exists ? requestDoc.data() : {};
+  const recorded = event.recordedSeedlingsByInventory || {};
+  const allocation = event.allocationReleasedAt
+    ? (event.seedlingItems || []).map((item) => {
+      const allocated = Number(item.quantity || 0);
+      const recordedQuantity = Math.max(0, Number(recorded[item.inventoryId] || 0));
+      return {
+        inventoryId: item.inventoryId,
+        species: item.species || item.commonName || "Tree / Sapling",
+        allocated,
+        recorded: Math.min(allocated, recordedQuantity),
+        remaining: Math.max(0, allocated - recordedQuantity),
+      };
+    })
+    : [];
   return {
     id: eventId,
     name: event.name,
@@ -74,9 +96,16 @@ function publicEvent(eventId, event) {
     date: event.date,
     startTime: event.startTime,
     endTime: event.endTime,
-    barangay: event.barangay,
-    plantingSiteName: event.plantingSiteName,
+    barangay: event.barangay || request.eventProposal?.barangay || site.barangay || "",
+    plantingSiteNumber: site.siteId || event.plantingSiteNumber || "",
+    plantingSiteName: event.plantingSiteName || site.siteName || "",
     location: event.location,
+    latitude: Number.isFinite(Number(site.latitude ?? event.latitude))
+      ? Number(site.latitude ?? event.latitude) : null,
+    longitude: Number.isFinite(Number(site.longitude ?? event.longitude))
+      ? Number(site.longitude ?? event.longitude) : null,
+    allocationReleased: Boolean(event.allocationReleasedAt),
+    allocation,
     status: event.status,
   };
 }
@@ -92,12 +121,10 @@ function normalizeContact(value) {
 }
 
 async function joinGuest(token, details) {
-  const { eventId } = await validateInvitation(token);
+  const { eventId, event } = await validateInvitation(token);
   const fullName = typeof details?.fullName === "string" ? details.fullName.trim() : "";
-  const organizationBarangay = typeof details?.organizationBarangay === "string"
-    ? details.organizationBarangay.trim() : "";
-  if (!fullName || !organizationBarangay || fullName.length > 120 || organizationBarangay.length > 120) {
-    throw new Error("Full name and organization/barangay are required (maximum 120 characters). ");
+  if (!fullName || fullName.length > 120) {
+    throw new Error("Full name is required (maximum 120 characters).");
   }
   const normalizedContactNumber = normalizeContact(details?.contactNumber);
   const participantId = digest(`${eventId}:${normalizedContactNumber}`);
@@ -110,7 +137,9 @@ async function joinGuest(token, details) {
       eventId,
       participantType: "guest",
       fullName,
-      organizationBarangay,
+      barangay: event.barangay || "",
+      plantingSiteId: event.plantingSiteId || "",
+      plantingSiteName: event.plantingSiteName || "",
       contactNumber: normalizedContactNumber,
       normalizedContactNumber,
       sessionHash: digest(sessionToken),
@@ -135,6 +164,15 @@ async function validateGuestSession(header) {
     throw new Error("Invalid guest session.");
   }
   return { participantId, eventId: doc.data().eventId, fullName: doc.data().fullName };
+}
+
+async function getGuestSessionContext(header) {
+  const session = await validateGuestSession(header);
+  const eventDoc = await events.doc(session.eventId).get();
+  if (!eventDoc.exists || eventDoc.data().archived === true || eventDoc.data().status === "Cancelled") {
+    throw new Error("Invalid guest session.");
+  }
+  return { ...session, event: await publicEvent(eventDoc.id, eventDoc.data()) };
 }
 
 function registeredParticipantId(eventId, userId) {
@@ -187,7 +225,7 @@ async function getEventParticipants(eventId) {
       participantType: item.participantType,
       userId: item.userId || null,
       fullName: item.fullName || "",
-      organizationBarangay: item.organizationBarangay || "",
+      organizationBarangay: item.organizationBarangay || item.barangay || "",
       joinedAt: item.joinedAt,
       ...(byParticipant.get(doc.id) || { quantityPlanted: 0, submissionCount: 0 }),
     };
@@ -202,6 +240,7 @@ module.exports = {
   normalizeContact,
   joinGuest,
   validateGuestSession,
+  getGuestSessionContext,
   registeredParticipantId,
   joinRegistered,
   getEventParticipants,

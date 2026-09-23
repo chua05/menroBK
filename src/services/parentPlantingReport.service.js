@@ -135,13 +135,14 @@ async function finalizeParent(id, requesterId) {
         Number(eventDoc.data().recordedSeedlingQuantity || 0) <= 0) {
       throw new Error("The report has no recorded planting contributions.");
     }
-    if (submissionSnapshot.empty || submissionSnapshot.docs.some((doc) => !doc.data().photos?.length)) {
-      throw new Error("Every planting contribution needs evidence photos before finalization.");
-    }
-    if (!submissionSnapshot.docs.some((doc) =>
+    const requesterSubmissions = submissionSnapshot.docs.filter((doc) =>
       doc.data().participantType === "requester" &&
-      (doc.data().contributorId === requesterId || doc.data().participantId === requesterId))) {
-      throw new Error("Requester planting evidence is required before review.");
+      (doc.data().contributorId === requesterId || doc.data().participantId === requesterId));
+    if (requesterSubmissions.length === 0) {
+      throw new Error("Requester planting evidence photos are required before review.");
+    }
+    if (requesterSubmissions.some((doc) => !doc.data().photos?.length)) {
+      throw new Error("Requester planting evidence photos are required before review.");
     }
     const now = Timestamp.now();
     transaction.update(ref, {

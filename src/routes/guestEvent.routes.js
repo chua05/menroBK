@@ -20,7 +20,7 @@ router.get("/invitation/:eventId", verifyToken, authorizeRoles("participant"), a
 
 router.get("/session", async (req, res) => {
   try {
-    const session = await guest.validateGuestSession(req.headers.authorization);
+    const session = await guest.getGuestSessionContext(req.headers.authorization);
     return sendSuccess(res, 200, "Guest session retrieved", session);
   } catch (error) {
     return sendError(res, 401, "Invalid guest session.");
@@ -52,12 +52,18 @@ router.post("/session/contributions", async (req, res) => {
   }
   try {
     const data = await contributions.recordContribution(
-      session.eventId, session.participantId, req.body?.inventoryId, req.body?.quantity
+      session.eventId,
+      session.participantId,
+      req.body?.inventoryId,
+      req.body?.quantity,
+      req.body?.submissionKey
     );
     return sendSuccess(res, 201, "Contribution recorded", data);
   } catch (error) {
-    if (error.message.startsWith("Only ") || error.message.includes("required") ||
-        error.message.includes("not allocated") || error.message.includes("not been released")) {
+    if (error.message.startsWith("Only ") || error.message.includes("available planting quantity") ||
+        error.message.includes("required") ||
+        error.message.includes("not allocated") || error.message.includes("not been released") ||
+        error.message.includes("submission key") || error.message.includes("finalized")) {
       return sendError(res, 400, error.message);
     }
     console.error(error);
@@ -75,7 +81,7 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
 }, uploadContributionEvidence, async (req, res) => {
   try {
     const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
-      req.params.id, req.files, req.body);
+      req.params.id, req.files, req.body, { optionalLocation: true });
     return sendSuccess(res, 200, "Planting evidence recorded", data);
   } catch (error) {
     const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates/i
@@ -89,7 +95,7 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
 router.get("/:token", async (req, res) => {
   try {
     const { eventId, event } = await guest.validateInvitation(req.params.token);
-    return sendSuccess(res, 200, "Guest event retrieved", guest.publicEvent(eventId, event));
+    return sendSuccess(res, 200, "Guest event retrieved", await guest.publicEvent(eventId, event));
   } catch (error) {
     return sendError(res, 404, "Guest event not found.");
   }
@@ -102,7 +108,7 @@ router.post("/:token/join", async (req, res) => {
   } catch (error) {
     const message = error.message;
     if (message === "This contact number has already joined the event.") return sendError(res, 409, message);
-    if (message.startsWith("A valid Philippine mobile number") || message.startsWith("Full name and organization")) {
+    if (message.startsWith("A valid Philippine mobile number") || message.startsWith("Full name is required")) {
       return sendError(res, 400, message);
     }
     if (message === "Invalid guest invitation." || message === "Event not found.") {

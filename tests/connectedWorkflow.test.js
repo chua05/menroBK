@@ -341,16 +341,28 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   });
   await assert.rejects(guestService.getInvitationForRequester("EVT-2026-003", "other"), /not found/);
   const { token } = await guestService.getInvitationForRequester("EVT-2026-003", "participant-1");
-  assert.equal((await guestService.validateInvitation(token)).eventId, "EVT-2026-003");
-  const joined = await guestService.joinGuest(token, {
-    fullName: "Guest One", organizationBarangay: "Juban", contactNumber: "09123456789",
+  const invitation = await guestService.validateInvitation(token);
+  assert.equal(invitation.eventId, "EVT-2026-003");
+  const publicEvent = await guestService.publicEvent(invitation.eventId, invitation.event);
+  assert.deepEqual(publicEvent.allocation[0], {
+    inventoryId: "calamansi", species: "Calamansi", allocated: 90, recorded: 0, remaining: 90,
   });
+  const joined = await guestService.joinGuest(token, {
+    fullName: "Guest One", contactNumber: "09123456789",
+  });
+  assert.equal(table("eventParticipants").get(joined.participantId).organizationBarangay, undefined);
   assert.equal((await guestService.validateGuestSession(`Guest ${joined.sessionToken}`)).eventId, "EVT-2026-003");
   await assert.rejects(guestService.joinGuest(token, {
-    fullName: "Another", organizationBarangay: "Juban", contactNumber: "+639123456789",
+    fullName: "Another", contactNumber: "+639123456789",
   }), /already joined/);
-  const first = await contributionService.recordContribution("EVT-2026-003", joined.participantId, "calamansi", 85);
+  const first = await contributionService.recordContribution(
+    "EVT-2026-003", joined.participantId, "calamansi", 85, "submission_key_123"
+  );
   assert.equal(first.quantity, 85);
+  const duplicate = await contributionService.recordContribution(
+    "EVT-2026-003", joined.participantId, "calamansi", 85, "submission_key_123"
+  );
+  assert.equal(duplicate.id, first.id);
   await assert.rejects(contributionService.recordContribution("EVT-2026-003", joined.participantId, "calamansi", 10), /Only 5/);
   assert.equal(table("events").get("EVT-2026-003").recordedSeedlingQuantity, 85);
   assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
@@ -404,9 +416,10 @@ test("one parent groups multiple contributors and separate events get separate p
   assert.equal(JSON.stringify(participants).includes("09123456789"), false);
   await assert.rejects(parentService.finalizeParent(one.reportId, "other"), /not found/);
   await assert.rejects(parentService.finalizeParent(one.reportId, "same-requester"), /evidence photos/);
-  for (const id of [one.id, two.id]) {
-    table("plantingContributions").get(id).photos = [{ imageHash: `${id}-hash`, automatedStatus: "Flagged" }];
-  }
+  table("plantingContributions").get(one.id).photos = [
+    { imageHash: `${one.id}-hash`, automatedStatus: "Flagged" },
+  ];
+  assert.equal(table("plantingContributions").get(two.id).photos, undefined);
   const finalized = await parentService.finalizeParent(one.reportId, "same-requester");
   assert.equal(finalized.verificationStatus, "Pending Review");
   const plantingReportService = require("../src/services/plantingReport.service");

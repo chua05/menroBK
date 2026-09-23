@@ -118,3 +118,53 @@ test("tree monitoring report reads the stored survival fields", async () => {
     survivingCount: 4, survivalRate: 80,
   });
 });
+
+test("report generation accepts small datasets and does not persist zero-data attempts", async () => {
+  rows("distributions").set("small-1", {
+    releasedAt: "2026-10-01", totalQuantityReleased: 1,
+  });
+  rows("distributions").set("small-2", {
+    releasedAt: "2026-10-02", totalQuantityReleased: 2,
+  });
+
+  const one = await service.generateReport({
+    type: "seedling-distribution", dateFrom: "2026-10-01", dateTo: "2026-10-01",
+  }, { uid: "staff-1", fullName: "MENRO Staff" });
+  assert.equal(one.rowCount, 1);
+
+  const two = await service.generateReport({
+    type: "seedling-distribution", dateFrom: "2026-10-01", dateTo: "2026-10-02",
+  }, { uid: "staff-1", fullName: "MENRO Staff" });
+  assert.equal(two.rowCount, 2);
+
+  const historyBefore = rows("generatedReports").size;
+  await assert.rejects(
+    service.generateReport({
+      type: "seedling-distribution", dateFrom: "1999-01-01", dateTo: "1999-01-02",
+    }, { uid: "staff-1", fullName: "MENRO Staff" }),
+    (error) => error.code === "REPORT_DATA_UNAVAILABLE" &&
+      error.message === service.REPORT_DATA_UNAVAILABLE
+  );
+  assert.equal(rows("generatedReports").size, historyBefore);
+});
+
+test("every report type exposed by the Reports page generates from one or more real rows", async () => {
+  rows("plantingReports").set("planting-1", {
+    submittedAt: "2026-11-03", reportNumber: "RPT-2026-900",
+    quantityPlanted: 3, verificationStatus: "Pending Review",
+  });
+  const cases = [
+    { type: "seedling-distribution", dateFrom: "2026-10-01", dateTo: "2026-10-01" },
+    { type: "planting-activity", dateFrom: "2026-11-03", dateTo: "2026-11-03" },
+    { type: "tree-monitoring", dateFrom: "2026-09-17", dateTo: "2026-09-17" },
+    { type: "participant", dateFrom: "2026-09-17", dateTo: "2026-09-17" },
+    { type: "monthly", dateFrom: "2026-09-01", dateTo: "2026-09-30" },
+    { type: "annual", dateFrom: "2026-01-01", dateTo: "2026-12-31" },
+  ];
+  for (const filters of cases) {
+    const generated = await service.generateReport(filters, {
+      uid: "staff-1", fullName: "MENRO Staff",
+    });
+    assert.ok(generated.rowCount >= 1, `${filters.type} should contain real rows`);
+  }
+});

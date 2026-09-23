@@ -19,6 +19,9 @@ router.post("/", async (req, res) => {
   try {
     return sendSuccess(res, 201, "Report generated", await reports.generateReport(req.body, req.user));
   } catch (error) {
+    if (error.code === "REPORT_DATA_UNAVAILABLE") {
+      return sendError(res, 422, reports.REPORT_DATA_UNAVAILABLE);
+    }
     if (error.message === "Invalid report type or filters." ||
         error.message === "A date range is required for monthly and annual reports.") {
       return sendError(res, 400, error.message);

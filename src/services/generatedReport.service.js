@@ -4,6 +4,7 @@ const { pdfFromLines } = require("../utils/simplePdf.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
 
 const history = db.collection("generatedReports");
+const REPORT_DATA_UNAVAILABLE = "Report data is unavailable for the selected report type or filters.";
 const TYPES = new Set([
   "seedling-distribution", "planting-activity", "tree-monitoring",
   "participant", "event-participation", "monthly", "annual",
@@ -161,6 +162,11 @@ async function buildRows(filters) {
 async function generateReport(input, user) {
   const filters = cleanFilters(input);
   const rows = await buildRows(filters);
+  if (rows.length === 0) {
+    const error = new Error(REPORT_DATA_UNAVAILABLE);
+    error.code = "REPORT_DATA_UNAVAILABLE";
+    throw error;
+  }
   const ref = history.doc();
   const generatedAt = Timestamp.now();
   const chunkSize = 25;
@@ -223,4 +229,11 @@ async function generatedPdf(id) {
   return { fileName: metadata.fileName, bytes: pdfFromLines(lines) };
 }
 
-module.exports = { cleanFilters, buildRows, generateReport, listGeneratedReports, generatedPdf };
+module.exports = {
+  REPORT_DATA_UNAVAILABLE,
+  cleanFilters,
+  buildRows,
+  generateReport,
+  listGeneratedReports,
+  generatedPdf,
+};

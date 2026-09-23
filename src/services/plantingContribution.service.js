@@ -1,4 +1,5 @@
 const { db } = require("../config/firebase");
+const crypto = require("node:crypto");
 const { Timestamp } = require("firebase-admin/firestore");
 const { parentForEventInTransaction } = require("./parentPlantingReport.service");
 
@@ -6,18 +7,27 @@ const events = db.collection("events");
 const participants = db.collection("eventParticipants");
 const contributions = db.collection("plantingContributions");
 
-async function recordContribution(eventId, participantId, inventoryId, quantity) {
+async function recordContribution(eventId, participantId, inventoryId, quantity, submissionKey = "") {
   if (typeof eventId !== "string" || !eventId || eventId.includes("/") ||
       typeof inventoryId !== "string" || !inventoryId || inventoryId.includes("/") ||
       !Number.isInteger(Number(quantity)) || Number(quantity) <= 0) {
     throw new Error("Valid event, seedling item, and positive whole-number quantity are required.");
   }
+  if (submissionKey && !/^[A-Za-z0-9_-]{8,100}$/.test(submissionKey)) {
+    throw new Error("Invalid planting submission key.");
+  }
   const eventRef = events.doc(eventId);
   const participantRef = participants.doc(participantId);
-  const contributionRef = contributions.doc();
+  const contributionRef = submissionKey
+    ? contributions.doc(crypto.createHash("sha256")
+      .update(`${eventId}:${participantId}:${submissionKey}`).digest("hex"))
+    : contributions.doc();
   await db.runTransaction(async (transaction) => {
     const eventDoc = await transaction.get(eventRef);
     const participantDoc = await transaction.get(participantRef);
+    const existingContribution = submissionKey
+      ? await transaction.get(contributionRef) : null;
+    if (existingContribution?.exists) return;
     if (!eventDoc.exists || !participantDoc.exists || participantDoc.data().eventId !== eventId) {
       throw new Error("Event participation not found.");
     }
@@ -38,14 +48,17 @@ async function recordContribution(eventId, participantId, inventoryId, quantity)
     const existing = Number(recorded[inventoryId] || 0);
     const remaining = Number(allocation.quantity) - existing;
     if (Number(quantity) > remaining) {
-      throw new Error(`Only ${Math.max(0, remaining)} seedlings remain available for recording.`);
+      throw new Error(
+        `The available planting quantity has changed. Only ${Math.max(0, remaining)} seedlings remain available for recording.`
+      );
     }
     recorded[inventoryId] = existing + Number(quantity);
     transaction.update(eventRef, {
       recordedSeedlingsByInventory: recorded,
       recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + Number(quantity),
       remainingSeedlingQuantity: Number(event.seedlingTotalQuantity || 0) -
-        Number(event.recordedSeedlingQuantity || 0) - Number(quantity),
+        Math.min(Number(event.seedlingTotalQuantity || 0),
+          Number(event.recordedSeedlingQuantity || 0) + Number(quantity)),
       updatedAt: now,
     });
     if (parent && !parent.created) {
