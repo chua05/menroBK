@@ -2,6 +2,7 @@ const {
   getAllDistributions,
   getDistributionById,
   getDistributionsByParticipantId,
+  getEligibleDistributionsForParticipant,
 } = require(
   "../services/distribution.service"
 );
@@ -109,22 +110,13 @@ const getMyDistributions =
       const participantId =
         req.user.uid;
 
-      const distributions =
-        await getDistributionsByParticipantId(
-          participantId
-        );
-
       const releasedDistributions =
-        distributions.filter(
-          (distribution) =>
-            distribution.status ===
-            "Released"
-        );
+        await getEligibleDistributionsForParticipant(participantId);
 
       return res.status(200).json({
         success: true,
         message:
-          "Your released distribution records retrieved successfully.",
+          "Eligible released distribution records retrieved successfully.",
         data:
           releasedDistributions,
       });
@@ -138,7 +130,6 @@ const getMyDistributions =
       });
     }
   };
-
 
 module.exports = {
   getDistributions,

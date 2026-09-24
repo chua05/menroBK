@@ -73,16 +73,19 @@ const submitPlantingReport = async (
       inventoryId,
       siteId,
 
-      participantType,
-      participantBarangay,
-      organizationAffiliation,
-
       quantityPlanted,
       plantingDate,
       plantingLocation,
 
       eventId,
       eventName,
+
+      locationSource,
+      latitude,
+      longitude,
+      accuracy,
+      photoCapturedAt,
+      locationCapturedAt,
 
       remarks,
     } = req.body || {};
@@ -123,8 +126,7 @@ const submitPlantingReport = async (
     if (
       !distributionId ||
       !siteId ||
-      !participantType ||
-      !participantBarangay ||
+      !eventId ||
       quantityPlanted ===
         undefined ||
       !plantingDate ||
@@ -153,7 +155,7 @@ const submitPlantingReport = async (
       return res.status(400).json({
         success: false,
         message:
-          "Quantity planted must be at least 1.",
+          "Please enter a valid quantity of planted saplings.",
       });
     }
 
@@ -169,22 +171,24 @@ const submitPlantingReport = async (
           siteId,
           participantId,
 
+          participantName:
+            req.user.fullName || "",
+
           participantType:
-            String(
-              participantType
-            ).trim(),
+            req.user.userType || "",
 
           participantBarangay:
-            String(
-              participantBarangay
-            ).trim(),
+            req.user.barangay || "",
 
           organizationAffiliation:
-            organizationAffiliation
-              ? String(
-                  organizationAffiliation
-                ).trim()
-              : "",
+            req.user.affiliationName ||
+            req.user.userTypeDetail ||
+            req.user.organization ||
+            req.user.barangay ||
+            "",
+
+          participantContactNumber:
+            req.user.contactNumber || "",
 
           quantityPlanted:
             parsedQuantity,
@@ -198,6 +202,15 @@ const submitPlantingReport = async (
 
           eventName:
             eventName || "",
+
+          locationSource:
+            locationSource || "Photo Metadata (EXIF)",
+
+          latitude,
+          longitude,
+          accuracy,
+          photoCapturedAt,
+          locationCapturedAt,
 
           remarks:
             remarks || "",
@@ -246,10 +259,9 @@ const submitPlantingReport = async (
     ];
 
     const validationErrors = [
-      "You cannot submit a report for another participant's distribution.",
       "Only released distributions can have planting reports.",
-      "Quantity planted must be a positive integer.",
-      "Quantity planted cannot exceed the released quantity.",
+      "Please enter a valid quantity of planted saplings.",
+      "The quantity planted cannot exceed the remaining released sapling quantity.",
       "The linked distribution has an invalid released quantity.",
       "A planting report already exists for this distribution.",
       "Duplicate planting image detected.",
@@ -258,23 +270,32 @@ const submitPlantingReport = async (
       "A maximum of 10 planting evidence photos is allowed.",
       "The uploaded file is not a valid image.",
       "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information.",
+      "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information.",
       "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo.",
       "The selected planting site is inactive.",
       "The selected planting site has invalid coordinates.",
       "Selected event does not match the released distribution.",
       "Selected planting site does not match the released distribution.",
       "A valid planting date is required.",
-      "Select a released seedling item for this submission.",
-      "Seedling item has not been released for this event.",
+      "Select a released sapling tree item for this submission.",
+      "Sapling tree item has not been released for this event.",
       "Quantity planted exceeds the remaining event allocation.",
-      "Requester has already submitted planting evidence for this event.",
       "This planting report has already been finalized.",
       "Latitude must be between -90 and 90.",
       "Longitude must be between -180 and 180.",
+      "A valid device location and capture timestamp are required for a photo taken within the system.",
+      "Selected planting event was not found.",
+      "The selected planting event is archived.",
+      "The selected planting event has been cancelled.",
+      "The selected planting event is not available for planting reports.",
+      "The selected planting event does not belong to the selected planting site.",
+      "The selected planting event does not belong to the selected barangay.",
     ];
 
     const statusCode =
-      notFoundErrors.includes(
+      error.message === "You are not registered for the selected planting event."
+        ? 403
+        : notFoundErrors.includes(
         error.message
       )
         ? 404
@@ -349,7 +370,12 @@ const getPlantingReport = async (
         id
       );
 
-    if (req.user.role === "participant" && report.participantId !== req.user.uid) {
+    const isParticipantContributor = report.submissions?.some(
+      (submission) => submission.contributorId === req.user.uid
+    );
+    if (req.user.role === "participant" &&
+        report.participantId !== req.user.uid &&
+        !isParticipantContributor) {
       return res.status(404).json({ success: false, message: "Planting report not found." });
     }
 

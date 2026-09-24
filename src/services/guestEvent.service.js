@@ -9,7 +9,7 @@ const sites = db.collection("sites");
 const requests = db.collection("seedlingRequests");
 
 function secret() {
-  const value = process.env.GUEST_INVITATION_SECRET;
+  const value = String(process.env.GUEST_INVITATION_SECRET || "").trim();
   if (!value || value.length < 32) {
     throw new Error("GUEST_INVITATION_SECRET must contain at least 32 characters.");
   }

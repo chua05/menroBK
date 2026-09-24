@@ -194,15 +194,32 @@ test("own released distributions expose each species and actual partial quantiti
     [["Calamansi", 90], ["Narra", 40]]);
   assert.equal(distribution.totalQuantityReleased, 130);
   assert.equal(res.result.body.data.some((item) => item.participantId !== "participant-1"), false);
+
+  table("eventParticipants").set("joined-multi", {
+    eventId: "EVT-2026-MULTI", userId: "participant-eligible",
+    participantType: "participant", fullName: "Eligible Participant",
+  });
+  const eligibleRes = { result: {}, status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; } };
+  await controller.getMyDistributions({ user: { uid: "participant-eligible" } }, eligibleRes);
+  assert.equal(eligibleRes.result.body.data.some((item) => item.id === "request-multi"), true);
+  const unrelatedRes = { result: {}, status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; } };
+  await controller.getMyDistributions({ user: { uid: "participant-unrelated" } }, unrelatedRes);
+  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), false);
 });
 
-test("requester evidence moves a released parent from Pending to Pending Review once", async () => {
+test("an eligible non-requester can submit evidence while the original requester is preserved", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const reportId = "event_EVT-2026-001";
   const event = table("events").get("EVT-2026-001");
   Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
+  table("eventParticipants").set("joined-participant-2", {
+    eventId: "EVT-2026-001", userId: "participant-2",
+    participantType: "participant", fullName: "Participant Two",
+  });
   table("sites").set("site-1", { status: "active", siteName: "Site One", barangay: "Bacolod", latitude: 12, longitude: 123 });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } })
     .jpeg()
@@ -216,7 +233,8 @@ test("requester evidence moves a released parent from Pending to Pending Review 
     .toBuffer();
   const payload = {
     distributionId: "request-1", inventoryId: "calamansi", siteId: "site-1",
-    participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
+    participantId: "participant-2", participantName: "Participant Two",
+    participantType: "Volunteer", participantBarangay: "Bacolod",
     quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
     latitude: 12, longitude: 123, eventId: "EVT-2026-001",
   };
@@ -228,6 +246,11 @@ test("requester evidence moves a released parent from Pending to Pending Review 
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   let submitted;
   try {
+    await assert.rejects(
+      reportService.createPlantingReport({ ...payload, participantId: "participant-unrelated" },
+        [{ buffer: image, mimetype: "image/jpeg", originalname: "unrelated.jpg" }]),
+      /not registered for the selected planting event/
+    );
     submitted = await reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]);
     assert.equal(submitted.verificationStatus, "Pending Review");
@@ -235,7 +258,37 @@ test("requester evidence moves a released parent from Pending to Pending Review 
     assert.equal(submitted.submissions.length, 1);
     assert.equal(submitted.submissions[0].plantingDate, "2026-09-17");
     assert.equal(submitted.submissions[0].photos.length, 1);
+    assert.equal(submitted.participantId, "participant-1");
+    assert.equal(submitted.submissions[0].participantId, "joined-participant-2");
+    assert.equal(submitted.submissions[0].contributorId, "participant-2");
+    assert.equal(submitted.submissions[0].participantType, "participant");
+    assert.equal(submitted.participantName, "Participant One");
+    assert.equal(submitted.submittedByName, "Participant Two");
+    assert.equal(submitted.gpsValid, true);
+    assert.equal(submitted.siteGpsValid, true);
+    assert.equal(submitted.siteLocationStatus, "Within Assigned Site");
+    assert.equal(submitted.latitude, 12);
+    assert.equal(submitted.longitude, 123);
     assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending Review");
+    table("eventParticipants").set("joined-participant-3", {
+      eventId: "EVT-2026-001", userId: "participant-3",
+      participantType: "participant", fullName: "Participant Three",
+    });
+    const secondImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "lime" } })
+      .jpeg()
+      .withExif({
+        IFD0: { Make: "Test Camera", Model: "Geo Test 2" },
+        IFD3: {
+          GPSLatitudeRef: "N", GPSLatitude: "12/1 0/1 0/1",
+          GPSLongitudeRef: "E", GPSLongitude: "123/1 0/1 0/1",
+        },
+      })
+      .toBuffer();
+    await assert.rejects(
+      reportService.createPlantingReport({ ...payload, participantId: "participant-3", quantityPlanted: 71 },
+        [{ buffer: secondImage, mimetype: "image/jpeg", originalname: "too-many.jpg" }]),
+      /cannot exceed the remaining released sapling quantity/
+    );
     await assert.rejects(reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]));
     assert.equal(table("plantingContributions").size, 1);
@@ -267,7 +320,7 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
     accuracy: "unavailable",
   };
-  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "other" }, [file]), /another participant/);
+  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1" }, [file]), /does not contain GPS location metadata/);
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
   const res = { result: {}, status(code) { this.result.code = code; return this; },
     json(value) { this.result.body = value; return this; } };
@@ -301,6 +354,110 @@ test("client device coordinates never substitute for missing photo EXIF GPS", as
     /does not contain GPS location metadata/
   );
   assert.equal(table("sites").get("site-outside").latitude, 12);
+});
+
+test("Take Photo accepts fresh device location without mislabeling it as EXIF", async () => {
+  const sharp = require("sharp");
+  const reportService = require("../src/services/plantingReport.service");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  seedApproved("request-device-photo", "EVT-DEVICE-PHOTO");
+  await requestService.releaseSeedlingRequest("request-device-photo", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
+  });
+  Object.assign(table("events").get("EVT-DEVICE-PHOTO"), {
+    recordStatus: "scheduled", plantingSiteId: "site-device-photo", barangay: "Bacolod",
+  });
+  table("sites").set("site-device-photo", {
+    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
+    latitude: 12.5, longitude: 123.5,
+    polygon: [
+      { lat: 12, lng: 123 }, { lat: 12, lng: 124 },
+      { lat: 13, lng: 124 }, { lat: 13, lng: 123 },
+    ],
+  });
+  const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "green" } })
+    .jpeg().toBuffer();
+  const capturedAt = new Date().toISOString();
+  let submitted;
+  try {
+    submitted = await reportService.createPlantingReport({
+      distributionId: "request-device-photo", inventoryId: "calamansi",
+      siteId: "site-device-photo", participantId: "participant-1",
+      participantType: "Student / School Representative", participantBarangay: "",
+      organizationAffiliation: "Sorsogon State University", participantContactNumber: "09123456789",
+      quantityPlanted: 20, plantingDate: "2026-09-24",
+      plantingLocation: "Assigned Site", eventId: "EVT-DEVICE-PHOTO",
+      locationSource: "Device Location at Capture", latitude: 14, longitude: 123.5,
+      accuracy: 8, photoCapturedAt: capturedAt, locationCapturedAt: capturedAt,
+    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]);
+
+    assert.equal(submitted.verificationStatus, "Pending Review");
+    assert.equal(submitted.locationSource, "Device Location at Capture");
+    assert.equal(submitted.gpsMetadataPresent, false);
+    assert.equal(submitted.gpsValid, true);
+    assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
+    assert.equal(submitted.latitude, 14);
+    assert.equal(submitted.longitude, 123.5);
+    assert.equal(submitted.photos[0].locationSource, "Device Location at Capture");
+    assert.equal(submitted.photos[0].gpsMetadataPresent, false);
+  } finally {
+    for (const photo of submitted?.photos || []) await deletePlantingPhoto(photo.photoPath);
+  }
+});
+
+test("valid EXIF GPS outside the assigned site is preserved, flagged, and submitted", async () => {
+  const sharp = require("sharp");
+  const reportService = require("../src/services/plantingReport.service");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  seedApproved("request-valid-outside", "EVT-VALID-OUTSIDE");
+  await requestService.releaseSeedlingRequest("request-valid-outside", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
+  });
+  Object.assign(table("events").get("EVT-VALID-OUTSIDE"), {
+    recordStatus: "scheduled", plantingSiteId: "site-valid-outside", barangay: "Bacolod",
+  });
+  table("sites").set("site-valid-outside", {
+    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
+    latitude: 12.5, longitude: 123.5,
+    polygon: [
+      { lat: 12, lng: 123 }, { lat: 12, lng: 124 },
+      { lat: 13, lng: 124 }, { lat: 13, lng: 123 },
+    ],
+  });
+  const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "purple" } })
+    .jpeg()
+    .withExif({
+      IFD0: { Make: "Test Camera", Model: "Outside GPS Test" },
+      IFD3: {
+        GPSLatitudeRef: "N", GPSLatitude: "14/1 0/1 0/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 30/1 0/1",
+      },
+    })
+    .toBuffer();
+  let submitted;
+  try {
+    submitted = await reportService.createPlantingReport({
+      distributionId: "request-valid-outside", inventoryId: "calamansi",
+      siteId: "site-valid-outside", participantId: "participant-1",
+      participantType: "requester", participantBarangay: "Bacolod",
+      quantityPlanted: 20, plantingDate: "2026-09-17",
+      plantingLocation: "Assigned Site", eventId: "EVT-VALID-OUTSIDE",
+    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-original.jpg" }]);
+
+    assert.equal(submitted.verificationStatus, "Pending Review");
+    assert.equal(submitted.automatedVerificationStatus, "Flagged");
+    assert.equal(submitted.gpsMetadataPresent, true);
+    assert.equal(submitted.gpsValid, true);
+    assert.equal(submitted.siteGpsValid, false);
+    assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
+    assert.equal(submitted.latitude, 14);
+    assert.equal(submitted.longitude, 123.5);
+    assert.ok(submitted.suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
+    assert.equal(table("events").get("EVT-VALID-OUTSIDE").plantingSiteId, "site-valid-outside");
+    assert.equal(submitted.photos[0].siteLocationStatus, "Outside Assigned Site");
+  } finally {
+    for (const photo of submitted?.photos || []) await deletePlantingPhoto(photo.photoPath);
+  }
 });
 
 test("participant monitoring returns only own records and accepts an empty history", async () => {
@@ -369,7 +526,7 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   assert.equal(table("plantingContributions").get(first.id).reportId, "event_EVT-2026-003");
   table("plantingContributions").get(first.id).photos = [{ imageHash: "guest-only-photo" }];
   const parentService = require("../src/services/parentPlantingReport.service");
-  await assert.rejects(parentService.finalizeParent("event_EVT-2026-003", "participant-1"), /Requester planting evidence/);
+  await assert.rejects(parentService.finalizeParent("event_EVT-2026-003", "participant-1"), /Planting evidence photos/);
   assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
 });
 
@@ -414,7 +571,7 @@ test("one parent groups multiple contributors and separate events get separate p
   assert.equal(participants.length, 2);
   assert.equal(participants.find((entry) => entry.id === "guest-4").quantityPlanted, 5);
   assert.equal(JSON.stringify(participants).includes("09123456789"), false);
-  await assert.rejects(parentService.finalizeParent(one.reportId, "other"), /not found/);
+  await assert.rejects(parentService.finalizeParent(one.reportId, "other"), /Planting evidence photos/);
   await assert.rejects(parentService.finalizeParent(one.reportId, "same-requester"), /evidence photos/);
   table("plantingContributions").get(one.id).photos = [
     { imageHash: `${one.id}-hash`, automatedStatus: "Flagged" },

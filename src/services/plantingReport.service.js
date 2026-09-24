@@ -66,6 +66,12 @@ const SITE_GPS_TOLERANCE_METERS =
 const MAX_EVIDENCE_PHOTOS =
   10;
 
+const PHOTO_EXIF_LOCATION_SOURCE =
+  "Photo Metadata (EXIF)";
+
+const DEVICE_CAPTURE_LOCATION_SOURCE =
+  "Device Location at Capture";
+
 const automatedVerificationStatus = (flags) =>
   flags.length === 0 ? "Passed Automated Check" : "Flagged";
 
@@ -299,20 +305,7 @@ const createPlantingReport = async (
 
 
   // --------------------------------
-  // 3. VERIFY PARTICIPANT
-  // --------------------------------
-  if (
-    distribution.participantId !==
-    data.participantId
-  ) {
-    throw new Error(
-      "You cannot submit a report for another participant's distribution."
-    );
-  }
-
-
-  // --------------------------------
-  // 4. VERIFY DISTRIBUTION STATUS
+  // 3. VERIFY DISTRIBUTION STATUS
   // --------------------------------
   if (
     distribution.status !==
@@ -321,6 +314,19 @@ const createPlantingReport = async (
     throw new Error(
       "Only released distributions can have planting reports."
     );
+  }
+
+  const distributionItems = Array.isArray(distribution.items)
+    ? distribution.items
+    : [];
+  const selectedDistributionItem = distributionItems.length > 0
+    ? distributionItems.find((item) =>
+        String(item.inventoryId || "") === String(data.inventoryId || "")) ||
+      (distributionItems.length === 1 ? distributionItems[0] : null)
+    : null;
+
+  if (distributionItems.length > 0 && !selectedDistributionItem) {
+    throw new Error("Select a released sapling tree item for this submission.");
   }
 
   const plantingDate = data.plantingDate;
@@ -340,7 +346,17 @@ const createPlantingReport = async (
     );
 
   const quantityReleased = Number(
-    distribution.totalQuantityReleased ?? distribution.quantityReleased
+    selectedDistributionItem?.releasedQuantity ??
+    selectedDistributionItem?.quantity ??
+    distribution.totalQuantityReleased ??
+    distribution.quantityReleased
+  );
+
+  const requestedQuantity = Number(
+    selectedDistributionItem?.requestedQuantity ??
+    selectedDistributionItem?.quantity ??
+    distribution.requestedQuantity ??
+    quantityReleased
   );
 
   if (
@@ -350,7 +366,7 @@ const createPlantingReport = async (
     quantityPlanted <= 0
   ) {
     throw new Error(
-      "Quantity planted must be a positive integer."
+      "Please enter a valid quantity of planted saplings."
     );
   }
 
@@ -370,7 +386,7 @@ const createPlantingReport = async (
     quantityReleased
   ) {
     throw new Error(
-      "Quantity planted cannot exceed the released quantity."
+      "The quantity planted cannot exceed the remaining released sapling quantity."
     );
   }
 
@@ -455,6 +471,8 @@ const createPlantingReport = async (
 let linkedEvent = null;
 
 const submittedEventId = String(data.eventId || distribution.eventId || "").trim();
+const isOriginalRequester = distribution.participantId === data.participantId;
+let eventParticipationId = null;
 if (distribution.eventId && submittedEventId !== distribution.eventId) {
   throw new Error("Selected event does not match the released distribution.");
 }
@@ -573,6 +591,27 @@ if (submittedEventId) {
       "The selected planting event does not belong to the selected barangay."
     );
   }
+
+  if (!isOriginalRequester) {
+    const participationSnapshot = await db
+      .collection("eventParticipants")
+      .where("userId", "==", data.participantId)
+      .get();
+    const participationDoc = participationSnapshot.docs.find((doc) => {
+      const participant = doc.data();
+      return participant.eventId === submittedEventId &&
+        participant.participantType === "participant";
+    });
+    if (!participationDoc) {
+      throw new Error("You are not registered for the selected planting event.");
+    }
+    eventParticipationId = participationDoc.id;
+  }
+
+}
+
+if (!isOriginalRequester && !submittedEventId) {
+  throw new Error("You are not registered for the selected planting event.");
 }
 
 
@@ -581,6 +620,34 @@ if (submittedEventId) {
   // BEFORE SAVING ANYTHING
   // --------------------------------
   const preparedPhotos = [];
+
+  const locationSource = data.locationSource === DEVICE_CAPTURE_LOCATION_SOURCE
+    ? DEVICE_CAPTURE_LOCATION_SOURCE
+    : PHOTO_EXIF_LOCATION_SOURCE;
+  const usesDeviceCaptureLocation = locationSource === DEVICE_CAPTURE_LOCATION_SOURCE;
+  const submittedLatitude = Number(data.latitude);
+  const submittedLongitude = Number(data.longitude);
+  const submittedAccuracy = data.accuracy === "" || data.accuracy === undefined
+    ? null
+    : Number(data.accuracy);
+  const submittedLocationCapturedAt = toTimestampOrNull(data.locationCapturedAt);
+  const submittedPhotoCapturedAt = toTimestampOrNull(data.photoCapturedAt);
+
+  if (usesDeviceCaptureLocation && (
+    !Number.isFinite(submittedLatitude) || submittedLatitude < -90 || submittedLatitude > 90
+  )) {
+    throw new Error("Latitude must be between -90 and 90.");
+  }
+
+  if (usesDeviceCaptureLocation && (
+    !Number.isFinite(submittedLongitude) || submittedLongitude < -180 || submittedLongitude > 180
+  )) {
+    throw new Error("Longitude must be between -180 and 180.");
+  }
+
+  if (usesDeviceCaptureLocation && (!submittedLocationCapturedAt || !submittedPhotoCapturedAt)) {
+    throw new Error("A valid device location and capture timestamp are required for a photo taken within the system.");
+  }
 
   const submissionHashes =
     new Set();
@@ -646,21 +713,38 @@ if (submittedEventId) {
       );
     }
 
-    const photoLatitude = metadata.latitude === null ? NaN : Number(metadata.latitude);
-    const photoLongitude = metadata.longitude === null ? NaN : Number(metadata.longitude);
+    const hasPhotoGpsValues = metadata.latitude !== null && metadata.latitude !== undefined &&
+      metadata.longitude !== null && metadata.longitude !== undefined;
+    const photoLatitude = usesDeviceCaptureLocation
+      ? submittedLatitude
+      : hasPhotoGpsValues ? Number(metadata.latitude) : NaN;
+    const photoLongitude = usesDeviceCaptureLocation
+      ? submittedLongitude
+      : hasPhotoGpsValues ? Number(metadata.longitude) : NaN;
     const hasValidPhotoGps =
       Number.isFinite(photoLatitude) && photoLatitude >= -90 && photoLatitude <= 90 &&
       Number.isFinite(photoLongitude) && photoLongitude >= -180 && photoLongitude <= 180;
 
     if (!hasValidPhotoGps) {
       throw new Error(
-        "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information."
+        hasPhotoGpsValues && !usesDeviceCaptureLocation
+          ? "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information."
+          : "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information."
       );
     }
 
 
     // Existing automated
     // photo verification
+    const verificationMetadata = usesDeviceCaptureLocation
+      ? {
+          ...metadata,
+          latitude: photoLatitude,
+          longitude: photoLongitude,
+          capturedAt: data.photoCapturedAt,
+        }
+      : metadata;
+
     const photoVerification =
       validatePlantingReport({
         // The shared validator handles metadata presence and capture-time checks.
@@ -669,7 +753,7 @@ if (submittedEventId) {
         submittedLongitude: photoLongitude,
         plantingDate:
           data.plantingDate,
-        metadata,
+        metadata: verificationMetadata,
       });
 
 
@@ -722,17 +806,48 @@ if (submittedEventId) {
 
       metadata,
 
+      latitude: photoLatitude,
+
+      longitude: photoLongitude,
+
+      locationSource,
+
+      locationAccuracyMeters: usesDeviceCaptureLocation && Number.isFinite(submittedAccuracy)
+        ? submittedAccuracy
+        : null,
+
+      locationCapturedAt: usesDeviceCaptureLocation
+        ? submittedLocationCapturedAt
+        : toTimestampOrNull(metadata.capturedAt),
+
+      photoCapturedAt: usesDeviceCaptureLocation
+        ? submittedPhotoCapturedAt
+        : toTimestampOrNull(metadata.capturedAt),
+
       gpsMetadataPresent:
-        photoVerification
-          .gpsMetadataPresent,
+        usesDeviceCaptureLocation
+          ? false
+          : photoVerification.gpsMetadataPresent,
 
       timestampMetadataPresent:
-        photoVerification
-          .timestampMetadataPresent,
+        usesDeviceCaptureLocation
+          ? false
+          : photoVerification.timestampMetadataPresent,
 
+      // GPS validity and assigned-site matching are separate results.
+      // Reaching this point means the original photo has valid EXIF GPS.
+      gpsValid: true,
+
+      // Keep the legacy distance field while also naming the site comparison explicitly.
       gpsDistanceMeters: photoSiteDistanceMeters,
 
-      gpsValid: photoSiteValid,
+      siteGpsDistanceMeters: photoSiteDistanceMeters,
+
+      siteGpsValid: photoSiteValid,
+
+      siteLocationStatus: photoSiteValid
+        ? "Within Assigned Site"
+        : "Outside Assigned Site",
 
       timestampValid:
         photoVerification
@@ -800,11 +915,7 @@ if (submittedEventId) {
 
 
       const capturedAtTimestamp =
-        toTimestampOrNull(
-          preparedPhoto
-            .metadata
-            .capturedAt
-        );
+        preparedPhoto.photoCapturedAt;
 
 
       uploadedPhotos.push({
@@ -869,6 +980,24 @@ if (submittedEventId) {
 
         uploadedAt: now,
 
+        latitude:
+          preparedPhoto.latitude,
+
+        longitude:
+          preparedPhoto.longitude,
+
+        locationSource:
+          preparedPhoto.locationSource,
+
+        locationAccuracyMeters:
+          preparedPhoto.locationAccuracyMeters,
+
+        locationCapturedAt:
+          preparedPhoto.locationCapturedAt,
+
+        photoCapturedAt:
+          preparedPhoto.photoCapturedAt,
+
         gpsMetadataPresent:
           preparedPhoto
             .gpsMetadataPresent,
@@ -884,6 +1013,18 @@ if (submittedEventId) {
         gpsValid:
           preparedPhoto
             .gpsValid,
+
+        siteGpsDistanceMeters:
+          preparedPhoto
+            .siteGpsDistanceMeters,
+
+        siteGpsValid:
+          preparedPhoto
+            .siteGpsValid,
+
+        siteLocationStatus:
+          preparedPhoto
+            .siteLocationStatus,
 
         timestampValid:
           preparedPhoto
@@ -912,11 +1053,10 @@ if (submittedEventId) {
     const primaryPhoto =
       uploadedPhotos[0];
 
-    const photoLatitude = Number(primaryPhoto.metadata.latitude);
-    const photoLongitude = Number(primaryPhoto.metadata.longitude);
-    const photoTakenAt = toTimestampOrNull(primaryPhoto.metadata.capturedAt);
-    const siteGpsDistanceMeters = Number(primaryPhoto.gpsDistanceMeters);
-    const siteGpsValid = primaryPhoto.gpsValid === true;
+    const photoLatitude = Number(primaryPhoto.latitude);
+    const photoLongitude = Number(primaryPhoto.longitude);
+    const photoTakenAt = primaryPhoto.photoCapturedAt;
+    const siteGpsDistanceMeters = Number(primaryPhoto.siteGpsDistanceMeters);
 
 
     // --------------------------------
@@ -940,6 +1080,15 @@ if (submittedEventId) {
         (photo) =>
           photo.gpsValid === true
       );
+
+    const allPhotosWithinAssignedSite = uploadedPhotos.every(
+      (photo) => photo.siteGpsValid === true
+    );
+
+    const siteGpsValid = allPhotosWithinAssignedSite;
+    const siteLocationStatus = allPhotosWithinAssignedSite
+      ? "Within Assigned Site"
+      : "Outside Assigned Site";
 
     const allTimestampValid =
       uploadedPhotos.every(
@@ -990,6 +1139,7 @@ if (submittedEventId) {
         "",
 
       inventoryId:
+        selectedDistributionItem?.inventoryId ||
         distribution.inventoryId ||
         "",
 
@@ -997,11 +1147,16 @@ if (submittedEventId) {
         data.participantId,
 
       participantName:
+        data.participantName ||
         distribution.participantName ||
         "",
 
       participantType:
         data.participantType ||
+        "",
+
+      participantContactNumber:
+        data.participantContactNumber ||
         "",
 
       participantBarangay:
@@ -1018,8 +1173,11 @@ if (submittedEventId) {
         "",
 
       species:
+        selectedDistributionItem?.species ||
         distribution.species ||
         "",
+
+      requestedQuantity,
 
       quantityReleased,
 
@@ -1078,10 +1236,12 @@ if (submittedEventId) {
       longitude:
         photoLongitude,
 
-      gpsAccuracyMeters: null,
+      gpsAccuracyMeters: primaryPhoto.locationAccuracyMeters,
+
+      locationSource,
 
       locationCapturedAt:
-        photoTakenAt,
+        primaryPhoto.locationCapturedAt,
 
       photoTakenAt,
 
@@ -1096,6 +1256,8 @@ if (submittedEventId) {
       siteGpsDistanceMeters,
 
       siteGpsValid,
+
+      siteLocationStatus,
 
       siteGpsToleranceMeters:
         SITE_GPS_TOLERANCE_METERS,
@@ -1205,12 +1367,12 @@ if (submittedEventId) {
     // --------------------------------
     if (linkedEvent?.sourceRequestId) {
       const allocatedItems = linkedEvent.seedlingItems || [];
-      const inventoryId = data.inventoryId ||
+      const inventoryId = selectedDistributionItem?.inventoryId || data.inventoryId ||
         (allocatedItems.length === 1 ? allocatedItems[0].inventoryId : "");
-      if (!inventoryId) throw new Error("Select a released seedling item for this submission.");
+      if (!inventoryId) throw new Error("Select a released sapling tree item for this submission.");
       const allocation = allocatedItems.find((item) => item.inventoryId === inventoryId);
       if (!allocation || !linkedEvent.allocationReleasedAt) {
-        throw new Error("Seedling item has not been released for this event.");
+        throw new Error("Sapling tree item has not been released for this event.");
       }
       const contributionRef = contributionCollection.doc();
       let parentId;
@@ -1219,31 +1381,35 @@ if (submittedEventId) {
         const eventDoc = await transaction.get(eventRef);
         if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
         const event = eventDoc.data();
+        if (!isOriginalRequester) {
+          const participationDoc = await transaction.get(
+            db.collection("eventParticipants").doc(eventParticipationId)
+          );
+          const participation = participationDoc.exists ? participationDoc.data() : null;
+          if (!participation || participation.userId !== data.participantId ||
+              participation.eventId !== submittedEventId ||
+              participation.participantType !== "participant") {
+            throw new Error("You are not registered for the selected planting event.");
+          }
+        }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
-          throw new Error("Seedling item has not been released for this event.");
+          throw new Error("Sapling tree item has not been released for this event.");
         }
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
         if (current + quantityPlanted > Number(currentAllocation.quantity)) {
-          throw new Error("Quantity planted exceeds the remaining event allocation.");
+          throw new Error("The quantity planted cannot exceed the remaining released sapling quantity.");
         }
         parentId = `event_${submittedEventId}`;
-        const existingSubmissions = await transaction.get(contributionCollection
-          .where("reportId", "==", parentId));
         const hashDocs = await Promise.all(uploadedPhotos.map((photo) =>
           transaction.get(evidenceHashCollection.doc(photo.imageHash))));
         if (hashDocs.some((doc) => doc.exists)) {
           throw new Error("Duplicate planting image detected.");
         }
-        if (existingSubmissions.docs.some((doc) =>
-          doc.data().contributorId === data.participantId ||
-          doc.data().participantType === "requester")) {
-          throw new Error("Requester has already submitted planting evidence for this event.");
-        }
         const parent = await parentForEventInTransaction(
           transaction, submittedEventId, event, now, quantityPlanted, "Pending Review"
         );
-        if (!parent.created && !["Draft", "Pending"].includes(parent.data.verificationStatus)) {
+        if (!parent.created && !["Draft", "Pending", "Pending Review"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
         }
         const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
@@ -1267,12 +1433,18 @@ if (submittedEventId) {
           reportId: parentId,
           requestId: event.sourceRequestId,
           eventId: submittedEventId,
-          participantId: data.participantId,
+          participantId: isOriginalRequester ? data.participantId : eventParticipationId,
           contributorId: data.participantId,
-          contributorName: distribution.participantName || "",
-          participantType: "requester",
+          contributorName: data.participantName || distribution.participantName || "",
+          participantType: isOriginalRequester ? "requester" : "participant",
+          participantUserType: data.participantType || "",
+          participantBarangay: data.participantBarangay || "",
+          organizationAffiliation: data.organizationAffiliation || "",
+          participantContactNumber: data.participantContactNumber || "",
           inventoryId,
           species: currentAllocation.species,
+          requestedQuantity,
+          releasedQuantity: quantityReleased,
           quantity: quantityPlanted,
           recordedAt: now,
           photos: uploadedPhotos,
@@ -1282,7 +1454,15 @@ if (submittedEventId) {
           plantingDate: data.plantingDate,
           latitude: photoLatitude,
           longitude: photoLongitude,
+          locationSource,
+          gpsAccuracyMeters: primaryPhoto.locationAccuracyMeters,
+          locationCapturedAt: primaryPhoto.locationCapturedAt,
+          photoCapturedAt: primaryPhoto.photoCapturedAt,
+          gpsMetadataPresent: allGpsMetadataPresent,
+          gpsValid: allGpsValid,
+          siteGpsDistanceMeters,
           siteGpsValid,
+          siteLocationStatus,
         });
         for (const photo of uploadedPhotos) {
           transaction.create(evidenceHashCollection.doc(photo.imageHash), {
@@ -1441,17 +1621,31 @@ const getPlantingReportById =
 // --------------------------------
 const getPlantingReportsByParticipantId =
   async (participantId) => {
-    const snapshot =
-      await reportCollection
+    const [ownedSnapshot, contributionSnapshot] = await Promise.all([
+      reportCollection
         .where(
           "participantId",
           "==",
           participantId
         )
-        .get();
+        .get(),
+      contributionCollection.where("contributorId", "==", participantId).get(),
+    ]);
 
-    const reports =
-      snapshot.docs.map(withWorkflowStatus);
+    const reportsById = new Map(
+      ownedSnapshot.docs.map((doc) => [doc.id, withWorkflowStatus(doc)])
+    );
+    const contributedReportIds = [...new Set(
+      contributionSnapshot.docs.map((doc) => doc.data().reportId).filter(Boolean)
+    )].filter((id) => !reportsById.has(id));
+    const contributedDocs = await Promise.all(
+      contributedReportIds.map((id) => reportCollection.doc(id).get())
+    );
+    contributedDocs
+      .filter((doc) => doc.exists)
+      .forEach((doc) => reportsById.set(doc.id, withWorkflowStatus(doc)));
+
+    const reports = [...reportsById.values()];
 
     reports.sort((a, b) => {
       const aSeconds =

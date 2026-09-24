@@ -94,13 +94,44 @@ async function reportDetails(id, data) {
     };
   });
   const evidence = contributions.flatMap((entry) => entry.photos || []);
+  const latestContribution = contributions[contributions.length - 1] || null;
+  const primaryContribution = contributions.find((entry) => entry.participantType === "requester") ||
+    contributions.find((entry) => entry.photos?.length) || latestContribution;
+  const primaryPhoto = primaryContribution?.photos?.[0] || null;
   const suspiciousFlags = [...new Set(evidence.flatMap((photo) => photo.suspiciousFlags || []))];
   return {
     id, ...data,
+    photos: evidence,
+    participantName: data.participantName || "",
+    participantType: data.participantType || "",
+    submittedByName: latestContribution?.contributorName || "",
+    submittedByType: latestContribution?.participantUserType || "",
+    participantBarangay: primaryContribution?.participantBarangay || data.participantBarangay || data.barangay || "",
+    organizationAffiliation: primaryContribution?.organizationAffiliation || data.organizationAffiliation || "",
+    participantContactNumber: primaryContribution?.participantContactNumber || data.participantContactNumber || "",
+    species: primaryContribution?.species || data.species || "",
+    plantingDate: primaryContribution?.plantingDate || data.plantingDate || data.eventDate || "",
+    requestedQuantity: primaryContribution?.requestedQuantity ?? data.requestedQuantity ?? null,
+    releasedItemQuantity: primaryContribution?.releasedQuantity ?? null,
+    locationSource: primaryContribution?.locationSource || primaryPhoto?.locationSource || data.locationSource || "",
+    gpsAccuracyMeters: primaryContribution?.gpsAccuracyMeters ?? primaryPhoto?.locationAccuracyMeters ?? null,
+    locationCapturedAt: primaryContribution?.locationCapturedAt ?? primaryPhoto?.locationCapturedAt ?? null,
+    photoTakenAt: primaryContribution?.photoCapturedAt ?? primaryPhoto?.photoCapturedAt ?? null,
+    latitude: primaryContribution?.latitude ?? primaryPhoto?.metadata?.latitude ?? null,
+    longitude: primaryContribution?.longitude ?? primaryPhoto?.metadata?.longitude ?? null,
+    gpsMetadataPresent: primaryContribution?.gpsMetadataPresent ??
+      (primaryPhoto ? primaryPhoto.gpsMetadataPresent === true : null),
+    gpsValid: primaryContribution?.gpsValid ??
+      (primaryPhoto ? primaryPhoto.gpsValid === true : null),
+    siteGpsDistanceMeters: primaryContribution?.siteGpsDistanceMeters ??
+      primaryPhoto?.siteGpsDistanceMeters ?? primaryPhoto?.gpsDistanceMeters ?? null,
+    siteGpsValid: primaryContribution?.siteGpsValid ?? primaryPhoto?.siteGpsValid ?? null,
+    siteLocationStatus: primaryContribution?.siteLocationStatus ??
+      primaryPhoto?.siteLocationStatus ?? null,
     allocationSummary: species,
     quantityReleased: species.reduce((sum, item) => sum + item.allocated, 0),
     quantityPlanted: species.reduce((sum, item) => sum + item.recorded, 0),
-    contributorCount: new Set(contributions.map((entry) => entry.participantId)).size,
+    contributorCount: new Set(contributions.map((entry) => entry.contributorId || entry.participantId)).size,
     evidenceCount: evidence.length,
     automatedVerificationStatus: evidence.length === 0 ? null
       : evidence.some((photo) => photo.automatedStatus === "Flagged" ||
@@ -121,8 +152,7 @@ async function finalizeParent(id, requesterId) {
   const ref = reports.doc(id);
   await db.runTransaction(async (transaction) => {
     const reportDoc = await transaction.get(ref);
-    if (!reportDoc.exists || reportDoc.data().reportType !== "parent" ||
-        reportDoc.data().participantId !== requesterId) {
+    if (!reportDoc.exists || reportDoc.data().reportType !== "parent") {
       throw new Error("Planting report not found.");
     }
     if (reportDoc.data().verificationStatus === "Pending Review") return;
@@ -135,14 +165,13 @@ async function finalizeParent(id, requesterId) {
         Number(eventDoc.data().recordedSeedlingQuantity || 0) <= 0) {
       throw new Error("The report has no recorded planting contributions.");
     }
-    const requesterSubmissions = submissionSnapshot.docs.filter((doc) =>
-      doc.data().participantType === "requester" &&
-      (doc.data().contributorId === requesterId || doc.data().participantId === requesterId));
-    if (requesterSubmissions.length === 0) {
-      throw new Error("Requester planting evidence photos are required before review.");
+    const submitterSubmissions = submissionSnapshot.docs.filter((doc) =>
+      doc.data().contributorId === requesterId || doc.data().participantId === requesterId);
+    if (submitterSubmissions.length === 0) {
+      throw new Error("Planting evidence photos are required before review.");
     }
-    if (requesterSubmissions.some((doc) => !doc.data().photos?.length)) {
-      throw new Error("Requester planting evidence photos are required before review.");
+    if (submitterSubmissions.some((doc) => !doc.data().photos?.length)) {
+      throw new Error("Planting evidence photos are required before review.");
     }
     const now = Timestamp.now();
     transaction.update(ref, {
