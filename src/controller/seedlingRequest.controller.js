@@ -856,8 +856,8 @@ const resubmitRequest = async (req, res) => {
 // Reviewed -> Approved
 //
 // Approval reason is optional.
-// Inventory is reserved.
-// Planting event is created and Scheduled.
+// Inventory remains unchanged until Staff release.
+// The planting event is created and scheduled.
 // ========================================
 
 const approveRequest = async (

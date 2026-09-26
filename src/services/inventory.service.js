@@ -8,6 +8,7 @@ const {
   "firebase-admin/firestore"
 );
 const { nextRecordNumber } = require("../utils/recordNumber.util");
+const { createLowStockNotificationsInTransaction } = require("./notification.service");
 
 const COLLECTION =
   "seedlingInventory";
@@ -495,6 +496,22 @@ const updateInventoryById =
               newAvailableQuantity,
               effectiveThreshold
             );
+          updates.lowStockAlertActive = newAvailableQuantity <= effectiveThreshold;
+
+          const currentAvailableQuantity = Number(currentData.availableQuantity || 0);
+          if (currentAvailableQuantity > effectiveThreshold &&
+              newAvailableQuantity <= effectiveThreshold) {
+            const lowStockCycle = Number(currentData.lowStockCycle || 0) + 1;
+            updates.lowStockCycle = lowStockCycle;
+            await createLowStockNotificationsInTransaction(transaction, {
+              inventoryId: id,
+              species: updates.species || currentData.species || "Sapling",
+              availableQuantity: newAvailableQuantity,
+              lowStockThreshold: effectiveThreshold,
+              cycle: lowStockCycle,
+              createdAt: Timestamp.now(),
+            });
+          }
         } else if (
           updateData.lowStockThreshold !==
           undefined
@@ -612,6 +629,9 @@ const addInventoryStock =
 
             status:
               newStatus,
+
+            lowStockAlertActive:
+              newAvailableQuantity <= lowStockThreshold,
 
             updatedBy,
 

@@ -23,7 +23,7 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     transaction.get(requests.doc(requestId)),
   ]);
   if (!requestDoc.exists || requestDoc.data().eventId !== eventId ||
-      requestDoc.data().status !== "Approved") {
+      !["Approved", "Released"].includes(requestDoc.data().status)) {
     throw new Error("Event and approved request do not match.");
   }
   if (parentDoc.exists) {

@@ -3,6 +3,7 @@ const {
   getAllPlantingReports,
   getPlantingReportById,
   getPlantingReportsByParticipantId,
+  participantSafeReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,
@@ -379,9 +380,13 @@ const getPlantingReport = async (
       return res.status(404).json({ success: false, message: "Planting report not found." });
     }
 
+    const responseReport = req.user.role === "participant"
+      ? participantSafeReport(report, req.user.uid)
+      : report;
+
     return res.status(200).json({
       success: true,
-      data: report,
+      data: responseReport,
     });
   } catch (error) {
     const expectedError = ["Planting report not found.", "Invalid planting report ID."].includes(error.message);

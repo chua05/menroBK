@@ -8,6 +8,7 @@ const records = {
   sites: new Map(),
   counters: new Map(),
   notifications: new Map(),
+  distributions: new Map(),
 };
 
 let generatedDocumentId = 0;
@@ -34,6 +35,11 @@ const db = {
         const id = `new-${records[name].size + 1}`;
         records[name].set(id, data);
         return { id };
+      },
+      async get() {
+        return {
+          docs: [...records[name].entries()].map(([id, data]) => ({ id, data: () => data })),
+        };
       },
       where(field, operator, value) {
         return {
@@ -268,6 +274,26 @@ test("Staff return and participant resubmission preserve the same request and re
     service.resubmitSeedlingRequest("request-returned", "participant-1", data),
     /status has changed/
   );
+
+  const returnedAgain = await service.returnSeedlingRequest(
+    "request-returned",
+    "staff-2",
+    "Second Reviewer",
+    "Please correct the preferred release date."
+  );
+  assert.equal(returnedAgain.status, "Returned");
+  assert.equal(returnedAgain.requestNumber, "REQ-2026-001");
+  assert.equal(returnedAgain.reviewHistory.filter((entry) => entry.action === "returned").length, 2);
+  assert.equal(records.notifications.has("request_returned_request-returned_2"), true);
+
+  const resubmittedAgain = await service.resubmitSeedlingRequest(
+    "request-returned",
+    "participant-1",
+    data
+  );
+  assert.equal(resubmittedAgain.status, "Pending");
+  assert.equal(resubmittedAgain.requestNumber, "REQ-2026-001");
+  assert.deepEqual(records.seedlingInventory.get("inventory-returned"), inventoryBefore);
 });
 
 test("details return full stored data and missing requests return 404", async () => {

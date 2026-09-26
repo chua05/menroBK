@@ -59,7 +59,7 @@ const createEvent = async (req, res) => {
 const getAllEvents = async (req, res) => {
   try {
     const events =
-      await eventService.getAllEvents();
+      await eventService.getAllEvents({ uid: req.user.uid, role: req.user.role });
 
     return sendSuccess(
       res,

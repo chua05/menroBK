@@ -27,7 +27,11 @@ const {
 } = require(
   "./event.service"
 );
-const { createNotificationInTransaction } = require("./notification.service");
+const {
+  createNotificationInTransaction,
+  getRoleRecipientsInTransaction,
+  createRoleNotificationsInTransaction,
+} = require("./notification.service");
 const { createInvitationInTransaction } = require("./guestEvent.service");
 const { parentForEventInTransaction } = require("./parentPlantingReport.service");
 
@@ -42,6 +46,32 @@ const SITES_COLLECTION =
 
 const COUNTERS_COLLECTION = "counters";
 const REQUEST_COUNTER_DOCUMENT = "seedlingRequests";
+
+const releasedDistributionMap = async () => {
+  const snapshot = await db.collection("distributions").get();
+  return new Map(snapshot.docs
+    .map((doc) => [doc.id, { id: doc.id, ...doc.data() }])
+    .filter(([, distribution]) => distribution.status === "Released"));
+};
+
+// Read-only compatibility for historical records whose real Distribution was
+// completed before requests began storing the Released status. No migration,
+// timestamp, or quantity is fabricated.
+const withLegacyReleaseState = (request, distribution) => {
+  if (request.status !== "Approved" || !distribution) return request;
+  const releasedItems = Array.isArray(distribution.items) ? distribution.items : [];
+  return {
+    ...request,
+    status: "Released",
+    legacyRequestStatus: "Approved",
+    inventoryReleased: true,
+    releasedItems,
+    totalQuantityReleased: Number(distribution.totalQuantityReleased || 0),
+    releasedBy: distribution.releasedBy || request.releasedBy || "",
+    releasedAt: distribution.releasedAt || request.releasedAt || null,
+    distributionId: distribution.id,
+  };
+};
 
 // ========================================
 // HELPERS
@@ -387,18 +417,18 @@ const createSeedlingRequest =
 
 const getAllSeedlingRequests =
   async () => {
-    const snapshot =
-      await db
-        .collection(COLLECTION)
-        .get();
+    const [snapshot, distributions] = await Promise.all([
+      db.collection(COLLECTION).get(),
+      releasedDistributionMap(),
+    ]);
 
     return snapshot.docs.map(
-      (doc) => ({
+      (doc) => withLegacyReleaseState({
         id:
           doc.id,
 
         ...doc.data(),
-      })
+      }, distributions.get(doc.id))
     );
   };
 
@@ -420,12 +450,19 @@ const getSeedlingRequestById =
       );
     }
 
-    return {
+    const request = {
       id:
         doc.id,
 
       ...doc.data(),
     };
+    const distribution = request.status === "Approved"
+      ? await db.collection("distributions").doc(id).get()
+      : null;
+    return withLegacyReleaseState(
+      request,
+      distribution?.exists ? { id: distribution.id, ...distribution.data() } : null
+    );
   };
 
 // ========================================
@@ -434,24 +471,8 @@ const getSeedlingRequestById =
 
 const getSeedlingRequestsByStatus =
   async (status) => {
-    const snapshot =
-      await db
-        .collection(COLLECTION)
-        .where(
-          "status",
-          "==",
-          status
-        )
-        .get();
-
-    return snapshot.docs.map(
-      (doc) => ({
-        id:
-          doc.id,
-
-        ...doc.data(),
-      })
-    );
+    const requests = await getAllSeedlingRequests();
+    return requests.filter((request) => request.status === status);
   };
 
 // ========================================
@@ -462,23 +483,18 @@ const getSeedlingRequestsByParticipantId =
   async (
     participantId
   ) => {
-    const snapshot =
-      await db
-        .collection(COLLECTION)
-        .where(
-          "participantId",
-          "==",
-          participantId
-        )
-        .get();
+    const [snapshot, distributions] = await Promise.all([
+      db.collection(COLLECTION).where("participantId", "==", participantId).get(),
+      releasedDistributionMap(),
+    ]);
 
     return snapshot.docs.map(
-      (doc) => ({
+      (doc) => withLegacyReleaseState({
         id:
           doc.id,
 
         ...doc.data(),
-      })
+      }, distributions.get(doc.id))
     );
   };
 
@@ -543,6 +559,26 @@ const reviewSeedlingRequest =
         0
       );
       const now = Timestamp.now();
+      const reviewCycle = (Array.isArray(currentRequest.reviewHistory)
+        ? currentRequest.reviewHistory
+        : []
+      ).filter((entry) => entry?.action === "reviewed").length + 1;
+
+      await createRoleNotificationsInTransaction(transaction, ["admin"], {
+        notificationId: `request_reviewed_${id}_${reviewCycle}`,
+        type: "request_reviewed",
+        title: "Sapling Request Reviewed",
+        message: `${currentRequest.requestNumber || id} has been reviewed by MENRO Staff and is ready for your final decision.`,
+        relatedRecordType: "seedlingRequest",
+        relatedRecordId: id,
+        requestNumber: currentRequest.requestNumber || "",
+        createdAt: now,
+        details: {
+          requesterName: currentRequest.participantName || "",
+          reviewedByName: reviewData.reviewedByName || "",
+          reviewedAt: now,
+        },
+      });
 
       transaction.update(docRef, {
         items: canonicalItems,
@@ -654,6 +690,10 @@ const returnSeedlingRequest = async (
       requestNumber: request.requestNumber || "",
       reason: returnReason,
       returnedAt: now,
+      details: {
+        returnedAt: now,
+        returnedByName: cleanString(returnedByName),
+      },
       createdAt: now,
     });
   });
@@ -795,8 +835,8 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
 //
 // Reviewed -> Approved
 //
-// All inventory reservations + event creation
-// + request approval happen atomically.
+// Approval authorizes and schedules the request. Inventory remains unchanged
+// until staff records the physical sapling release.
 // ========================================
 
 const approveSeedlingRequest =
@@ -835,7 +875,7 @@ const approveSeedlingRequest =
         if (
           currentRequest.status === "Approved" &&
           currentRequest.eventId &&
-          currentRequest.inventoryDeducted === true
+          currentRequest.eventCreated === true
         ) {
           return;
         }
@@ -1019,6 +1059,12 @@ const approveSeedlingRequest =
           );
         }
 
+        const roleRecipients = await getRoleRecipientsInTransaction(
+          transaction,
+          ["staff"]
+        );
+        const staffRecipients = roleRecipients.filter((user) => user.role === "staff");
+
         const now =
           Timestamp.now();
 
@@ -1078,26 +1124,6 @@ const approveSeedlingRequest =
         }
 
         // ========================================
-        // Final approval accounts for stock exactly once. Reserved quantity
-        // tracks approved saplings that are still awaiting physical release.
-        for (const record of inventoryRecords) {
-          const currentAvailable = Number(record.inventoryData.availableQuantity || 0);
-          const currentReserved = Number(record.inventoryData.reservedQuantity || 0);
-          const newAvailable = currentAvailable - record.approvedQuantity;
-
-          transaction.update(record.inventoryRef, {
-            availableQuantity: newAvailable,
-            reservedQuantity: currentReserved + record.approvedQuantity,
-            status: calculateInventoryStatus(
-              newAvailable,
-              Number(record.inventoryData.lowStockThreshold ?? 20)
-            ),
-            updatedBy: approvedBy,
-            updatedAt: now,
-          });
-        }
-        // ========================================
-
         // ========================================
         // UPDATE REQUEST
         // ========================================
@@ -1111,22 +1137,42 @@ const approveSeedlingRequest =
           decisionAt: now,
           eventId,
           eventCreated: true,
-          inventoryDeducted: true,
-          inventoryReserved: true,
+          inventoryDeducted: false,
+          inventoryReserved: false,
           approvedItems,
           updatedAt: now,
         });
 
         createNotificationInTransaction(transaction, {
+          notificationId: `request_approved_${id}_${currentRequest.participantId}`,
           recipientUserId: currentRequest.participantId,
           type: "request_approved",
-          title: "Seedling request approved",
-          message: "Your seedling request has been approved. Please wait for release updates.",
+          title: "Sapling Request Approved",
+          message: `Your sapling request ${currentRequest.requestNumber || id} has been approved. Please wait for release updates.`,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
+          requestNumber: currentRequest.requestNumber || "",
           relatedEventId: eventId,
           createdAt: now,
+          details: { approvedAt: now },
         });
+
+        staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `request_approved_staff_${id}_${recipient.id}`,
+          recipientUserId: recipient.id,
+          type: "request_approved_staff",
+          title: "Sapling Request Approved",
+          message: `${currentRequest.requestNumber || id} has been approved by the MENRO Administrator and is ready for sapling release.`,
+          relatedRecordType: "seedlingRequest",
+          relatedRecordId: id,
+          requestNumber: currentRequest.requestNumber || "",
+          relatedEventId: eventId,
+          createdAt: now,
+          details: {
+            requesterName: currentRequest.participantName || "",
+            approvedAt: now,
+          },
+        }));
       }
     );
 
@@ -1153,6 +1199,11 @@ const rejectSeedlingRequest =
     rejectedBy,
     reason
   ) => {
+    const rejectionReason = cleanString(reason);
+    if (!rejectionReason) {
+      throw new Error("A rejection reason is required.");
+    }
+
     const docRef =
       db
         .collection(COLLECTION)
@@ -1182,6 +1233,8 @@ const rejectSeedlingRequest =
     const now =
       Timestamp.now();
 
+    const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+
     transaction.update(docRef, {
       status:
         "Rejected",
@@ -1192,9 +1245,7 @@ const rejectSeedlingRequest =
         now,
 
       decisionReason:
-        cleanString(
-          reason
-        ),
+        rejectionReason,
 
       decisionBy:
         rejectedBy,
@@ -1206,16 +1257,35 @@ const rejectSeedlingRequest =
         now,
     });
     createNotificationInTransaction(transaction, {
+      notificationId: `request_rejected_${id}_${currentRequest.participantId}`,
       recipientUserId: currentRequest.participantId,
       type: "request_rejected",
-      title: "Seedling request rejected",
-      message: cleanString(reason)
-        ? `Your seedling request was rejected. Reason: ${cleanString(reason)}`
-        : "Your seedling request was rejected.",
+      title: "Sapling Request Rejected",
+      message: `Your sapling request ${currentRequest.requestNumber || id} was rejected by the MENRO Administrator.`,
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
+      requestNumber: currentRequest.requestNumber || "",
+      reason: rejectionReason,
+      details: { rejectedAt: now },
       createdAt: now,
     });
+
+    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+      notificationId: `request_rejected_staff_${id}_${recipient.id}`,
+      recipientUserId: recipient.id,
+      type: "request_rejected_staff",
+      title: "Sapling Request Rejected",
+      message: `${currentRequest.requestNumber || id} was rejected by the MENRO Administrator and must not proceed to sapling release.`,
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      requestNumber: currentRequest.requestNumber || "",
+      reason: rejectionReason,
+      details: {
+        requesterName: currentRequest.participantName || "",
+        rejectedAt: now,
+      },
+      createdAt: now,
+    }));
     });
 
     const updatedDoc =
@@ -1234,8 +1304,8 @@ const rejectSeedlingRequest =
 //
 // Approved -> Released
 //
-// Reserved -> Distributed.
-// Available is NOT deducted again.
+// New requests deduct available inventory exactly once here. Legacy requests
+// that were previously reserved are reconciled without double deduction.
 // ========================================
 
 const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
@@ -1249,7 +1319,9 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     const requestDoc = await transaction.get(requestRef);
     if (!requestDoc.exists) throw new Error("Seedling request not found.");
     const request = requestDoc.data();
-    if (request.inventoryReleased === true) return;
+    if (request.inventoryReleased === true || request.status === "Released") {
+      throw new Error("Saplings have already been released for this request.");
+    }
     if (request.status !== "Approved") {
       throw new Error("Only approved requests can be released.");
     }
@@ -1313,6 +1385,10 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       inventoryRows.push({ ref, stock, requested, entered, isLegacyReserved });
     }
 
+    const lowStockRecipients = await getRoleRecipientsInTransaction(
+      transaction,
+      ["admin", "staff"]
+    );
     const now = Timestamp.now();
     const releaseItems = inventoryRows.map(({ requested, entered, stock }) => ({
       inventoryId: requested.inventoryId,
@@ -1336,14 +1412,39 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       const released = entered.releasedQuantity;
       const remainder = Number(requested.quantity) - released;
       const newAvailable = isLegacyReserved ? available + remainder : available - released;
+      const lowStockThreshold = Number(stock.lowStockThreshold ?? 20);
+      const crossedLowStockThreshold =
+        !isLegacyReserved && available > lowStockThreshold && newAvailable <= lowStockThreshold;
+      const lowStockCycle = crossedLowStockThreshold
+        ? Number(stock.lowStockCycle || 0) + 1
+        : Number(stock.lowStockCycle || 0);
       transaction.update(ref, {
         availableQuantity: newAvailable,
         reservedQuantity: isLegacyReserved ? reserved - Number(requested.quantity) : reserved,
         distributedQuantity: Number(stock.distributedQuantity || 0) + released,
-        status: calculateInventoryStatus(newAvailable, Number(stock.lowStockThreshold ?? 20)),
+        status: calculateInventoryStatus(newAvailable, lowStockThreshold),
+        lowStockAlertActive: newAvailable <= lowStockThreshold,
+        lowStockCycle,
         updatedBy: releasedBy,
         updatedAt: now,
       });
+      if (crossedLowStockThreshold) {
+        lowStockRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `low_stock_${ref.id}_${lowStockCycle}_${recipient.id}`,
+          recipientUserId: recipient.id,
+          type: "inventory_low_stock",
+          title: "Low Sapling Stock",
+          message: `${stock.species || requested.species} has reached the low-stock level. Current available stock: ${newAvailable} saplings.`,
+          relatedRecordType: "inventory",
+          relatedRecordId: ref.id,
+          createdAt: now,
+          details: {
+            species: stock.species || requested.species || "",
+            availableQuantity: newAvailable,
+            lowStockThreshold,
+          },
+        }));
+      }
     }
 
     createDistributionRecordInTransaction(transaction, {
@@ -1363,6 +1464,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       updatedAt: now,
     });
     transaction.update(requestRef, {
+      status: "Released",
       inventoryReleased: true,
       inventoryReserved: false,
       inventoryDeducted: true,
@@ -1375,14 +1477,27 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       updatedAt: now,
     });
     createNotificationInTransaction(transaction, {
+      notificationId: `request_released_${id}`,
       recipientUserId: request.participantId,
       type: "request_released",
-      title: "Seedlings released",
-      message: "Seedlings for your request have been released.",
+      title: "Saplings Released",
+      message: "The saplings for your request have been successfully released by MENRO Staff. Below are the actual saplings released for your planting activity.",
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
+      requestNumber: request.requestNumber || "",
       relatedEventId: request.eventId,
       relatedDistributionId: id,
+      details: {
+        releasedAt: now,
+        releasedBy,
+        releasedItems: releaseItems.map((item) => ({
+          inventoryId: item.inventoryId,
+          species: item.species,
+          releasedQuantity: item.releasedQuantity,
+          releaseType: item.releaseType,
+          shortReleaseReason: item.shortReleaseReason || "",
+        })),
+      },
       createdAt: now,
     });
   });

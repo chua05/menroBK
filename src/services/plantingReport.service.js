@@ -116,6 +116,30 @@ const withWorkflowStatus = (doc) => {
   };
 };
 
+const participantSafeReport = (report, participantId) => {
+  if (report.reportType !== "parent") return report;
+  const ownSubmissions = (report.submissions || []).filter(
+    (submission) => submission.contributorId === participantId
+  );
+  const ownLatest = ownSubmissions[ownSubmissions.length - 1] || null;
+  return {
+    ...report,
+    submissions: ownSubmissions.map((submission) => ({
+      ...submission,
+      participantContactNumber: submission.contributorId === participantId
+        ? submission.participantContactNumber || ""
+        : "",
+    })),
+    submittedByName: ownLatest?.contributorName || "",
+    submittedByType: ownLatest?.participantUserType || "",
+    participantContactNumber: report.participantId === participantId
+      ? report.participantContactNumber || ""
+      : "",
+    organizationAffiliation: ownLatest?.organizationAffiliation || "",
+    participantBarangay: ownLatest?.participantBarangay || "",
+  };
+};
+
 
 // --------------------------------
 // FIND DUPLICATE IMAGE HASH
@@ -1590,10 +1614,11 @@ const getAllPlantingReports = async (
     );
   });
 
-  return Promise.all(reports.map((report) =>
+  const detailedReports = await Promise.all(reports.map((report) =>
     report.reportType === "parent" ? reportDetails(report.id, report) : report
   ));
-};
+  return detailedReports.map((report) => participantSafeReport(report, participantId));
+  };
 
 
 // --------------------------------
@@ -1943,6 +1968,7 @@ module.exports = {
   getAllPlantingReports,
   getPlantingReportById,
   getPlantingReportsByParticipantId,
+  participantSafeReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,

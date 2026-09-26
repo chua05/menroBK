@@ -967,7 +967,7 @@ const createTreePlantingEventInTransaction =
 // ========================================
 
 const getAllEvents =
-  async () => {
+  async (viewer = {}) => {
     const [snapshot, participantSnapshot, requestSnapshot] = await Promise.all([
       db.collection(EVENTS_COLLECTION).get(),
       db.collection("eventParticipants").get(),
@@ -975,11 +975,21 @@ const getAllEvents =
     ]);
 
     const participantCounts = new Map();
+    const participantEventIds = new Set();
     participantSnapshot.docs.forEach((doc) => {
-      const eventId = doc.data().eventId;
+      const participant = doc.data();
+      const eventId = participant.eventId;
       participantCounts.set(eventId, (participantCounts.get(eventId) || 0) + 1);
+      if (viewer.role === "participant" && participant.userId === viewer.uid) {
+        participantEventIds.add(eventId);
+      }
     });
     const requestNumbers = new Map(requestSnapshot.docs.map((doc) => [doc.id, doc.data().requestNumber || ""]));
+    const ownedRequestIds = new Set(
+      requestSnapshot.docs
+        .filter((doc) => viewer.role === "participant" && doc.data().participantId === viewer.uid)
+        .map((doc) => doc.id)
+    );
 
     return snapshot.docs
       .map(
@@ -990,6 +1000,8 @@ const getAllEvents =
             ...event,
             actualParticipants: participantCounts.get(doc.id) || 0,
             sourceRequestNumber: event.sourceRequestNumber || requestNumbers.get(event.sourceRequestId) || "",
+            isMyEvent: viewer.role === "participant" &&
+              (ownedRequestIds.has(event.sourceRequestId) || participantEventIds.has(doc.id)),
           };
         }
       )

@@ -98,10 +98,8 @@ router.patch(
 //
 // Optional request body: { "reason": "..." }
 //
-// Approval:
-// 1. Reserves all requested inventory
-// 2. Creates the Tree Planting event
-// 3. Event is immediately Scheduled
+// Approval creates the scheduled Tree Planting event but does not change stock.
+// Physical inventory is deducted only after a successful Staff release.
 // ========================================
 
 router.patch(
@@ -134,8 +132,8 @@ router.patch(
 //
 // Approved -> Released
 //
-// All reserved stock becomes distributed.
-// Available stock is NOT deducted again.
+// Current stock is validated and the actual released quantities are deducted
+// atomically with the Distribution and final Released request status.
 // ========================================
 
 router.patch(

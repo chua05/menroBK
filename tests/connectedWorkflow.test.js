@@ -22,6 +22,7 @@ const db = {
   collection(name) {
     return {
       doc(id = `generated-${++generated}`) { return ref(name, id); },
+      limit() { return this; },
       async get() {
         const docs = [...table(name)].map(([id, data]) => ({ id, data: () => data }));
         return { docs, empty: docs.length === 0 };
@@ -103,9 +104,10 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     assert.equal(table("events").get(withoutGuests.eventId).sourceRequestId, "approve-zero");
     assert.equal(table("events").get(withoutGuests.eventId).seedlingTotalQuantity, 0);
     assert.equal(table("eventInvitations").has(withoutGuests.eventId), false);
-    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 90);
-    assert.equal(table("seedlingInventory").get("calamansi").reservedQuantity, 10);
-    assert.equal(withoutGuests.inventoryDeducted, true);
+    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 100);
+    assert.equal(table("seedlingInventory").get("calamansi").reservedQuantity || 0, 0);
+    assert.equal(withoutGuests.inventoryDeducted, false);
+    assert.equal(withoutGuests.inventoryReserved, false);
 
     seedReviewed("approve-guests", 4);
     await assert.rejects(requestService.approveSeedlingRequest("approve-guests", "admin-1"), /GUEST_INVITATION_SECRET/);
@@ -119,7 +121,7 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     const count = table("events").size;
     await requestService.approveSeedlingRequest("approve-guests", "admin-1");
     assert.equal(table("events").size, count);
-    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 90);
+    assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 100);
 
     seedReviewed("approve-insufficient", 0);
     table("seedlingInventory").get("calamansi").availableQuantity = 9;
@@ -138,7 +140,7 @@ test("partial release updates real stock, distribution, event allocation, and no
   seedApproved("request-1", "EVT-2026-001");
   const input = { items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged seedlings" }] };
   const released = await requestService.releaseSeedlingRequest("request-1", "staff-1", input);
-  assert.equal(released.status, "Approved");
+  assert.equal(released.status, "Released");
   assert.equal(released.releaseType, "Partial");
   assert.equal(released.releasedItems[0].difference, 10);
   assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 160);
@@ -152,7 +154,10 @@ test("partial release updates real stock, distribution, event allocation, and no
   assert.equal(table("plantingReports").get("event_EVT-2026-001").verificationStatus, "Pending");
   assert.equal(table("notifications").get("request_released_request-1").relatedEventId, "EVT-2026-001");
   const notificationCount = table("notifications").size;
-  await requestService.releaseSeedlingRequest("request-1", "staff-1", input);
+  await assert.rejects(
+    requestService.releaseSeedlingRequest("request-1", "staff-1", input),
+    /already been released/
+  );
   assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 160);
   assert.equal(table("notifications").size, notificationCount);
   assert.equal([...table("plantingReports")].filter(([, report]) => report.eventId === "EVT-2026-001").length, 1);
@@ -170,6 +175,42 @@ test("invalid release leaves inventory, event, and distribution unchanged", asyn
   assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 80);
   assert.equal(table("distributions").has("request-2"), false);
   assert.deepEqual(table("events").get("EVT-2026-002").seedlingItems, []);
+});
+
+test("release crossing the stock threshold alerts active Admin and Staff users once", async () => {
+  table("users").set("low-admin", { role: "admin", status: "active" });
+  table("users").set("low-staff", { role: "staff", status: "active" });
+  table("users").set("inactive-staff", { role: "staff", status: "inactive" });
+  seedApproved("request-low-stock", "EVT-LOW-STOCK", 25);
+  table("seedlingRequests").get("request-low-stock").items[0].quantity = 10;
+
+  await requestService.releaseSeedlingRequest("request-low-stock", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 10, shortReleaseReason: "" }],
+  });
+
+  assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 15);
+  assert.equal(table("seedlingInventory").get("calamansi").lowStockCycle, 1);
+  assert.equal(table("notifications").has("low_stock_calamansi_1_low-admin"), true);
+  assert.equal(table("notifications").has("low_stock_calamansi_1_low-staff"), true);
+  assert.equal(table("notifications").has("low_stock_calamansi_1_inactive-staff"), false);
+});
+
+test("historical Approved requests use a real completed Distribution as Released read compatibility", async () => {
+  table("seedlingRequests").set("legacy-released", {
+    participantId: "participant-legacy", requestNumber: "REQ-2025-007", status: "Approved",
+  });
+  table("distributions").set("legacy-released", {
+    requestId: "legacy-released", status: "Released", releasedBy: "staff-old",
+    releasedAt: new Date("2025-10-01T08:00:00Z"), totalQuantityReleased: 7,
+    items: [{ inventoryId: "legacy-narra", species: "Narra", releasedQuantity: 7, quantity: 7 }],
+  });
+
+  const view = await requestService.getSeedlingRequestById("legacy-released");
+  assert.equal(view.status, "Released");
+  assert.equal(view.legacyRequestStatus, "Approved");
+  assert.equal(view.totalQuantityReleased, 7);
+  assert.equal(view.releasedItems[0].species, "Narra");
+  assert.equal(table("seedlingRequests").get("legacy-released").status, "Approved");
 });
 
 test("own released distributions expose each species and actual partial quantities", async () => {
@@ -585,4 +626,33 @@ test("one parent groups multiple contributors and separate events get separate p
   await assert.rejects(contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1),
     /already been finalized/);
   assert.equal(table("plantingReports").get(three.reportId).verificationStatus, "Pending");
+});
+
+test("global search returns role-safe record links without exposing another participant's request", async () => {
+  table("seedlingRequests").set("search-own", {
+    participantId: "participant-search", requestNumber: "REQ-2026-901",
+    participantName: "Needle Query Owner", status: "Pending",
+  });
+  table("seedlingRequests").set("search-other", {
+    participantId: "another-participant", requestNumber: "REQ-2026-902",
+    participantName: "Needle Query Other", status: "Pending",
+  });
+  table("seedlingInventory").set("search-inventory", {
+    species: "Needle Query Narra", availableQuantity: 10,
+  });
+  const { globalSearch } = require("../src/services/search.service");
+
+  const participantResults = await globalSearch({
+    query: "needle query", role: "participant", userId: "participant-search", limit: 20,
+  });
+  assert.equal(participantResults.some((item) => item.id === "search-own"), true);
+  assert.equal(participantResults.some((item) => item.id === "search-other"), false);
+  assert.equal(participantResults.some((item) => item.type === "Inventory Sapling"), false);
+  assert.match(participantResults.find((item) => item.id === "search-own").path, /my-requests\?request=search-own/);
+
+  const staffResults = await globalSearch({
+    query: "needle query", role: "staff", userId: "staff-1", limit: 20,
+  });
+  assert.equal(staffResults.some((item) => item.id === "search-other"), true);
+  assert.equal(staffResults.some((item) => item.id === "search-inventory"), true);
 });
