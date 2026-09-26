@@ -128,6 +128,14 @@ async function reportDetails(id, data) {
     siteGpsValid: primaryContribution?.siteGpsValid ?? primaryPhoto?.siteGpsValid ?? null,
     siteLocationStatus: primaryContribution?.siteLocationStatus ??
       primaryPhoto?.siteLocationStatus ?? null,
+    municipalityScope: primaryContribution?.municipalityScope ??
+      primaryPhoto?.municipalityScope ?? null,
+    siteMatch: primaryContribution?.siteMatch ?? primaryPhoto?.siteMatch ?? null,
+    locationVerificationStatus: primaryContribution?.locationVerificationStatus ??
+      primaryPhoto?.locationVerificationStatus ?? null,
+    requiresStaffReview: primaryContribution?.requiresStaffReview ??
+      primaryPhoto?.requiresStaffReview ?? false,
+    verifiedAt: primaryContribution?.verifiedAt ?? primaryPhoto?.verifiedAt ?? null,
     allocationSummary: species,
     quantityReleased: species.reduce((sum, item) => sum + item.allocated, 0),
     quantityPlanted: species.reduce((sum, item) => sum + item.recorded, 0),

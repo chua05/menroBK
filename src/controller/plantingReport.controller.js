@@ -73,6 +73,7 @@ const submitPlantingReport = async (
       distributionId,
       inventoryId,
       siteId,
+      barangay,
 
       quantityPlanted,
       plantingDate,
@@ -127,6 +128,7 @@ const submitPlantingReport = async (
     if (
       !distributionId ||
       !siteId ||
+      !barangay ||
       !eventId ||
       quantityPlanted ===
         undefined ||
@@ -170,6 +172,7 @@ const submitPlantingReport = async (
           distributionId,
           inventoryId,
           siteId,
+          barangay,
           participantId,
 
           participantName:
@@ -270,13 +273,14 @@ const submitPlantingReport = async (
       "At least one planting evidence photo is required.",
       "A maximum of 10 planting evidence photos is allowed.",
       "The uploaded file is not a valid image.",
-      "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information.",
+      "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again.",
       "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information.",
       "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo.",
       "The selected planting site is inactive.",
       "The selected planting site has invalid coordinates.",
       "Selected event does not match the released distribution.",
       "Selected planting site does not match the released distribution.",
+      "The selected planting site does not belong to the selected barangay.",
       "A valid planting date is required.",
       "Select a released sapling tree item for this submission.",
       "Sapling tree item has not been released for this event.",
@@ -291,20 +295,14 @@ const submitPlantingReport = async (
       "The selected planting event is not available for planting reports.",
       "The selected planting event does not belong to the selected planting site.",
       "The selected planting event does not belong to the selected barangay.",
+      "Your photo is outside the Municipality of Juban coverage area. Please use a photo taken within Juban and try again.",
     ];
 
-    const statusCode =
-      error.message === "You are not registered for the selected planting event."
-        ? 403
-        : notFoundErrors.includes(
-        error.message
-      )
-        ? 404
-        : validationErrors.includes(
-            error.message
-          )
-        ? 400
-        : 500;
+    const statusCode = notFoundErrors.includes(error.message)
+      ? 404
+      : validationErrors.includes(error.message)
+      ? 400
+      : 500;
 
     return res.status(
       statusCode

@@ -6,6 +6,9 @@ async function search(req, res) {
     if (query.length < 2) {
       return res.status(400).json({ success: false, message: "Search requires at least 2 characters." });
     }
+    if (query.length > 100) {
+      return res.status(400).json({ success: false, message: "Search must be 100 characters or fewer." });
+    }
     const results = await globalSearch({
       query,
       role: req.user.role,

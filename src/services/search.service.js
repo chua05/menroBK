@@ -6,12 +6,47 @@ const searchable = (...values) => values.flat().filter(Boolean).join(" ").toLowe
 const matches = (query, ...values) => searchable(...values).includes(query);
 const docs = (snapshot) => snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
+const requestStatusLabel = (status) => status === "Reviewed" ? "Awaiting Approval" : clean(status);
+
+const reportTypeLabel = (type) => ({
+  "seedling-distribution": "Seedling Distribution Report",
+  "planting-activity": "Planting Activity Report",
+  "tree-monitoring": "Tree Monitoring Report",
+  participant: "Participant Report",
+  monthly: "Monthly Report",
+  annual: "Annual Report",
+}[type] || clean(type) || "Generated Report");
+
+function searchDate(value) {
+  if (!value) return "";
+  const seconds = value?.seconds ?? value?._seconds;
+  const date = typeof value?.toDate === "function"
+    ? value.toDate()
+    : Number.isFinite(Number(seconds))
+      ? new Date(Number(seconds) * 1000)
+      : new Date(value);
+  if (Number.isNaN(date.getTime())) return clean(value);
+  return new Intl.DateTimeFormat("en-PH", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    timeZone: "Asia/Manila",
+  }).format(date);
+}
+
 async function limitedCollection(name) {
   return docs(await db.collection(name).limit(FETCH_LIMIT).get());
 }
 
 function result(type, record, title, subtitle, path) {
   return { type, id: record.id, title, subtitle, path };
+}
+
+function monitoringResultId(record) {
+  if (record.recordType === "monitoringLifecycle" || Array.isArray(record.history)) {
+    return record.id;
+  }
+  return `legacy-${record.plantingReportId || record.id}`;
 }
 
 async function globalSearch({ query, role, userId, limit = 10 }) {
@@ -48,7 +83,8 @@ async function globalSearch({ query, role, userId, limit = 10 }) {
 
   const results = [];
   events.filter((event) => event.archived !== true && matches(normalizedQuery,
-    event.eventNumber, event.id, event.name, event.barangay, event.plantingSiteName, event.date
+    event.eventNumber, event.id, event.name, event.barangay, event.plantingSiteName,
+    event.date, searchDate(event.date)
   )).forEach((event) => results.push(result(
     "Event", event, event.name || event.eventNumber || event.id,
     [event.eventNumber, event.date, event.barangay].filter(Boolean).join(" · "),
@@ -64,30 +100,49 @@ async function globalSearch({ query, role, userId, limit = 10 }) {
   )));
 
   requests.filter((request) => matches(normalizedQuery,
-    request.requestNumber, request.id, request.participantName, request.status
+    request.requestNumber, request.id, request.participantName, request.status,
+    requestStatusLabel(request.status), request.eventProposal?.barangay,
+    request.eventProposal?.plantingSiteName, request.plantingLocation
   )).forEach((request) => results.push(result(
     "Sapling Request", request, request.requestNumber || request.id,
-    [isParticipant ? "Sapling Request" : request.participantName, request.status].filter(Boolean).join(" · "),
+    [isParticipant ? "Sapling Request" : request.participantName, requestStatusLabel(request.status)]
+      .filter(Boolean).join(" · "),
     isParticipant
       ? `/participant/my-requests?request=${encodeURIComponent(request.id)}`
       : `/${role}/requests?request=${encodeURIComponent(request.id)}`
   )));
 
   reports.filter((report) => matches(normalizedQuery,
-    report.reportNumber, report.id, report.eventName, report.siteName, report.barangay, report.verificationStatus
+    report.reportNumber, report.id, report.eventName, report.eventId, report.siteName,
+    report.siteId, report.barangay, report.verificationStatus, report.plantingDate,
+    searchDate(report.plantingDate || report.createdAt)
   )).forEach((report) => results.push(result(
     "Planting Report", report, report.reportNumber || report.id,
     [report.eventName, report.siteName, report.verificationStatus].filter(Boolean).join(" · "),
-    isParticipant ? "/participant/my-planting-reports" : `/${role}/planting-reports`
+    isParticipant
+      ? `/participant/my-planting-reports?report=${encodeURIComponent(report.id)}`
+      : `/${role}/planting-reports?report=${encodeURIComponent(report.id)}`
   )));
 
+  const includedMonitoringIds = new Set();
   monitoring.filter((record) => matches(normalizedQuery,
-    record.monitoringNumber, record.id, record.siteName, record.species, record.status
-  )).forEach((record) => results.push(result(
-    "Monitoring Record", record, record.monitoringNumber || record.id,
-    [record.siteName, record.species, record.status].filter(Boolean).join(" · "),
-    `/${role}/survival-monitoring`
-  )));
+    record.monitoringNumber, record.id, record.plantingReportNumber, record.plantingReportId,
+    record.eventName, record.eventId, record.siteName, record.siteId, record.barangay,
+    record.species, record.status, record.condition, record.monitoringDate,
+    record.authoritativePlantingDate, searchDate(record.monitoringDate || record.updatedAt || record.createdAt)
+  )).forEach((record) => {
+    const canonicalId = monitoringResultId(record);
+    if (includedMonitoringIds.has(canonicalId)) return;
+    includedMonitoringIds.add(canonicalId);
+    const normalizedRecord = { ...record, id: canonicalId };
+    results.push(result(
+    "Monitoring Record", normalizedRecord, record.monitoringNumber || canonicalId,
+    [record.plantingReportNumber, record.eventName, record.siteName,
+      searchDate(record.monitoringDate || record.updatedAt || record.createdAt), record.status]
+      .filter(Boolean).join(" · "),
+    `/${role}/survival-monitoring?monitoring=${encodeURIComponent(canonicalId)}`
+  ));
+  });
 
   if (!isParticipant) {
     const [inventory, generatedReports] = await Promise.all([
@@ -102,15 +157,30 @@ async function globalSearch({ query, role, userId, limit = 10 }) {
       `/${role}/seedlings?inventory=${encodeURIComponent(item.id)}`
     )));
     generatedReports.filter((report) => matches(normalizedQuery,
-      report.reportNumber, report.id, report.title, report.reportType, report.status
+      report.reportNumber, report.id, report.title, report.reportType, report.type,
+      reportTypeLabel(report.type || report.reportType), report.status,
+      searchDate(report.generatedAt || report.createdAt)
     )).forEach((report) => results.push(result(
-      "Generated Report", report, report.title || report.reportNumber || report.id,
-      [report.reportNumber, report.reportType, report.status].filter(Boolean).join(" · "),
-      `/${role}/reports`
+      "Generated Report", report, report.reportNumber || report.title || report.id,
+      [reportTypeLabel(report.type || report.reportType),
+        searchDate(report.generatedAt || report.createdAt), report.status].filter(Boolean).join(" · "),
+      `/${role}/reports?report=${encodeURIComponent(report.id)}`
     )));
   }
 
-  return results.slice(0, safeLimit);
+  const relevance = (item) => {
+    const title = clean(item.title).toLowerCase();
+    const subtitle = clean(item.subtitle).toLowerCase();
+    if (title === normalizedQuery) return 0;
+    if (title.startsWith(normalizedQuery)) return 1;
+    if (title.includes(normalizedQuery)) return 2;
+    if (subtitle.includes(normalizedQuery)) return 3;
+    return 4;
+  };
+
+  return results
+    .sort((left, right) => relevance(left) - relevance(right))
+    .slice(0, safeLimit);
 }
 
 module.exports = { globalSearch };

@@ -102,16 +102,13 @@ const getParticipantDistributions =
   };
 
 
-// GET CURRENT PARTICIPANT'S
-// OWN DISTRIBUTIONS
+// GET RELEASED DISTRIBUTIONS ELIGIBLE
+// FOR PLANTING-REPORT RECORDING
 const getMyDistributions =
   async (req, res) => {
     try {
-      const participantId =
-        req.user.uid;
-
       const releasedDistributions =
-        await getEligibleDistributionsForParticipant(participantId);
+        await getEligibleDistributionsForParticipant(req.user.uid);
 
       return res.status(200).json({
         success: true,
@@ -126,7 +123,7 @@ const getMyDistributions =
       return res.status(500).json({
         success: false,
         message:
-          "Failed to retrieve your distribution records.",
+          "Failed to retrieve released distribution records.",
       });
     }
   };

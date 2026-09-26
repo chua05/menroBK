@@ -221,7 +221,7 @@ test("historical Approved requests use a real completed Distribution as Released
   assert.equal(table("seedlingRequests").get("legacy-released").status, "Approved");
 });
 
-test("own released distributions expose each species and actual partial quantities", async () => {
+test("all authorized participants can use released event distributions with actual item quantities", async () => {
   seedApproved("request-multi", "EVT-2026-MULTI");
   table("seedlingRequests").get("request-multi").items.push({ inventoryId: "narra", species: "Narra", quantity: 50 });
   table("seedlingInventory").set("narra", {
@@ -233,6 +233,9 @@ test("own released distributions expose each species and actual partial quantiti
       { inventoryId: "narra", releasedQuantity: 40, shortReleaseReason: "Ten damaged" },
     ],
   });
+  Object.assign(table("events").get("EVT-2026-MULTI"), {
+    recordStatus: "scheduled", plantingSiteId: "site-multi", barangay: "Bacolod",
+  });
   const controller = require("../src/controller/distribution.controller");
   const res = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
@@ -242,7 +245,6 @@ test("own released distributions expose each species and actual partial quantiti
   assert.deepEqual(distribution.items.map((item) => [item.species, item.releasedQuantity]),
     [["Calamansi", 90], ["Narra", 40]]);
   assert.equal(distribution.totalQuantityReleased, 130);
-  assert.equal(res.result.body.data.some((item) => item.participantId !== "participant-1"), false);
 
   table("eventParticipants").set("joined-multi", {
     eventId: "EVT-2026-MULTI", userId: "participant-eligible",
@@ -255,37 +257,36 @@ test("own released distributions expose each species and actual partial quantiti
   const unrelatedRes = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
   await controller.getMyDistributions({ user: { uid: "participant-unrelated" } }, unrelatedRes);
-  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), false);
+  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), true);
 });
 
-test("an eligible non-requester can submit evidence while the original requester is preserved", async () => {
+test("a different authenticated participant can submit without owning or joining the request", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const reportId = "event_EVT-2026-001";
   const event = table("events").get("EVT-2026-001");
   Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
-  table("eventParticipants").set("joined-participant-2", {
-    eventId: "EVT-2026-001", userId: "participant-2",
-    participantType: "participant", fullName: "Participant Two",
+  table("sites").set("site-1", {
+    status: "active", siteName: "Site One", barangay: "Bacolod",
+    latitude: 12.795, longitude: 124,
   });
-  table("sites").set("site-1", { status: "active", siteName: "Site One", barangay: "Bacolod", latitude: 12, longitude: 123 });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } })
     .jpeg()
     .withExif({
       IFD0: { Make: "Test Camera", Model: "Geo Test" },
       IFD3: {
-        GPSLatitudeRef: "N", GPSLatitude: "12/1 0/1 0/1",
-        GPSLongitudeRef: "E", GPSLongitude: "123/1 0/1 0/1",
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
+        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
       },
     })
     .toBuffer();
   const payload = {
     distributionId: "request-1", inventoryId: "calamansi", siteId: "site-1",
-    participantId: "participant-2", participantName: "Participant Two",
-    participantType: "Volunteer", participantBarangay: "Bacolod",
+    participantId: "participant-unrelated", participantName: "Maria Santos",
+    participantType: "Volunteer", participantBarangay: "Bacolod", barangay: "Bacolod",
     quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
-    latitude: 12, longitude: 123, eventId: "EVT-2026-001",
+    eventId: "EVT-2026-001",
   };
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   await assert.rejects(reportService.createPlantingReport(payload, []), /photo is required/);
@@ -296,9 +297,9 @@ test("an eligible non-requester can submit evidence while the original requester
   let submitted;
   try {
     await assert.rejects(
-      reportService.createPlantingReport({ ...payload, participantId: "participant-unrelated" },
-        [{ buffer: image, mimetype: "image/jpeg", originalname: "unrelated.jpg" }]),
-      /not registered for the selected planting event/
+      reportService.createPlantingReport({ ...payload, barangay: "Calmayon" },
+        [{ buffer: image, mimetype: "image/jpeg", originalname: "wrong-barangay.jpg" }]),
+      /does not belong to the selected barangay/
     );
     submitted = await reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]);
@@ -308,28 +309,28 @@ test("an eligible non-requester can submit evidence while the original requester
     assert.equal(submitted.submissions[0].plantingDate, "2026-09-17");
     assert.equal(submitted.submissions[0].photos.length, 1);
     assert.equal(submitted.participantId, "participant-1");
-    assert.equal(submitted.submissions[0].participantId, "joined-participant-2");
-    assert.equal(submitted.submissions[0].contributorId, "participant-2");
+    assert.equal(submitted.submissions[0].participantId, "participant-unrelated");
+    assert.equal(submitted.submissions[0].contributorId, "participant-unrelated");
     assert.equal(submitted.submissions[0].participantType, "participant");
     assert.equal(submitted.participantName, "Participant One");
-    assert.equal(submitted.submittedByName, "Participant Two");
+    assert.equal(submitted.submittedByName, "Maria Santos");
     assert.equal(submitted.gpsValid, true);
     assert.equal(submitted.siteGpsValid, true);
     assert.equal(submitted.siteLocationStatus, "Within Assigned Site");
-    assert.equal(submitted.latitude, 12);
-    assert.equal(submitted.longitude, 123);
+    assert.equal(submitted.latitude, 12.795);
+    assert.equal(submitted.longitude, 124);
+    assert.equal(submitted.municipalityScope, "inside");
+    assert.equal(submitted.locationVerificationStatus, "site_match");
+    const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-unrelated");
+    assert.equal(mariaReports.some((report) => report.id === reportId), true);
     assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending Review");
-    table("eventParticipants").set("joined-participant-3", {
-      eventId: "EVT-2026-001", userId: "participant-3",
-      participantType: "participant", fullName: "Participant Three",
-    });
     const secondImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "lime" } })
       .jpeg()
       .withExif({
         IFD0: { Make: "Test Camera", Model: "Geo Test 2" },
         IFD3: {
-          GPSLatitudeRef: "N", GPSLatitude: "12/1 0/1 0/1",
-          GPSLongitudeRef: "E", GPSLongitude: "123/1 0/1 0/1",
+          GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
+          GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
         },
       })
       .toBuffer();
@@ -365,11 +366,11 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
   const file = { buffer: image, mimetype: "image/png", originalname: "camera.png" };
   const body = {
     distributionId: "request-no-gps", inventoryId: "calamansi", siteId: "site-no-gps",
-    participantType: "requester", participantBarangay: "Bacolod", quantityPlanted: 20,
+    participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod", quantityPlanted: 20,
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
     accuracy: "unavailable",
   };
-  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1" }, [file]), /does not contain GPS location metadata/);
+  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1" }, [file]), /GPS location metadata was not found/);
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
   const res = { result: {}, status(code) { this.result.code = code; return this; },
     json(value) { this.result.body = value; return this; } };
@@ -377,7 +378,7 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
   body.longitude = 123;
   await controller.submitPlantingReport({ body, user: { uid: "participant-1" }, files: { photo: [file] } }, res);
   assert.equal(res.result.code, 400);
-  assert.match(res.result.body.message, /does not contain GPS location metadata/);
+  assert.match(res.result.body.message, /GPS location metadata was not found/);
 });
 
 test("client device coordinates never substitute for missing photo EXIF GPS", async () => {
@@ -396,11 +397,11 @@ test("client device coordinates never substitute for missing photo EXIF GPS", as
   await assert.rejects(
     reportService.createPlantingReport({
       distributionId: "request-outside", inventoryId: "calamansi", siteId: "site-outside",
-      participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod",
+      participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod",
       quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site",
       latitude: 0, longitude: 0, eventId: "EVT-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]),
-    /does not contain GPS location metadata/
+    /GPS location metadata was not found/
   );
   assert.equal(table("sites").get("site-outside").latitude, 12);
 });
@@ -418,10 +419,10 @@ test("Take Photo accepts fresh device location without mislabeling it as EXIF", 
   });
   table("sites").set("site-device-photo", {
     status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.5, longitude: 123.5,
+    latitude: 12.795, longitude: 124,
     polygon: [
-      { lat: 12, lng: 123 }, { lat: 12, lng: 124 },
-      { lat: 13, lng: 124 }, { lat: 13, lng: 123 },
+      { lat: 12.794, lng: 123.999 }, { lat: 12.794, lng: 124.001 },
+      { lat: 12.796, lng: 124.001 }, { lat: 12.796, lng: 123.999 },
     ],
   });
   const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "green" } })
@@ -432,11 +433,11 @@ test("Take Photo accepts fresh device location without mislabeling it as EXIF", 
     submitted = await reportService.createPlantingReport({
       distributionId: "request-device-photo", inventoryId: "calamansi",
       siteId: "site-device-photo", participantId: "participant-1",
-      participantType: "Student / School Representative", participantBarangay: "",
+      participantType: "Student / School Representative", participantBarangay: "", barangay: "Bacolod",
       organizationAffiliation: "Sorsogon State University", participantContactNumber: "09123456789",
       quantityPlanted: 20, plantingDate: "2026-09-24",
       plantingLocation: "Assigned Site", eventId: "EVT-DEVICE-PHOTO",
-      locationSource: "Device Location at Capture", latitude: 14, longitude: 123.5,
+      locationSource: "Device Location at Capture", latitude: 12.82, longitude: 124,
       accuracy: 8, photoCapturedAt: capturedAt, locationCapturedAt: capturedAt,
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]);
 
@@ -445,8 +446,12 @@ test("Take Photo accepts fresh device location without mislabeling it as EXIF", 
     assert.equal(submitted.gpsMetadataPresent, false);
     assert.equal(submitted.gpsValid, true);
     assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
-    assert.equal(submitted.latitude, 14);
-    assert.equal(submitted.longitude, 123.5);
+    assert.equal(submitted.latitude, 12.82);
+    assert.equal(submitted.longitude, 124);
+    assert.equal(submitted.municipalityScope, "inside");
+    assert.equal(submitted.siteMatch, false);
+    assert.equal(submitted.locationVerificationStatus, "site_mismatch");
+    assert.equal(submitted.requiresStaffReview, true);
     assert.equal(submitted.photos[0].locationSource, "Device Location at Capture");
     assert.equal(submitted.photos[0].gpsMetadataPresent, false);
   } finally {
@@ -467,10 +472,10 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
   });
   table("sites").set("site-valid-outside", {
     status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.5, longitude: 123.5,
+    latitude: 12.795, longitude: 124,
     polygon: [
-      { lat: 12, lng: 123 }, { lat: 12, lng: 124 },
-      { lat: 13, lng: 124 }, { lat: 13, lng: 123 },
+      { lat: 12.794, lng: 123.999 }, { lat: 12.794, lng: 124.001 },
+      { lat: 12.796, lng: 124.001 }, { lat: 12.796, lng: 123.999 },
     ],
   });
   const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "purple" } })
@@ -478,8 +483,8 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     .withExif({
       IFD0: { Make: "Test Camera", Model: "Outside GPS Test" },
       IFD3: {
-        GPSLatitudeRef: "N", GPSLatitude: "14/1 0/1 0/1",
-        GPSLongitudeRef: "E", GPSLongitude: "123/1 30/1 0/1",
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 49/1 12/1",
+        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
       },
     })
     .toBuffer();
@@ -488,7 +493,7 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     submitted = await reportService.createPlantingReport({
       distributionId: "request-valid-outside", inventoryId: "calamansi",
       siteId: "site-valid-outside", participantId: "participant-1",
-      participantType: "requester", participantBarangay: "Bacolod",
+      participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod",
       quantityPlanted: 20, plantingDate: "2026-09-17",
       plantingLocation: "Assigned Site", eventId: "EVT-VALID-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-original.jpg" }]);
@@ -499,14 +504,54 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     assert.equal(submitted.gpsValid, true);
     assert.equal(submitted.siteGpsValid, false);
     assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
-    assert.equal(submitted.latitude, 14);
-    assert.equal(submitted.longitude, 123.5);
+    assert.equal(submitted.latitude, 12.82);
+    assert.equal(submitted.longitude, 124);
+    assert.equal(submitted.municipalityScope, "inside");
+    assert.equal(submitted.locationVerificationStatus, "site_mismatch");
+    assert.equal(submitted.requiresStaffReview, true);
     assert.ok(submitted.suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
     assert.equal(table("events").get("EVT-VALID-OUTSIDE").plantingSiteId, "site-valid-outside");
     assert.equal(submitted.photos[0].siteLocationStatus, "Outside Assigned Site");
   } finally {
     for (const photo of submitted?.photos || []) await deletePlantingPhoto(photo.photoPath);
   }
+});
+
+test("photo coordinates outside the Municipality of Juban are blocked", async () => {
+  const sharp = require("sharp");
+  const reportService = require("../src/services/plantingReport.service");
+  seedApproved("request-outside-juban", "EVT-OUTSIDE-JUBAN");
+  await requestService.releaseSeedlingRequest("request-outside-juban", "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
+  });
+  Object.assign(table("events").get("EVT-OUTSIDE-JUBAN"), {
+    recordStatus: "scheduled", plantingSiteId: "site-outside-juban", barangay: "Bacolod",
+  });
+  table("sites").set("site-outside-juban", {
+    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
+    latitude: 12.795, longitude: 124,
+  });
+  const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "orange" } })
+    .jpeg()
+    .withExif({
+      IFD0: { Make: "Test Camera", Model: "Outside Municipality Test" },
+      IFD3: {
+        GPSLatitudeRef: "N", GPSLatitude: "14/1 0/1 0/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 30/1 0/1",
+      },
+    })
+    .toBuffer();
+
+  await assert.rejects(
+    reportService.createPlantingReport({
+      distributionId: "request-outside-juban", inventoryId: "calamansi",
+      siteId: "site-outside-juban", barangay: "Bacolod", participantId: "participant-1",
+      participantType: "Volunteer", participantBarangay: "Bacolod",
+      quantityPlanted: 20, plantingDate: "2026-09-17",
+      plantingLocation: "Assigned Site", eventId: "EVT-OUTSIDE-JUBAN",
+    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-juban.jpg" }]),
+    /outside the Municipality of Juban coverage area/
+  );
 });
 
 test("participant monitoring returns only own records and accepts an empty history", async () => {
@@ -639,7 +684,7 @@ test("one parent groups multiple contributors and separate events get separate p
 test("global search returns role-safe record links without exposing another participant's request", async () => {
   table("seedlingRequests").set("search-own", {
     participantId: "participant-search", requestNumber: "REQ-2026-901",
-    participantName: "Needle Query Owner", status: "Pending",
+    participantName: "Needle Query Owner", status: "Reviewed",
   });
   table("seedlingRequests").set("search-other", {
     participantId: "another-participant", requestNumber: "REQ-2026-902",
@@ -648,6 +693,28 @@ test("global search returns role-safe record links without exposing another part
   table("seedlingInventory").set("search-inventory", {
     species: "Needle Query Narra", availableQuantity: 10,
   });
+  table("plantingReports").set("search-own-report", {
+    participantId: "participant-search", reportNumber: "RPT-2026-901",
+    eventName: "Needle Query Planting", verificationStatus: "Approved",
+  });
+  table("plantingReports").set("search-other-report", {
+    participantId: "another-participant", reportNumber: "RPT-2026-902",
+    eventName: "Needle Query Private Planting", verificationStatus: "Approved",
+  });
+  table("monitoringRecords").set("search-own-monitoring", {
+    recordType: "monitoringLifecycle",
+    participantId: "participant-search", monitoringNumber: "MON-2026-901",
+    siteName: "Needle Query Site", monitoringDate: "2026-09-26",
+  });
+  table("monitoringRecords").set("search-other-monitoring", {
+    recordType: "monitoringLifecycle",
+    participantId: "another-participant", monitoringNumber: "MON-2026-902",
+    siteName: "Needle Query Private Site", monitoringDate: "2026-09-26",
+  });
+  table("generatedReports").set("search-generated", {
+    reportNumber: "RPT-2026-903", type: "annual", status: "Generated",
+    title: "Needle Query Annual Report", generatedAt: new Date("2026-09-26T08:00:00Z"),
+  });
   const { globalSearch } = require("../src/services/search.service");
 
   const participantResults = await globalSearch({
@@ -655,12 +722,41 @@ test("global search returns role-safe record links without exposing another part
   });
   assert.equal(participantResults.some((item) => item.id === "search-own"), true);
   assert.equal(participantResults.some((item) => item.id === "search-other"), false);
+  assert.equal(participantResults.some((item) => item.id === "search-own-report"), true);
+  assert.equal(participantResults.some((item) => item.id === "search-other-report"), false);
+  assert.equal(participantResults.some((item) => item.id === "search-own-monitoring"), true);
+  assert.equal(participantResults.some((item) => item.id === "search-other-monitoring"), false);
   assert.equal(participantResults.some((item) => item.type === "Inventory Sapling"), false);
+  assert.equal(participantResults.some((item) => item.type === "Generated Report"), false);
   assert.match(participantResults.find((item) => item.id === "search-own").path, /my-requests\?request=search-own/);
+  assert.match(participantResults.find((item) => item.id === "search-own-report").path, /my-planting-reports\?report=search-own-report/);
+  assert.match(participantResults.find((item) => item.id === "search-own-monitoring").path, /survival-monitoring\?monitoring=search-own-monitoring/);
+
+  const awaitingApproval = await globalSearch({
+    query: "awaiting approval", role: "participant", userId: "participant-search", limit: 20,
+  });
+  assert.equal(awaitingApproval.some((item) => item.id === "search-own"), true);
+  assert.match(awaitingApproval.find((item) => item.id === "search-own").subtitle, /Awaiting Approval/);
 
   const staffResults = await globalSearch({
     query: "needle query", role: "staff", userId: "staff-1", limit: 20,
   });
   assert.equal(staffResults.some((item) => item.id === "search-other"), true);
   assert.equal(staffResults.some((item) => item.id === "search-inventory"), true);
+  assert.equal(staffResults.some((item) => item.id === "search-generated"), true);
+  assert.match(staffResults.find((item) => item.id === "search-generated").path, /reports\?report=search-generated/);
+
+  const searchController = require("../src/controller/search.controller");
+  const roleTamperResponse = {
+    result: {},
+    status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; },
+  };
+  await searchController.search({
+    query: { q: "needle query", limit: 20, role: "admin" },
+    user: { uid: "participant-search", role: "participant" },
+  }, roleTamperResponse);
+  assert.equal(roleTamperResponse.result.code, 200);
+  assert.equal(roleTamperResponse.result.body.data.results.some((item) => item.id === "search-other"), false);
+  assert.equal(roleTamperResponse.result.body.data.results.some((item) => item.type === "Inventory Sapling"), false);
 });

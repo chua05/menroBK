@@ -338,53 +338,36 @@ const getDistributionsByParticipantId =
     );
   };
 
-// A participant may plant against the original requester's released
-// distribution once they have joined the linked planting event.
-const getEligibleDistributionsForParticipant = async (participantId) => {
-  const eligible = new Map();
-  const ownDistributions = await getDistributionsByParticipantId(participantId);
+// Planting-report eligibility is event/distribution based, not requester based.
+// The route remains participant-only, while every released distribution tied to
+// a usable planting event is available for recording actual planting activity.
+const getEligibleDistributionsForParticipant = async () => {
+  const [distributionSnapshot, eventSnapshot] = await Promise.all([
+    distributionCollection.get(),
+    db.collection("events").get(),
+  ]);
 
-  ownDistributions
-    .filter((distribution) => distribution.status === "Released")
-    .forEach((distribution) => eligible.set(distribution.id, distribution));
-
-  const participantSnapshot = await db
-    .collection("eventParticipants")
-    .where("userId", "==", participantId)
-    .get();
-
-  const eventIds = [
-    ...new Set(
-      participantSnapshot.docs
-        .map((doc) => doc.data())
-        .filter((participant) => participant.participantType === "participant")
-        .map((participant) => participant.eventId)
-        .filter(Boolean)
-    ),
-  ];
-
-  await Promise.all(
-    eventIds.map(async (eventId) => {
-      const eventDoc = await db.collection("events").doc(eventId).get();
-      if (!eventDoc.exists) return;
-
-      const requestId = eventDoc.data().sourceRequestId;
-      if (!requestId) return;
-
-      const distributionDoc = await distributionCollection.doc(requestId).get();
-      if (!distributionDoc.exists) return;
-
-      const distribution = { id: distributionDoc.id, ...distributionDoc.data() };
-      if (
-        distribution.status === "Released" &&
-        distribution.eventId === eventId
-      ) {
-        eligible.set(distribution.id, distribution);
-      }
-    })
+  const usableEvents = new Map(
+    eventSnapshot.docs
+      .map((doc) => ({ id: doc.id, ...doc.data() }))
+      .filter((event) => {
+        const recordStatus = String(event.recordStatus || "").trim().toLowerCase();
+        const calendarStatus = String(event.status || "").trim().toLowerCase();
+        return event.archived !== true && calendarStatus !== "cancelled" &&
+          ["authorized", "scheduled", "approved", "completed"].includes(recordStatus);
+      })
+      .map((event) => [event.id, event])
   );
 
-  return [...eligible.values()];
+  return distributionSnapshot.docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }))
+    .filter((distribution) => {
+      if (distribution.status !== "Released") return false;
+      const event = usableEvents.get(String(distribution.eventId || ""));
+      if (!event || !event.allocationReleasedAt || !event.plantingSiteId) return false;
+      return !event.sourceRequestId ||
+        String(event.sourceRequestId) === String(distribution.requestId || distribution.id);
+    });
 };
 
 module.exports = {

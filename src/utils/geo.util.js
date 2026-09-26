@@ -51,7 +51,50 @@ const isPointInPolygon = (latitude, longitude, polygon) => {
   return inside;
 };
 
+const isPointInGeoJsonRing = (latitude, longitude, ring) => {
+  if (!Array.isArray(ring) || ring.length < 3) return false;
+  return isPointInPolygon(
+    latitude,
+    longitude,
+    ring.map((coordinate) => ({
+      lat: coordinate?.[1],
+      lng: coordinate?.[0],
+    }))
+  );
+};
+
+const isPointInGeoJsonPolygon = (latitude, longitude, coordinates) => {
+  if (!Array.isArray(coordinates) || coordinates.length === 0) return false;
+  if (!isPointInGeoJsonRing(latitude, longitude, coordinates[0])) return false;
+  return !coordinates.slice(1).some((hole) =>
+    isPointInGeoJsonRing(latitude, longitude, hole)
+  );
+};
+
+const isPointInGeoJsonGeometry = (latitude, longitude, geometry) => {
+  if (geometry?.type === "Polygon") {
+    return isPointInGeoJsonPolygon(latitude, longitude, geometry.coordinates);
+  }
+  if (geometry?.type === "MultiPolygon") {
+    return geometry.coordinates.some((polygon) =>
+      isPointInGeoJsonPolygon(latitude, longitude, polygon)
+    );
+  }
+  return false;
+};
+
+const isPointInGeoJsonFeatureCollection = (latitude, longitude, geoJson) => {
+  if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude)) ||
+      geoJson?.type !== "FeatureCollection" || !Array.isArray(geoJson.features)) {
+    return false;
+  }
+  return geoJson.features.some((feature) =>
+    isPointInGeoJsonGeometry(Number(latitude), Number(longitude), feature?.geometry)
+  );
+};
+
 module.exports = {
   calculateDistanceMeters,
   isPointInPolygon,
+  isPointInGeoJsonFeatureCollection,
 };

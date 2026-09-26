@@ -41,9 +41,11 @@ const {
 const {
   calculateDistanceMeters,
   isPointInPolygon,
+  isPointInGeoJsonFeatureCollection,
 } = require(
   "../utils/geo.util"
 );
+const jubanBarangayBoundaries = require("../data/juban-barangays.json");
 
 
 const REPORT_COLLECTION =
@@ -71,6 +73,13 @@ const PHOTO_EXIF_LOCATION_SOURCE =
 
 const DEVICE_CAPTURE_LOCATION_SOURCE =
   "Device Location at Capture";
+
+const normalizeBarangay = (value) => String(value || "")
+  .trim()
+  .replace(/Ã±/gi, "n")
+  .normalize("NFD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .toLowerCase();
 
 const automatedVerificationStatus = (flags) =>
   flags.length === 0 ? "Passed Automated Check" : "Flagged";
@@ -454,6 +463,13 @@ const createPlantingReport = async (
   const site =
     siteDoc.data();
 
+  if (!normalizeBarangay(data.barangay) ||
+      normalizeBarangay(site.barangay) !== normalizeBarangay(data.barangay)) {
+    throw new Error(
+      "The selected planting site does not belong to the selected barangay."
+    );
+  }
+
   if (
     site.status === "inactive"
   ) {
@@ -496,7 +512,6 @@ let linkedEvent = null;
 
 const submittedEventId = String(data.eventId || distribution.eventId || "").trim();
 const isOriginalRequester = distribution.participantId === data.participantId;
-let eventParticipationId = null;
 if (distribution.eventId && submittedEventId !== distribution.eventId) {
   throw new Error("Selected event does not match the released distribution.");
 }
@@ -591,21 +606,8 @@ if (submittedEventId) {
     );
   }
 
-  const eventBarangay =
-    String(
-      linkedEvent.barangay ||
-        ""
-    )
-      .trim()
-      .toLowerCase();
-
-  const siteBarangay =
-    String(
-      site.barangay ||
-        ""
-    )
-      .trim()
-      .toLowerCase();
+  const eventBarangay = normalizeBarangay(linkedEvent.barangay);
+  const siteBarangay = normalizeBarangay(site.barangay);
 
   if (
     eventBarangay !==
@@ -616,26 +618,6 @@ if (submittedEventId) {
     );
   }
 
-  if (!isOriginalRequester) {
-    const participationSnapshot = await db
-      .collection("eventParticipants")
-      .where("userId", "==", data.participantId)
-      .get();
-    const participationDoc = participationSnapshot.docs.find((doc) => {
-      const participant = doc.data();
-      return participant.eventId === submittedEventId &&
-        participant.participantType === "participant";
-    });
-    if (!participationDoc) {
-      throw new Error("You are not registered for the selected planting event.");
-    }
-    eventParticipationId = participationDoc.id;
-  }
-
-}
-
-if (!isOriginalRequester && !submittedEventId) {
-  throw new Error("You are not registered for the selected planting event.");
 }
 
 
@@ -675,6 +657,7 @@ if (!isOriginalRequester && !submittedEventId) {
 
   const submissionHashes =
     new Set();
+  const verificationTimestamp = Timestamp.now();
 
   for (
     const file of
@@ -753,7 +736,19 @@ if (!isOriginalRequester && !submittedEventId) {
       throw new Error(
         hasPhotoGpsValues && !usesDeviceCaptureLocation
           ? "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information."
-          : "This photo does not contain GPS location metadata. Please upload an original geotagged photo with location information."
+          : "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again."
+      );
+    }
+
+    const insideJuban = isPointInGeoJsonFeatureCollection(
+      photoLatitude,
+      photoLongitude,
+      jubanBarangayBoundaries
+    );
+
+    if (!insideJuban) {
+      throw new Error(
+        "Your photo is outside the Municipality of Juban coverage area. Please use a photo taken within Juban and try again."
       );
     }
 
@@ -873,6 +868,18 @@ if (!isOriginalRequester && !submittedEventId) {
         ? "Within Assigned Site"
         : "Outside Assigned Site",
 
+      municipalityScope: "inside",
+
+      siteMatch: photoSiteValid,
+
+      locationVerificationStatus: photoSiteValid
+        ? "site_match"
+        : "site_mismatch",
+
+      requiresStaffReview: !photoSiteValid,
+
+      verifiedAt: verificationTimestamp,
+
       timestampValid:
         photoVerification
           .timestampValid,
@@ -921,7 +928,7 @@ if (!isOriginalRequester && !submittedEventId) {
   // --------------------------------
   const uploadedPhotos = [];
   let persisted = false;
-  const now = Timestamp.now();
+  const now = verificationTimestamp;
 
   try {
     for (
@@ -1049,6 +1056,21 @@ if (!isOriginalRequester && !submittedEventId) {
         siteLocationStatus:
           preparedPhoto
             .siteLocationStatus,
+
+        municipalityScope:
+          preparedPhoto.municipalityScope,
+
+        siteMatch:
+          preparedPhoto.siteMatch,
+
+        locationVerificationStatus:
+          preparedPhoto.locationVerificationStatus,
+
+        requiresStaffReview:
+          preparedPhoto.requiresStaffReview,
+
+        verifiedAt:
+          preparedPhoto.verifiedAt,
 
         timestampValid:
           preparedPhoto
@@ -1283,6 +1305,18 @@ if (!isOriginalRequester && !submittedEventId) {
 
       siteLocationStatus,
 
+      municipalityScope: "inside",
+
+      siteMatch: siteGpsValid,
+
+      locationVerificationStatus: siteGpsValid
+        ? "site_match"
+        : "site_mismatch",
+
+      requiresStaffReview: !siteGpsValid,
+
+      verifiedAt: now,
+
       siteGpsToleranceMeters:
         SITE_GPS_TOLERANCE_METERS,
 
@@ -1405,17 +1439,6 @@ if (!isOriginalRequester && !submittedEventId) {
         const eventDoc = await transaction.get(eventRef);
         if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
         const event = eventDoc.data();
-        if (!isOriginalRequester) {
-          const participationDoc = await transaction.get(
-            db.collection("eventParticipants").doc(eventParticipationId)
-          );
-          const participation = participationDoc.exists ? participationDoc.data() : null;
-          if (!participation || participation.userId !== data.participantId ||
-              participation.eventId !== submittedEventId ||
-              participation.participantType !== "participant") {
-            throw new Error("You are not registered for the selected planting event.");
-          }
-        }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
           throw new Error("Sapling tree item has not been released for this event.");
@@ -1457,7 +1480,7 @@ if (!isOriginalRequester && !submittedEventId) {
           reportId: parentId,
           requestId: event.sourceRequestId,
           eventId: submittedEventId,
-          participantId: isOriginalRequester ? data.participantId : eventParticipationId,
+          participantId: data.participantId,
           contributorId: data.participantId,
           contributorName: data.participantName || distribution.participantName || "",
           participantType: isOriginalRequester ? "requester" : "participant",
@@ -1487,6 +1510,11 @@ if (!isOriginalRequester && !submittedEventId) {
           siteGpsDistanceMeters,
           siteGpsValid,
           siteLocationStatus,
+          municipalityScope: "inside",
+          siteMatch: siteGpsValid,
+          locationVerificationStatus: siteGpsValid ? "site_match" : "site_mismatch",
+          requiresStaffReview: !siteGpsValid,
+          verifiedAt: now,
         });
         for (const photo of uploadedPhotos) {
           transaction.create(evidenceHashCollection.doc(photo.imageHash), {

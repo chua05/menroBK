@@ -64,7 +64,8 @@ require.cache[storagePath] = {
 const { attachEvidence } = require("../src/services/plantingEvidence.service");
 const { validatePlantingReport } = require("../src/utils/plantingVerification.util");
 const { validateImageBuffer, isClearlyScreenshot } = require("../src/utils/imageVerification.util");
-const { isPointInPolygon } = require("../src/utils/geo.util");
+const { isPointInPolygon, isPointInGeoJsonFeatureCollection } = require("../src/utils/geo.util");
+const jubanBarangayBoundaries = require("../src/data/juban-barangays.json");
 
 test("GPS mismatches stay truthful findings and invalid image bytes remain rejected", async () => {
   const result = validatePlantingReport({
@@ -100,6 +101,11 @@ test("photo coordinates are checked against the registered site polygon", () => 
   ];
   assert.equal(isPointInPolygon(12.5, 123.5, polygon), true);
   assert.equal(isPointInPolygon(14, 123.5, polygon), false);
+});
+
+test("municipality scope uses the Juban barangay polygons", () => {
+  assert.equal(isPointInGeoJsonFeatureCollection(12.795, 124, jubanBarangayBoundaries), true);
+  assert.equal(isPointInGeoJsonFeatureCollection(14, 123.5, jubanBarangayBoundaries), false);
 });
 
 test("evidence stays with its contributor and records real missing-metadata findings", async () => {
