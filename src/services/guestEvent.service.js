@@ -16,6 +16,10 @@ function secret() {
   return value;
 }
 
+function isGuestInvitationConfigured() {
+  return String(process.env.GUEST_INVITATION_SECRET || "").trim().length >= 32;
+}
+
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
@@ -27,11 +31,16 @@ function invitationToken(eventId, nonce) {
 }
 
 function createInvitationInTransaction(transaction, eventId, requestId, createdAt) {
+  // Guest access is an optional extension of an approved event. A missing
+  // signing secret must not roll back the authoritative request approval.
+  if (!isGuestInvitationConfigured()) return false;
+
   const nonce = crypto.randomBytes(32).toString("hex");
   const tokenHash = digest(invitationToken(eventId, nonce));
   transaction.create(invitations.doc(eventId), {
     eventId, requestId, nonce, tokenHash, active: true, createdAt,
   });
+  return true;
 }
 
 async function getInvitationForRequester(eventId, userId) {
@@ -233,6 +242,7 @@ async function getEventParticipants(eventId) {
 }
 
 module.exports = {
+  isGuestInvitationConfigured,
   createInvitationInTransaction,
   getInvitationForRequester,
   validateInvitation,

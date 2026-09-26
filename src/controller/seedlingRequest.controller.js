@@ -880,15 +880,10 @@ const approveRequest = async (
       error
     );
 
-    const configurationError =
-      error.message === "GUEST_INVITATION_SECRET must contain at least 32 characters.";
-
-    return res.status(configurationError ? 503 : 400).json({
+    return res.status(400).json({
       success: false,
       message:
-        configurationError
-          ? "Guest invitation service is not configured. Please contact the system administrator."
-          : error.message ||
+        error.message ||
         "Failed to approve request.",
     });
   }

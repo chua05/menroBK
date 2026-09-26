@@ -109,12 +109,20 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     assert.equal(withoutGuests.inventoryDeducted, false);
     assert.equal(withoutGuests.inventoryReserved, false);
 
-    seedReviewed("approve-guests", 4);
-    await assert.rejects(requestService.approveSeedlingRequest("approve-guests", "admin-1"), /GUEST_INVITATION_SECRET/);
-    assert.equal(table("seedlingRequests").get("approve-guests").status, "Reviewed");
+    seedReviewed("approve-guests-unconfigured", 4);
+    const approvedWithoutInvitation = await requestService.approveSeedlingRequest(
+      "approve-guests-unconfigured",
+      "admin-1"
+    );
+    assert.equal(approvedWithoutInvitation.status, "Approved");
+    assert.equal(approvedWithoutInvitation.guestInvitationCreated, false);
+    assert.equal(table("eventInvitations").has(approvedWithoutInvitation.eventId), false);
+
     process.env.GUEST_INVITATION_SECRET = originalSecret;
+    seedReviewed("approve-guests", 4);
     const withGuests = await requestService.approveSeedlingRequest("approve-guests", "admin-1");
     assert.equal(withGuests.status, "Approved");
+    assert.equal(withGuests.guestInvitationCreated, true);
     assert.equal(table("eventInvitations").get(withGuests.eventId).active, true);
     assert.equal(table("eventInvitations").get(withGuests.eventId).tokenHash.length, 64);
     assert.equal(JSON.stringify(withGuests).includes(originalSecret), false);
@@ -526,21 +534,21 @@ test("participant monitoring returns only own records and accepts an empty histo
 
 test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {
   table("seedlingRequests").set("request-3", {
-    participantId: "participant-1", eventId: "EVT-2026-003", status: "Approved",
+    participantId: "participant-1", eventId: "EVT-GUEST-SCOPE", status: "Approved",
     participantName: "Requester One",
   });
-  table("events").set("EVT-2026-003", {
+  table("events").set("EVT-GUEST-SCOPE", {
     sourceRequestId: "request-3", status: "Upcoming", name: "Planting",
     allocationReleasedAt: new Date(), seedlingItems: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 90 }],
     seedlingTotalQuantity: 90,
   });
   await db.runTransaction(async (transaction) => {
-    guestService.createInvitationInTransaction(transaction, "EVT-2026-003", "request-3", new Date());
+    guestService.createInvitationInTransaction(transaction, "EVT-GUEST-SCOPE", "request-3", new Date());
   });
-  await assert.rejects(guestService.getInvitationForRequester("EVT-2026-003", "other"), /not found/);
-  const { token } = await guestService.getInvitationForRequester("EVT-2026-003", "participant-1");
+  await assert.rejects(guestService.getInvitationForRequester("EVT-GUEST-SCOPE", "other"), /not found/);
+  const { token } = await guestService.getInvitationForRequester("EVT-GUEST-SCOPE", "participant-1");
   const invitation = await guestService.validateInvitation(token);
-  assert.equal(invitation.eventId, "EVT-2026-003");
+  assert.equal(invitation.eventId, "EVT-GUEST-SCOPE");
   const publicEvent = await guestService.publicEvent(invitation.eventId, invitation.event);
   assert.deepEqual(publicEvent.allocation[0], {
     inventoryId: "calamansi", species: "Calamansi", allocated: 90, recorded: 0, remaining: 90,
@@ -549,26 +557,26 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
     fullName: "Guest One", contactNumber: "09123456789",
   });
   assert.equal(table("eventParticipants").get(joined.participantId).organizationBarangay, undefined);
-  assert.equal((await guestService.validateGuestSession(`Guest ${joined.sessionToken}`)).eventId, "EVT-2026-003");
+  assert.equal((await guestService.validateGuestSession(`Guest ${joined.sessionToken}`)).eventId, "EVT-GUEST-SCOPE");
   await assert.rejects(guestService.joinGuest(token, {
     fullName: "Another", contactNumber: "+639123456789",
   }), /already joined/);
   const first = await contributionService.recordContribution(
-    "EVT-2026-003", joined.participantId, "calamansi", 85, "submission_key_123"
+    "EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123"
   );
   assert.equal(first.quantity, 85);
   const duplicate = await contributionService.recordContribution(
-    "EVT-2026-003", joined.participantId, "calamansi", 85, "submission_key_123"
+    "EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123"
   );
   assert.equal(duplicate.id, first.id);
-  await assert.rejects(contributionService.recordContribution("EVT-2026-003", joined.participantId, "calamansi", 10), /Only 5/);
-  assert.equal(table("events").get("EVT-2026-003").recordedSeedlingQuantity, 85);
-  assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
-  assert.equal(table("plantingContributions").get(first.id).reportId, "event_EVT-2026-003");
+  await assert.rejects(contributionService.recordContribution("EVT-GUEST-SCOPE", joined.participantId, "calamansi", 10), /Only 5/);
+  assert.equal(table("events").get("EVT-GUEST-SCOPE").recordedSeedlingQuantity, 85);
+  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").verificationStatus, "Pending");
+  assert.equal(table("plantingContributions").get(first.id).reportId, "event_EVT-GUEST-SCOPE");
   table("plantingContributions").get(first.id).photos = [{ imageHash: "guest-only-photo" }];
   const parentService = require("../src/services/parentPlantingReport.service");
-  await assert.rejects(parentService.finalizeParent("event_EVT-2026-003", "participant-1"), /Planting evidence photos/);
-  assert.equal(table("plantingReports").get("event_EVT-2026-003").verificationStatus, "Pending");
+  await assert.rejects(parentService.finalizeParent("event_EVT-GUEST-SCOPE", "participant-1"), /Planting evidence photos/);
+  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").verificationStatus, "Pending");
 });
 
 test("one parent groups multiple contributors and separate events get separate parents", async () => {

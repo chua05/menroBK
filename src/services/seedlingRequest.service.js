@@ -1119,9 +1119,9 @@ const approveSeedlingRequest =
             }
           );
 
-        if (Number(proposal.expectedParticipants || 0) > 0) {
-          createInvitationInTransaction(transaction, eventId, id, now);
-        }
+        const guestInvitationCreated = Number(proposal.expectedParticipants || 0) > 0
+          ? createInvitationInTransaction(transaction, eventId, id, now)
+          : false;
 
         // ========================================
         // ========================================
@@ -1137,6 +1137,7 @@ const approveSeedlingRequest =
           decisionAt: now,
           eventId,
           eventCreated: true,
+          guestInvitationCreated,
           inventoryDeducted: false,
           inventoryReserved: false,
           approvedItems,
