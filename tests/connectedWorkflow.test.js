@@ -269,7 +269,7 @@ test("a different authenticated participant can submit without owning or joining
   Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
   table("sites").set("site-1", {
     status: "active", siteName: "Site One", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124,
+    latitude: 12.795, longitude: 124, coverageRadiusMeters: 50,
   });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } })
     .jpeg()
@@ -316,6 +316,8 @@ test("a different authenticated participant can submit without owning or joining
     assert.equal(submitted.submittedByName, "Maria Santos");
     assert.equal(submitted.gpsValid, true);
     assert.equal(submitted.siteGpsValid, true);
+    assert.equal(submitted.siteCoverageRadiusMeters, 50);
+    assert.equal(submitted.siteGpsToleranceMeters, 50);
     assert.equal(submitted.siteLocationStatus, "Within Assigned Site");
     assert.equal(submitted.latitude, 12.795);
     assert.equal(submitted.longitude, 124);
@@ -472,10 +474,10 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
   });
   table("sites").set("site-valid-outside", {
     status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124,
+    latitude: 12.795, longitude: 124, coverageRadiusMeters: 50,
     polygon: [
-      { lat: 12.794, lng: 123.999 }, { lat: 12.794, lng: 124.001 },
-      { lat: 12.796, lng: 124.001 }, { lat: 12.796, lng: 123.999 },
+      { lat: 12.78, lng: 123.99 }, { lat: 12.78, lng: 124.01 },
+      { lat: 12.83, lng: 124.01 }, { lat: 12.83, lng: 123.99 },
     ],
   });
   const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "purple" } })
@@ -503,6 +505,7 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     assert.equal(submitted.gpsMetadataPresent, true);
     assert.equal(submitted.gpsValid, true);
     assert.equal(submitted.siteGpsValid, false);
+    assert.equal(submitted.siteCoverageRadiusMeters, 50);
     assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
     assert.equal(submitted.latitude, 12.82);
     assert.equal(submitted.longitude, 124);

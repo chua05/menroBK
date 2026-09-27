@@ -505,6 +505,17 @@ const createPlantingReport = async (
     );
   }
 
+  const savedCoverageRadiusMeters = Number(
+    site.coverageRadiusMeters
+  );
+  const hasSavedCoverageRadius =
+    Number.isFinite(savedCoverageRadiusMeters) &&
+    savedCoverageRadiusMeters > 0;
+  const hasLegacySitePolygon =
+    !hasSavedCoverageRadius &&
+    Array.isArray(site.polygon) &&
+    site.polygon.length >= 3;
+
 
   
 // VALIDATE EVENT RELATIONSHIP
@@ -767,7 +778,7 @@ if (submittedEventId) {
     const photoVerification =
       validatePlantingReport({
         // The shared validator handles metadata presence and capture-time checks.
-        // Site verification is performed below against the saved polygon/center.
+        // Site verification is performed below against the saved center/radius.
         submittedLatitude: photoLatitude,
         submittedLongitude: photoLongitude,
         plantingDate:
@@ -794,10 +805,11 @@ if (submittedEventId) {
       siteLatitude,
       siteLongitude
     );
-    const hasSitePolygon = Array.isArray(site.polygon) && site.polygon.length >= 3;
-    const photoSiteValid = hasSitePolygon
-      ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon)
-      : photoSiteDistanceMeters <= SITE_GPS_TOLERANCE_METERS;
+    const photoSiteValid = hasSavedCoverageRadius
+      ? photoSiteDistanceMeters <= savedCoverageRadiusMeters
+      : hasLegacySitePolygon
+        ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon)
+        : photoSiteDistanceMeters <= SITE_GPS_TOLERANCE_METERS;
 
     // Registered site check using authoritative photo EXIF coordinates.
     if (!photoSiteValid) {
@@ -863,6 +875,10 @@ if (submittedEventId) {
       siteGpsDistanceMeters: photoSiteDistanceMeters,
 
       siteGpsValid: photoSiteValid,
+
+      siteCoverageRadiusMeters: hasSavedCoverageRadius
+        ? savedCoverageRadiusMeters
+        : null,
 
       siteLocationStatus: photoSiteValid
         ? "Within Assigned Site"
@@ -1318,7 +1334,13 @@ if (submittedEventId) {
       verifiedAt: now,
 
       siteGpsToleranceMeters:
-        SITE_GPS_TOLERANCE_METERS,
+        hasSavedCoverageRadius
+          ? savedCoverageRadiusMeters
+          : SITE_GPS_TOLERANCE_METERS,
+
+      siteCoverageRadiusMeters: hasSavedCoverageRadius
+        ? savedCoverageRadiusMeters
+        : null,
 
 
       remarks:
@@ -1508,6 +1530,12 @@ if (submittedEventId) {
           gpsMetadataPresent: allGpsMetadataPresent,
           gpsValid: allGpsValid,
           siteGpsDistanceMeters,
+          siteCoverageRadiusMeters: hasSavedCoverageRadius
+            ? savedCoverageRadiusMeters
+            : null,
+          siteGpsToleranceMeters: hasSavedCoverageRadius
+            ? savedCoverageRadiusMeters
+            : SITE_GPS_TOLERANCE_METERS,
           siteGpsValid,
           siteLocationStatus,
           municipalityScope: "inside",

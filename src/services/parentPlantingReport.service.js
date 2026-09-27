@@ -125,6 +125,10 @@ async function reportDetails(id, data) {
       (primaryPhoto ? primaryPhoto.gpsValid === true : null),
     siteGpsDistanceMeters: primaryContribution?.siteGpsDistanceMeters ??
       primaryPhoto?.siteGpsDistanceMeters ?? primaryPhoto?.gpsDistanceMeters ?? null,
+    siteCoverageRadiusMeters: primaryContribution?.siteCoverageRadiusMeters ??
+      primaryPhoto?.siteCoverageRadiusMeters ?? null,
+    siteGpsToleranceMeters: primaryContribution?.siteGpsToleranceMeters ??
+      primaryPhoto?.siteCoverageRadiusMeters ?? null,
     siteGpsValid: primaryContribution?.siteGpsValid ?? primaryPhoto?.siteGpsValid ?? null,
     siteLocationStatus: primaryContribution?.siteLocationStatus ??
       primaryPhoto?.siteLocationStatus ?? null,

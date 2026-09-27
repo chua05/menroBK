@@ -46,6 +46,219 @@ const SITES_COLLECTION =
 
 const COUNTERS_COLLECTION = "counters";
 const REQUEST_COUNTER_DOCUMENT = "seedlingRequests";
+const REVIEW_COUNTER_DOCUMENT = "seedlingRequestReviews";
+const REQUEST_NUMBER_PATTERN = /^REQ-(\d{4})-(\d{3,})$/;
+const REVIEW_ID_PATTERN = /^REV-(\d{4})-(\d{3,})$/;
+
+const getManilaYear = (value = new Date()) => {
+  const date = typeof value?.toDate === "function"
+    ? value.toDate()
+    : value instanceof Date
+      ? value
+      : new Date(value);
+
+  return Number(new Intl.DateTimeFormat("en", {
+    timeZone: "Asia/Manila",
+    year: "numeric",
+  }).format(Number.isNaN(date.getTime()) ? new Date() : date));
+};
+
+const getRecordYear = (data, fields) => {
+  const value = fields
+    .map((field) => data?.[field])
+    .find((candidate) => candidate !== null && candidate !== undefined && candidate !== "");
+
+  return getManilaYear(value || new Date());
+};
+
+const getReadableSequenceFloors = (docs) => {
+  const request = new Map();
+  const review = new Map();
+
+  for (const doc of docs) {
+    const data = doc.data();
+    const requestMatch = cleanString(data.requestNumber).match(REQUEST_NUMBER_PATTERN);
+    const reviewMatch = cleanString(data.reviewId).match(REVIEW_ID_PATTERN);
+
+    if (requestMatch) {
+      const year = Number(requestMatch[1]);
+      request.set(year, Math.max(request.get(year) || 0, Number(requestMatch[2])));
+    }
+
+    if (reviewMatch) {
+      const year = Number(reviewMatch[1]);
+      review.set(year, Math.max(review.get(year) || 0, Number(reviewMatch[2])));
+    }
+  }
+
+  return { request, review };
+};
+
+const hasSavedStaffReview = (data) => Boolean(
+  data?.reviewedAt ||
+  data?.reviewedByUid ||
+  data?.reviewedBy ||
+  data?.reviewedByName ||
+  (Array.isArray(data?.reviewHistory) &&
+    data.reviewHistory.some((entry) => entry?.action === "reviewed")) ||
+  ["Reviewed", "Approved", "Rejected", "Released"].includes(data?.status)
+);
+
+const getReadableReviewerName = async (data) => {
+  const existingName = cleanString(
+    data?.reviewedByName || data?.staffReviewerName || data?.reviewerName
+  );
+  if (existingName) return existingName;
+
+  const reviewedByUid = cleanString(data?.reviewedByUid || data?.reviewedBy);
+  if (reviewedByUid) {
+    const userDoc = await db.collection("users").doc(reviewedByUid).get();
+    if (userDoc.exists) {
+      const user = userDoc.data();
+      const resolvedName = cleanString(
+        user.fullName || user.name || user.displayName || user.username
+      );
+      if (resolvedName) return resolvedName;
+    }
+  }
+
+  return "MENRO Staff";
+};
+
+// Persist readable business IDs on legacy records without changing their
+// Firestore document IDs or any relationship keys that point to those IDs.
+const ensureReadableRequestMetadata = async (doc, floors) => {
+  const initialData = doc.data();
+  const needsRequestNumber = !REQUEST_NUMBER_PATTERN.test(
+    cleanString(initialData.requestNumber)
+  );
+  const needsReviewMetadata = hasSavedStaffReview(initialData) && (
+    !REVIEW_ID_PATTERN.test(cleanString(initialData.reviewId)) ||
+    !cleanString(initialData.reviewedByName) ||
+    !cleanString(initialData.reviewedByUid) ||
+    cleanString(initialData.reviewStatus) !== "Reviewed"
+  );
+
+  if (!needsRequestNumber && !needsReviewMetadata) return doc;
+
+  const requestRef = db.collection(COLLECTION).doc(doc.id);
+  const reviewerName = needsReviewMetadata
+    ? await getReadableReviewerName(initialData)
+    : "";
+  let migratedData = initialData;
+
+  await db.runTransaction(async (transaction) => {
+    const currentDoc = await transaction.get(requestRef);
+    if (!currentDoc.exists) throw new Error("Seedling request not found.");
+
+    const currentData = currentDoc.data();
+    const update = {};
+    const requestNeedsId = !REQUEST_NUMBER_PATTERN.test(
+      cleanString(currentData.requestNumber)
+    );
+    const reviewNeedsId = hasSavedStaffReview(currentData) &&
+      !REVIEW_ID_PATTERN.test(cleanString(currentData.reviewId));
+    const requestYear = requestNeedsId
+      ? getRecordYear(currentData, ["createdAt", "submittedAt", "requestDate"])
+      : null;
+    const reviewYear = reviewNeedsId
+      ? getRecordYear(currentData, [
+        "reviewedAt",
+        "reviewedDate",
+        "decisionAt",
+        "updatedAt",
+        "createdAt",
+      ])
+      : null;
+    const requestCounterRef = requestNeedsId
+      ? db.collection(COUNTERS_COLLECTION)
+        .doc(`${REQUEST_COUNTER_DOCUMENT}_${requestYear}`)
+      : null;
+    const reviewCounterRef = reviewNeedsId
+      ? db.collection(COUNTERS_COLLECTION)
+        .doc(`${REVIEW_COUNTER_DOCUMENT}_${reviewYear}`)
+      : null;
+    const requestCounterDoc = requestCounterRef
+      ? await transaction.get(requestCounterRef)
+      : null;
+    const reviewCounterDoc = reviewCounterRef
+      ? await transaction.get(reviewCounterRef)
+      : null;
+    const now = Timestamp.now();
+
+    if (requestNeedsId) {
+      const nextNumber = Math.max(
+        Number(requestCounterDoc?.data()?.lastNumber || 0),
+        Number(floors.request.get(requestYear) || 0)
+      ) + 1;
+      if (!Number.isSafeInteger(nextNumber) || nextNumber <= 0) {
+        throw new Error("Unable to generate the next request number.");
+      }
+
+      update.requestNumber = `REQ-${requestYear}-${String(nextNumber).padStart(3, "0")}`;
+      if (cleanString(currentData.requestNumber)) {
+        update.legacyRequestNumber = cleanString(currentData.requestNumber);
+      }
+      transaction.set(requestCounterRef, {
+        year: requestYear,
+        lastNumber: nextNumber,
+        updatedAt: now,
+      }, { merge: true });
+    }
+
+    if (hasSavedStaffReview(currentData)) {
+      const reviewedByUid = cleanString(
+        currentData.reviewedByUid || currentData.reviewedBy
+      );
+      const readableName = cleanString(currentData.reviewedByName) || reviewerName;
+
+      update.reviewedByUid = reviewedByUid;
+      update.reviewedByName = readableName || "MENRO Staff";
+      update.reviewStatus = "Reviewed";
+
+      if (reviewNeedsId) {
+        const nextNumber = Math.max(
+          Number(reviewCounterDoc?.data()?.lastNumber || 0),
+          Number(floors.review.get(reviewYear) || 0)
+        ) + 1;
+        if (!Number.isSafeInteger(nextNumber) || nextNumber <= 0) {
+          throw new Error("Unable to generate the next review ID.");
+        }
+
+        update.reviewId = `REV-${reviewYear}-${String(nextNumber).padStart(3, "0")}`;
+        if (cleanString(currentData.reviewId)) {
+          update.legacyReviewId = cleanString(currentData.reviewId);
+        }
+        transaction.set(reviewCounterRef, {
+          year: reviewYear,
+          lastNumber: nextNumber,
+          updatedAt: now,
+        }, { merge: true });
+      }
+    }
+
+    if (Object.keys(update).length > 0) {
+      transaction.update(requestRef, update);
+    }
+    migratedData = { ...currentData, ...update };
+  });
+
+  return {
+    id: doc.id,
+    data: () => migratedData,
+  };
+};
+
+const ensureReadableRequestDocuments = async (docs, allDocs = docs) => {
+  const floors = getReadableSequenceFloors(allDocs);
+  const readableDocs = [];
+
+  for (const doc of docs) {
+    readableDocs.push(await ensureReadableRequestMetadata(doc, floors));
+  }
+
+  return readableDocs;
+};
 
 const releasedDistributionMap = async () => {
   const snapshot = await db.collection("distributions").get();
@@ -377,14 +590,18 @@ const createSeedlingRequest =
       timeZone: "Asia/Manila",
       year: "numeric",
     }).format(new Date()));
+    const existingRequestSnapshot = await db.collection(COLLECTION).get();
+    const requestSequenceFloor = getReadableSequenceFloors(
+      existingRequestSnapshot.docs
+    ).request.get(requestYear) || 0;
     const counterRef = db.collection(COUNTERS_COLLECTION)
       .doc(`${REQUEST_COUNTER_DOCUMENT}_${requestYear}`);
 
     await db.runTransaction(async (transaction) => {
       const counterDoc = await transaction.get(counterRef);
-      const currentValue = counterDoc.exists
+      const currentValue = Math.max(requestSequenceFloor, counterDoc.exists
         ? Number(counterDoc.data()?.lastNumber || 0)
-        : 0;
+        : 0);
       const nextValue = currentValue + 1;
       if (!Number.isSafeInteger(nextValue) || nextValue <= 0) {
         throw new Error("Unable to generate the next request number.");
@@ -421,8 +638,9 @@ const getAllSeedlingRequests =
       db.collection(COLLECTION).get(),
       releasedDistributionMap(),
     ]);
+    const readableDocs = await ensureReadableRequestDocuments(snapshot.docs);
 
-    return snapshot.docs.map(
+    return readableDocs.map(
       (doc) => withLegacyReleaseState({
         id:
           doc.id,
@@ -438,11 +656,10 @@ const getAllSeedlingRequests =
 
 const getSeedlingRequestById =
   async (id) => {
-    const doc =
-      await db
-        .collection(COLLECTION)
-        .doc(id)
-        .get();
+    const [doc, allRequestsSnapshot] = await Promise.all([
+      db.collection(COLLECTION).doc(id).get(),
+      db.collection(COLLECTION).get(),
+    ]);
 
     if (!doc.exists) {
       throw new Error(
@@ -450,11 +667,15 @@ const getSeedlingRequestById =
       );
     }
 
+    const [readableDoc] = await ensureReadableRequestDocuments(
+      [doc],
+      allRequestsSnapshot.docs
+    );
     const request = {
       id:
-        doc.id,
+        readableDoc.id,
 
-      ...doc.data(),
+      ...readableDoc.data(),
     };
     const distribution = request.status === "Approved"
       ? await db.collection("distributions").doc(id).get()
@@ -483,12 +704,17 @@ const getSeedlingRequestsByParticipantId =
   async (
     participantId
   ) => {
-    const [snapshot, distributions] = await Promise.all([
+    const [snapshot, allRequestsSnapshot, distributions] = await Promise.all([
       db.collection(COLLECTION).where("participantId", "==", participantId).get(),
+      db.collection(COLLECTION).get(),
       releasedDistributionMap(),
     ]);
+    const readableDocs = await ensureReadableRequestDocuments(
+      snapshot.docs,
+      allRequestsSnapshot.docs
+    );
 
-    return snapshot.docs.map(
+    return readableDocs.map(
       (doc) => withLegacyReleaseState({
         id:
           doc.id,
@@ -515,6 +741,20 @@ const reviewSeedlingRequest =
       db
         .collection(COLLECTION)
         .doc(id);
+    const allRequestsSnapshot = await db.collection(COLLECTION).get();
+    const targetDoc = await docRef.get();
+
+    if (!targetDoc.exists) {
+      throw new Error("Seedling request not found.");
+    }
+
+    const floors = getReadableSequenceFloors(allRequestsSnapshot.docs);
+    await ensureReadableRequestMetadata(targetDoc, floors);
+    const now = Timestamp.now();
+    const reviewYear = getManilaYear(now);
+    const reviewCounterRef = db.collection(COUNTERS_COLLECTION)
+      .doc(`${REVIEW_COUNTER_DOCUMENT}_${reviewYear}`);
+    const reviewSequenceFloor = floors.review.get(reviewYear) || 0;
 
     const reviewItems = normalizeRequestItems({ items: reviewData.items });
 
@@ -558,11 +798,24 @@ const reviewSeedlingRequest =
         (total, item) => total + item.quantity,
         0
       );
-      const now = Timestamp.now();
       const reviewCycle = (Array.isArray(currentRequest.reviewHistory)
         ? currentRequest.reviewHistory
         : []
       ).filter((entry) => entry?.action === "reviewed").length + 1;
+      const reviewCounterDoc = await transaction.get(reviewCounterRef);
+      const reviewSequence = Math.max(
+        Number(reviewCounterDoc.exists
+          ? reviewCounterDoc.data()?.lastNumber || 0
+          : 0),
+        Number(reviewSequenceFloor)
+      ) + 1;
+
+      if (!Number.isSafeInteger(reviewSequence) || reviewSequence <= 0) {
+        throw new Error("Unable to generate the next review ID.");
+      }
+
+      const reviewId = `REV-${reviewYear}-${String(reviewSequence).padStart(3, "0")}`;
+      const reviewedByName = cleanString(reviewData.reviewedByName) || "MENRO Staff";
 
       await createRoleNotificationsInTransaction(transaction, ["admin"], {
         notificationId: `request_reviewed_${id}_${reviewCycle}`,
@@ -575,11 +828,17 @@ const reviewSeedlingRequest =
         createdAt: now,
         details: {
           requesterName: currentRequest.participantName || "",
-          reviewedByName: reviewData.reviewedByName || "",
+          reviewId,
+          reviewedByName,
           reviewedAt: now,
         },
       });
 
+      transaction.set(reviewCounterRef, {
+        year: reviewYear,
+        lastNumber: reviewSequence,
+        updatedAt: now,
+      }, { merge: true });
       transaction.update(docRef, {
         items: canonicalItems,
         totalQuantity,
@@ -587,7 +846,10 @@ const reviewSeedlingRequest =
         plantingLocation: cleanString(reviewData.plantingLocation),
         preferredReleaseDate: reviewData.preferredReleaseDate,
         reviewedBy: reviewData.reviewedBy,
-        reviewedByName: reviewData.reviewedByName || "",
+        reviewedByUid: reviewData.reviewedBy,
+        reviewedByName,
+        reviewId,
+        reviewStatus: "Reviewed",
         reviewRemarks: "",
         reviewedAt: now,
         status: "Reviewed",
@@ -598,8 +860,9 @@ const reviewSeedlingRequest =
             : []),
           {
             action: "reviewed",
+            reviewId,
             actorId: reviewData.reviewedBy,
-            actorName: reviewData.reviewedByName || "",
+            actorName: reviewedByName,
             actorRole: "staff",
             at: now,
           },
@@ -807,7 +1070,10 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
       returnedBy: "",
       returnedByName: "",
       returnedAt: null,
+      reviewId: "",
+      reviewStatus: "",
       reviewedBy: "",
+      reviewedByUid: "",
       reviewedByName: "",
       reviewedAt: null,
       reviewRemarks: "",

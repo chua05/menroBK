@@ -86,6 +86,9 @@ function validateCoordinates(latitudeValue, longitudeValue) {
   const longitude = Number(longitudeValue);
 
   if (
+    latitudeValue === null ||
+    latitudeValue === undefined ||
+    latitudeValue === "" ||
     !Number.isFinite(latitude) ||
     latitude < -90 ||
     latitude > 90
@@ -94,6 +97,9 @@ function validateCoordinates(latitudeValue, longitudeValue) {
   }
 
   if (
+    longitudeValue === null ||
+    longitudeValue === undefined ||
+    longitudeValue === "" ||
     !Number.isFinite(longitude) ||
     longitude < -180 ||
     longitude > 180
@@ -104,33 +110,22 @@ function validateCoordinates(latitudeValue, longitudeValue) {
   return { latitude, longitude };
 }
 
-function normalizePolygon(value) {
-  if (!Array.isArray(value)) {
-    return [];
-  }
+function validateCoverageRadius(value) {
+  const coverageRadiusMeters = Number(value);
 
-  const polygon = value
-    .map((point) => ({
-      lat: Number(point?.lat),
-      lng: Number(point?.lng),
-    }))
-    .filter(
-      (point) =>
-        Number.isFinite(point.lat) &&
-        Number.isFinite(point.lng) &&
-        point.lat >= -90 &&
-        point.lat <= 90 &&
-        point.lng >= -180 &&
-        point.lng <= 180
-    );
-
-  if (polygon.length < 3) {
+  if (
+    value === null ||
+    value === undefined ||
+    value === "" ||
+    !Number.isFinite(coverageRadiusMeters) ||
+    coverageRadiusMeters <= 0
+  ) {
     throw new Error(
-      "Planting site boundary must contain at least three valid points."
+      "Please enter a valid site coverage radius greater than 0 meters."
     );
   }
 
-  return polygon;
+  return coverageRadiusMeters;
 }
 
 function computeUtilizationFields(siteData) {
@@ -235,7 +230,9 @@ const createSite = async (data) => {
     data.longitude
   );
 
-  const polygon = normalizePolygon(data.polygon);
+  const coverageRadiusMeters = validateCoverageRadius(
+    data.coverageRadiusMeters
+  );
 
   // Keep the auto-generated Firestore document ID as the relationship key.
   const siteRef = db.collection(SITE_COLLECTION).doc();
@@ -264,8 +261,7 @@ const createSite = async (data) => {
 
     latitude,
     longitude,
-
-    polygon,
+    coverageRadiusMeters,
 
     locationDescription,
 
@@ -401,6 +397,8 @@ const updateSite = async (siteId, input, updatedBy) => {
   const existing = await siteRef.get();
   if (!existing.exists) throw new Error("Site not found.");
 
+  const existingData = existing.data();
+
   const changes = {};
   const requiredStrings = ["siteName", "barangay", "siteType", "locationDescription"];
   const optionalStrings = ["ownershipType", "coordinator", "coordinatorContact", "notes"];
@@ -426,24 +424,40 @@ const updateSite = async (siteId, input, updatedBy) => {
     if (!Number.isInteger(capacity) || capacity <= 0) {
       throw new Error("Maximum seedling capacity must be a whole number greater than 0.");
     }
-    if (capacity < Number(existing.data().planted || 0)) {
+    if (capacity < Number(existingData.planted || 0)) {
       throw new Error("Maximum seedling capacity cannot be below the planted count.");
     }
     changes.maximumCapacity = capacity;
     changes.targetTrees = capacity;
   }
   if (["latitude", "longitude"].some((field) => Object.prototype.hasOwnProperty.call(input || {}, field))) {
-    const latitude = Object.prototype.hasOwnProperty.call(input, "latitude") ? input.latitude : existing.data().latitude;
-    const longitude = Object.prototype.hasOwnProperty.call(input, "longitude") ? input.longitude : existing.data().longitude;
+    const latitude = Object.prototype.hasOwnProperty.call(input, "latitude") ? input.latitude : existingData.latitude;
+    const longitude = Object.prototype.hasOwnProperty.call(input, "longitude") ? input.longitude : existingData.longitude;
     if (latitude === null || latitude === "" || longitude === null || longitude === "") {
       throw new Error("Valid site coordinates are required.");
     }
     Object.assign(changes, validateCoordinates(latitude, longitude));
   }
-  if (Object.prototype.hasOwnProperty.call(input || {}, "polygon")) {
-    if (!Array.isArray(input.polygon)) throw new Error("A valid planting site boundary is required.");
-    changes.polygon = normalizePolygon(input.polygon);
+  const hasSavedCoverageRadius =
+    Number.isFinite(Number(existingData.coverageRadiusMeters)) &&
+    Number(existingData.coverageRadiusMeters) > 0;
+  const hasCoverageRadiusInput = Object.prototype.hasOwnProperty.call(
+    input || {},
+    "coverageRadiusMeters"
+  );
+
+  if (hasCoverageRadiusInput) {
+    changes.coverageRadiusMeters = validateCoverageRadius(
+      input.coverageRadiusMeters
+    );
+  } else if (!hasSavedCoverageRadius) {
+    throw new Error(
+      "Please enter a valid site coverage radius greater than 0 meters."
+    );
   }
+
+  // Historical polygon data is intentionally left untouched. New and edited
+  // sites use the saved center coordinate plus coverageRadiusMeters.
   if (!Object.keys(changes).length) throw new Error("No editable site fields provided.");
 
   await siteRef.update({ ...changes, updatedBy, updatedAt: Timestamp.now() });

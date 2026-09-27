@@ -131,8 +131,15 @@ test("Staff review advances Pending once and retains server-owned inventory deta
   const result = await service.reviewSeedlingRequest("request-1", review);
   assert.equal(result.status, "Reviewed");
   assert.equal(result.reviewedBy, "staff-1");
+  assert.equal(result.reviewedByUid, "staff-1");
+  assert.equal(result.reviewedByName, "Staff Name");
+  assert.equal(result.reviewStatus, "Reviewed");
+  assert.match(result.reviewId, /^REV-\d{4}-\d{3,}$/);
+  assert.match(result.requestNumber, /^REQ-\d{4}-\d{3,}$/);
+  assert.equal(result.reviewHistory.at(-1).reviewId, result.reviewId);
   assert.ok(result.reviewedAt?.toDate?.());
   assert.equal(result.items[0].species, "Narra");
+  assert.equal((await service.getSeedlingRequestById("request-1")).reviewId, result.reviewId);
   await assert.rejects(service.reviewSeedlingRequest("request-1", review), /Only pending requests/);
 });
 
@@ -151,6 +158,8 @@ test("Staff review confirmation requires no findings or observation", async () =
   }, res);
   assert.equal(res.result.code, 200);
   assert.equal(res.result.body.data.reviewRemarks, "");
+  assert.match(res.result.body.data.reviewId, /^REV-\d{4}-\d{3,}$/);
+  assert.equal(res.result.body.data.reviewedByName, "Staff Name");
 });
 
 test("site creation assigns unique year-scoped readable IDs while retaining internal document IDs", async () => {
@@ -163,13 +172,22 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
     maximumCapacity: 100,
     latitude: 12.82,
     longitude: 124,
-    polygon: [
-      { lat: 12.82, lng: 124 },
-      { lat: 12.83, lng: 124 },
-      { lat: 12.82, lng: 124.01 },
-    ],
+    coverageRadiusMeters: 50,
     createdBy: "staff-1",
   };
+
+  await assert.rejects(
+    siteService.createSite({ ...input, coverageRadiusMeters: 0 }),
+    /coverage radius greater than 0 meters/
+  );
+  await assert.rejects(
+    siteService.createSite({ ...input, coverageRadiusMeters: "letters" }),
+    /coverage radius greater than 0 meters/
+  );
+  await assert.rejects(
+    siteService.createSite({ ...input, latitude: "" }),
+    /Latitude must be between -90 and 90/
+  );
 
   const first = await siteService.createSite(input);
   const second = await siteService.createSite({ ...input, siteName: "Readable Site Two" });
@@ -184,6 +202,8 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
   assert.equal(second.siteId, `SITE-${year}-002`);
   assert.notEqual(first.id, first.siteId);
   assert.notEqual(first.siteId, second.siteId);
+  assert.equal(first.coverageRadiusMeters, 50);
+  assert.equal(Object.hasOwn(first, "polygon"), false);
   assert.notEqual(third.siteId, fourth.siteId);
   assert.deepEqual(
     [third.siteId, fourth.siteId].sort(),
@@ -319,14 +339,20 @@ test("site edit updates only permitted fields and keeps the same record for list
     latitude: 12, longitude: 123, polygon: [{ lat: 12, lng: 123 }, { lat: 12.1, lng: 123 }, { lat: 12, lng: 123.1 }],
     maximumCapacity: 100, targetTrees: 100, planted: 20, createdBy: "staff-0",
   });
+  await assert.rejects(
+    siteService.updateSite("site-1", { siteName: "Still Legacy" }, "staff-1"),
+    /coverage radius greater than 0 meters/
+  );
   const updated = await siteService.updateSite("site-1", {
-    siteName: "New Name", maximumCapacity: 80, createdBy: "forged", planted: 900,
+    siteName: "New Name", maximumCapacity: 80, coverageRadiusMeters: 75,
+    createdBy: "forged", planted: 900,
   }, "staff-1");
   assert.equal(updated.id, "site-1");
   assert.equal(updated.siteName, "New Name");
   assert.equal(updated.createdBy, "staff-0");
   assert.equal(updated.planted, 20);
   assert.equal(updated.targetTrees, 80);
+  assert.equal(updated.coverageRadiusMeters, 75);
   assert.equal(updated.polygon.length, 3);
   const readableLegacySite = await siteService.getSiteById("site-1");
   assert.match(readableLegacySite.siteId, /^SITE-\d{4}-\d{3,}$/);
@@ -365,6 +391,44 @@ test("request submission rejects a real site in a different barangay", async () 
   assert.notEqual(next.requestNumber, created.requestNumber);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
     .some((request) => request.id === created.id));
+});
+
+test("legacy request and review IDs are migrated once without changing document IDs", async () => {
+  records.users.set("legacy-staff", {
+    fullName: "Maria Santos",
+    role: "staff",
+  });
+  records.seedlingRequests.set("canonical-request-2024", {
+    requestNumber: "REQ-2024-125",
+    participantId: "participant-legacy",
+    createdAt: "2024-01-02T01:00:00.000Z",
+    status: "Pending",
+  });
+  records.seedlingRequests.set("firebase-document-key", {
+    requestNumber: "REQ-04D9BU2",
+    participantId: "participant-legacy",
+    createdAt: "2024-06-10T03:30:00.000Z",
+    reviewedAt: "2024-06-11T05:00:00.000Z",
+    reviewedBy: "legacy-staff",
+    status: "Reviewed",
+  });
+
+  const firstRead = (await service.getAllSeedlingRequests())
+    .find((request) => request.id === "firebase-document-key");
+
+  assert.ok(firstRead);
+  assert.match(firstRead.requestNumber, /^REQ-2024-\d{3,}$/);
+  assert.ok(Number(firstRead.requestNumber.split("-").at(-1)) > 125);
+  assert.equal(firstRead.legacyRequestNumber, "REQ-04D9BU2");
+  assert.match(firstRead.reviewId, /^REV-2024-\d{3,}$/);
+  assert.equal(firstRead.reviewedByUid, "legacy-staff");
+  assert.equal(firstRead.reviewedByName, "Maria Santos");
+  assert.equal(firstRead.reviewStatus, "Reviewed");
+  assert.ok(records.seedlingRequests.has("firebase-document-key"));
+
+  const secondRead = await service.getSeedlingRequestById("firebase-document-key");
+  assert.equal(secondRead.requestNumber, firstRead.requestNumber);
+  assert.equal(secondRead.reviewId, firstRead.reviewId);
 });
 
 test("review and decision roles remain separate", () => {
