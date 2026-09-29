@@ -7,6 +7,38 @@ const submissions = db.collection("plantingContributions");
 const events = db.collection("events");
 const requests = db.collection("seedlingRequests");
 
+function normalizeSubmission(entry = {}) {
+  const verificationStatus = entry.verificationStatus ||
+    (entry.automatedVerificationStatus === "Flagged" ? "Needs Review" : "Verified");
+  const staffReviewStatus = entry.staffReviewStatus ||
+    (verificationStatus === "Verified" ? "Not Required" : "Pending Review");
+  return { ...entry, verificationStatus, staffReviewStatus };
+}
+
+function summarizeSubmissions(entries, releasedQuantity) {
+  const submissions = entries.map(normalizeSubmission);
+  const quantity = (items) => items.reduce((total, entry) => total + Number(entry.quantity || 0), 0);
+  const active = submissions.filter((entry) => entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid");
+  const pending = active.filter((entry) => entry.verificationStatus === "Needs Review" && entry.staffReviewStatus === "Pending Review");
+  const accepted = active.filter((entry) => entry.verificationStatus === "Verified" || entry.staffReviewStatus === "Accepted");
+  const rejected = submissions.filter((entry) => entry.staffReviewStatus === "Rejected");
+  const activeSubmittedQuantity = quantity(active);
+  const acceptedQuantity = quantity(accepted);
+  const pendingReviewQuantity = quantity(pending);
+  const rejectedQuantity = quantity(rejected);
+  const remainingAvailableQuantity = Math.max(0, Number(releasedQuantity || 0) - activeSubmittedQuantity);
+  let reportingProgress = "Awaiting Submission";
+  if (Number(releasedQuantity || 0) > 0 && acceptedQuantity >= Number(releasedQuantity) && pendingReviewQuantity === 0) {
+    reportingProgress = "Completed";
+  } else if (Number(releasedQuantity || 0) > 0 && activeSubmittedQuantity >= Number(releasedQuantity) && pendingReviewQuantity > 0) {
+    reportingProgress = "Fully Reported — Awaiting Review";
+  } else if (activeSubmittedQuantity > 0 || acceptedQuantity > 0) {
+    reportingProgress = "Partial";
+  }
+  return { submissions, activeSubmittedQuantity, acceptedQuantity, pendingReviewQuantity,
+    rejectedQuantity, remainingAvailableQuantity, reportingProgress };
+}
+
 function parentRef(eventId) {
   if (typeof eventId !== "string" || !eventId || eventId.includes("/")) {
     throw new Error("Invalid planting event ID.");
@@ -14,7 +46,8 @@ function parentRef(eventId) {
   return reports.doc(`event_${eventId}`);
 }
 
-async function parentForEventInTransaction(transaction, eventId, event, now, initialQuantity = 0, initialStatus = "Pending") {
+async function parentForEventInTransaction(transaction, eventId, event, now, initialQuantity = 0,
+  initialStatus = "Pending", initialWorkflow = {}) {
   const requestId = event.sourceRequestId;
   if (!requestId) throw new Error("Event has no linked seedling request.");
   const ref = parentRef(eventId);
@@ -64,6 +97,12 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     quantityReleased: Number(event.seedlingTotalQuantity || 0),
     quantityPlanted: initialQuantity,
     verificationStatus: initialStatus,
+    activeSubmittedQuantity: Number(initialWorkflow.activeSubmittedQuantity ?? initialQuantity),
+    acceptedQuantity: Number(initialWorkflow.acceptedQuantity || 0),
+    pendingReviewQuantity: Number(initialWorkflow.pendingReviewQuantity || 0),
+    rejectedQuantity: 0,
+    remainingAvailableQuantity: Math.max(0, Number(event.seedlingTotalQuantity || 0) - Number(initialQuantity || 0)),
+    reportingProgress: initialWorkflow.reportingProgress || (initialQuantity > 0 ? "Partial" : "Awaiting Submission"),
     ...(initialStatus === "Pending Review" ? { submittedAt: now } : {}),
     createdAt: now,
     updatedAt: now,
@@ -82,8 +121,11 @@ async function reportDetails(id, data) {
   const event = eventDoc.exists ? eventDoc.data() : {};
   const contributions = submissionSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
   const participantById = new Map(participantSnapshot.docs.map((doc) => [doc.id, doc.data()]));
+  const quantityReleased = (event.seedlingItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+  const summary = summarizeSubmissions(contributions, quantityReleased || data.quantityReleased);
   const species = (event.seedlingItems || []).map((item) => {
-    const recorded = contributions.filter((entry) => entry.inventoryId === item.inventoryId)
+    const recorded = summary.submissions.filter((entry) => entry.inventoryId === item.inventoryId &&
+      entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid")
       .reduce((sum, entry) => sum + Number(entry.quantity || 0), 0);
     return {
       inventoryId: item.inventoryId,
@@ -142,7 +184,8 @@ async function reportDetails(id, data) {
     verifiedAt: primaryContribution?.verifiedAt ?? primaryPhoto?.verifiedAt ?? null,
     allocationSummary: species,
     quantityReleased: species.reduce((sum, item) => sum + item.allocated, 0),
-    quantityPlanted: species.reduce((sum, item) => sum + item.recorded, 0),
+    quantityPlanted: summary.activeSubmittedQuantity,
+    ...summary,
     contributorCount: new Set(contributions.map((entry) => entry.contributorId || entry.participantId)).size,
     evidenceCount: evidence.length,
     automatedVerificationStatus: evidence.length === 0 ? null
@@ -152,7 +195,7 @@ async function reportDetails(id, data) {
         : evidence.every((photo) => photo.automatedStatus === "Passed Automated Check")
           ? "Passed Automated Check" : null,
     suspiciousFlags,
-    submissions: contributions.map((entry) => ({
+    submissions: summary.submissions.map((entry) => ({
       ...entry,
       contributorName: participantById.get(entry.participantId)?.fullName || entry.contributorName || "",
       organizationBarangay: participantById.get(entry.participantId)?.organizationBarangay || "",
@@ -197,4 +240,5 @@ async function finalizeParent(id, requesterId) {
   return reportDetails(doc.id, doc.data());
 }
 
-module.exports = { parentRef, parentForEventInTransaction, reportDetails, finalizeParent };
+module.exports = { parentRef, parentForEventInTransaction, reportDetails, finalizeParent,
+  normalizeSubmission, summarizeSubmissions };

@@ -30,6 +30,16 @@ function dateOnly(value) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+function dateValue(value) {
+  if (!value) return null;
+  const date = typeof value?.toDate === "function"
+    ? value.toDate()
+    : Number.isFinite(value?._seconds ?? value?.seconds)
+      ? new Date(Number(value._seconds ?? value.seconds) * 1000)
+      : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 function todayInManila() {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
@@ -141,13 +151,16 @@ async function getDashboard(rawFilters = {}) {
         reportId: report.id, quantity: number(contribution.quantity),
         date: contribution.recordedAt || contribution.plantingDate || report.plantingDate || report.eventDate,
         ...context, species: contribution.species || context.species,
+        verificationStatus: report.verificationStatus,
       });
     } else if (report.reportType !== "parent") {
       plantingActivities.push({ reportId: report.id, quantity: number(report.quantityPlanted),
-        date: report.plantingDate || report.eventDate || report.submittedAt || report.createdAt, ...context });
+        date: report.plantingDate || report.eventDate || report.submittedAt || report.createdAt,
+        ...context, verificationStatus: report.verificationStatus });
     }
   }
-  const filteredPlanting = plantingActivities.filter((item) => matches(item, filters));
+  const filteredRecordedPlanting = plantingActivities.filter((item) => matches(item, filters));
+  const filteredPlanting = filteredRecordedPlanting.filter((item) => item.verificationStatus === "Approved");
 
   const distributionActivities = [];
   for (const distribution of records.distributions.filter((item) => item.archived !== true && key(item.status || "Released") === "released")) {
@@ -207,19 +220,19 @@ async function getDashboard(rawFilters = {}) {
     matches({ barangay: site.barangay, siteId: site.id, siteName: site.siteName || site.name }, filters, { useDate: false }) &&
     (!activityScopeRequired || activityScopedSiteIds.has(site.id)));
 
-  const buckets = monthBuckets(filters);
-  const plantingByMonth = new Map(buckets.map((bucket) => [bucket.key, 0]));
+  const plantingByMonth = new Map();
   for (const item of filteredPlanting) {
     const period = monthKey(item.date);
-    if (plantingByMonth.has(period)) plantingByMonth.set(period, plantingByMonth.get(period) + item.quantity);
+    if (period) plantingByMonth.set(period, (plantingByMonth.get(period) || 0) + item.quantity);
   }
-  const survivalByMonth = new Map(buckets.map((bucket) => [bucket.key, { surviving: 0, total: 0 }]));
+  const survivalByMonth = new Map();
   for (const entry of filteredMonitoringEntries) {
     const period = monthKey(entry.date);
-    if (!survivalByMonth.has(period)) continue;
-    const bucket = survivalByMonth.get(period);
+    if (!period) continue;
+    const bucket = survivalByMonth.get(period) || { surviving: 0, total: 0 };
     bucket.surviving += entry.healthy + entry.damaged;
     bucket.total += entry.total;
+    survivalByMonth.set(period, bucket);
   }
   const conditions = {
     Healthy: sum(latestMonitoring, (entry) => entry.healthy),
@@ -227,12 +240,29 @@ async function getDashboard(rawFilters = {}) {
     Dead: sum(latestMonitoring, (entry) => entry.dead),
   };
   const species = new Map();
-  for (const item of filteredPlanting) if (text(item.species)) species.set(item.species, (species.get(item.species) || 0) + item.quantity);
+  for (const item of filteredPlanting) if (text(item.species)) {
+    const row = species.get(item.species) || { planted: 0, monitored: 0, survived: 0 };
+    row.planted += item.quantity;
+    species.set(item.species, row);
+  }
+  for (const entry of latestMonitoring) if (text(entry.species)) {
+    const row = species.get(entry.species) || { planted: 0, monitored: 0, survived: 0 };
+    row.monitored += entry.total;
+    row.survived += entry.healthy + entry.damaged;
+    species.set(entry.species, row);
+  }
   const barangayRows = new Map();
-  for (const barangay of new Set(filteredPlanting.map((item) => text(item.barangay)).filter(Boolean))) barangayRows.set(barangay, { surviving: 0, total: 0 });
+  for (const item of filteredPlanting) if (text(item.barangay)) {
+    const row = barangayRows.get(item.barangay) || { planted: 0, healthy: 0, damaged: 0, dead: 0, surviving: 0, total: 0 };
+    row.planted += item.quantity;
+    barangayRows.set(item.barangay, row);
+  }
   for (const entry of latestMonitoring) {
     if (!text(entry.barangay)) continue;
-    const row = barangayRows.get(entry.barangay) || { surviving: 0, total: 0 };
+    const row = barangayRows.get(entry.barangay) || { planted: 0, healthy: 0, damaged: 0, dead: 0, surviving: 0, total: 0 };
+    row.healthy += entry.healthy;
+    row.damaged += entry.damaged;
+    row.dead += entry.dead;
     row.surviving += entry.healthy + entry.damaged;
     row.total += entry.total;
     barangayRows.set(entry.barangay, row);
@@ -254,6 +284,32 @@ async function getDashboard(rawFilters = {}) {
     matches({ ...reportContext(report), date: report.submittedAt || report.updatedAt || report.createdAt }, filters)).length;
   const totalReleased = sum(filteredDistributions, (item) => item.quantity);
   const totalPlanted = sum(filteredPlanting, (item) => item.quantity);
+  const totalRecordedPlanted = sum(filteredRecordedPlanting, (item) => item.quantity);
+  const rejectedReports = records.plantingReports.filter((report) => report.archived !== true &&
+    report.verificationStatus === "Rejected" &&
+    matches({ ...reportContext(report), date: report.rejectedAt || report.reviewedAt || report.updatedAt }, filters)).length;
+  const approvalDurations = approvedReports.map((report) => {
+    const started = dateValue(report.submittedAt || report.createdAt);
+    const ended = dateValue(report.approvedAt || report.reviewedAt);
+    return !started || !ended || ended < started
+      ? null : (ended - started) / 3_600_000;
+  }).filter((value) => value !== null);
+
+  const siteMap = activeSites.map((site) => ({
+    id: site.id,
+    siteId: site.siteId || site.id,
+    siteName: site.siteName || site.name || site.id,
+    barangay: site.barangay || "",
+    latitude: site.latitude,
+    longitude: site.longitude,
+    polygon: Array.isArray(site.polygon) ? site.polygon : [],
+    coverageRadiusMeters: number(site.coverageRadiusMeters),
+    maximumCapacity: number(site.maximumCapacity),
+    planted: number(site.planted),
+    treeCondition: site.treeCondition || "Not Yet Monitored",
+    survivalRate: site.survivalRate ?? null,
+    status: site.status || "active",
+  }));
   const barangayOptions = new Set();
   const speciesOptions = new Set();
   for (const site of records.sites) if (text(site.barangay)) barangayOptions.add(site.barangay);
@@ -265,27 +321,49 @@ async function getDashboard(rawFilters = {}) {
   return {
     summary: {
       totalSaplingsDistributed: totalReleased, totalTreesPlanted: totalPlanted,
-      overallSurvivalRate: monitoredTotal > 0 ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2)) : 0,
+      overallSurvivalRate: monitoredTotal > 0 ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2)) : null,
       verifiedPlantingReports: approvedReports.length,
       barangaysCovered: new Set(approvedReports.map((report) => text(reportContext(report).barangay)).filter(Boolean)).size,
       activePlantingSites: activeSites.length,
     },
-    plantingTrend: buckets.map((bucket) => ({ period: bucket.period, count: plantingByMonth.get(bucket.key) || 0 })),
-    survivalTrend: buckets.map((bucket) => {
-      const row = survivalByMonth.get(bucket.key);
-      return { period: bucket.period, rate: row.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : 0 };
-    }),
+    plantingTrend: [...plantingByMonth.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .map(([period, count]) => ({ period: monthLabel(period), count })),
+    survivalTrend: [...survivalByMonth.entries()].sort(([a], [b]) => a.localeCompare(b))
+      .filter(([, row]) => row.total > 0)
+      .map(([period, row]) => ({ period: monthLabel(period), rate: Number(((row.surviving / row.total) * 100).toFixed(2)) })),
     monitoringConditions: CONDITION_NAMES.map((condition) => ({ condition, count: conditions[condition] || 0 })),
-    speciesDistribution: [...species.entries()].map(([name, count]) => ({ species: name, count })).sort((a, b) => b.count - a.count),
+    speciesDistribution: [...species.entries()].map(([name, row]) => ({
+      species: name, planted: row.planted, monitored: row.monitored, survived: row.survived,
+      survivalRate: row.monitored > 0 ? Number(((row.survived / row.monitored) * 100).toFixed(2)) : null,
+    })).sort((a, b) => b.planted - a.planted),
     barangaySurvival: [...barangayRows.entries()].map(([barangay, row]) => ({
-      barangay, rate: row.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : 0,
-    })).sort((a, b) => b.rate - a.rate),
+      barangay, planted: row.planted, monitored: row.total,
+      rate: row.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : null,
+      status: row.total <= 0 ? null
+        : row.dead === row.total ? "Critical"
+          : row.damaged > 0 || row.dead > 0 ? "Needs Attention" : "Healthy",
+    })).sort((a, b) => (b.rate ?? -1) - (a.rate ?? -1)),
+    siteMap,
+    verificationAnalytics: {
+      approved: approvedReports.length,
+      pending: pendingPlantingReports,
+      rejected: rejectedReports,
+      averageApprovalHours: approvalDurations.length
+        ? Number((approvalDurations.reduce((total, value) => total + value, 0) / approvalDurations.length).toFixed(1))
+        : null,
+    },
+    accountability: {
+      released: totalReleased,
+      verifiedPlanted: totalPlanted,
+      difference: Math.max(0, totalReleased - totalPlanted),
+    },
     decisionSupport: {
       pendingPlantingReports, ...lifecycleCounts,
       eligibleWithoutSubmission: filteredLifecycles.filter((lifecycle) => lifecycleStatus(lifecycle, today) === "Available for Monitoring" && lifecycle.history.length === 0).length,
       damagedTrees: conditions.Damaged || 0, deadTrees: conditions.Dead || 0,
-      releasedQuantity: totalReleased, recordedPlantedQuantity: totalPlanted,
-      distributionPlantingDifference: totalReleased - totalPlanted,
+      releasedQuantity: totalReleased, recordedPlantedQuantity: totalRecordedPlanted,
+      verifiedPlantedQuantity: totalPlanted,
+      distributionPlantingDifference: Math.max(0, totalReleased - totalPlanted),
     },
     options: {
       barangays: [...barangayOptions].sort((a, b) => a.localeCompare(b)),
@@ -297,6 +375,7 @@ async function getDashboard(rawFilters = {}) {
       generatedAt: new Date().toISOString(), filters,
       plantingActivityCount: filteredPlanting.length,
       monitoringEntryCount: filteredMonitoringEntries.length,
+      latestMonitoringCount: latestMonitoring.length,
       monitoringDenominator: "Latest actual monitoring entry per lifecycle",
     },
   };

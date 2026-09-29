@@ -130,7 +130,7 @@ const extractImageMetadata =
 
     }
 
-    catch {
+    catch (error) {
 
       return {
 
@@ -138,7 +138,11 @@ const extractImageMetadata =
 
         longitude: null,
 
-        gpsStatus: "missing",
+        gpsStatus: "unparseable",
+
+        metadataReadError: true,
+
+        metadataErrorName: String(error?.name || "MetadataParseError"),
 
         capturedAt: null,
 

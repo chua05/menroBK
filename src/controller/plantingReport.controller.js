@@ -4,6 +4,7 @@ const {
   getPlantingReportById,
   getPlantingReportsByParticipantId,
   participantSafeReport,
+  participantCanAccessReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,
@@ -274,6 +275,7 @@ const submitPlantingReport = async (
       "A maximum of 10 planting evidence photos is allowed.",
       "The uploaded file is not a valid image.",
       "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again.",
+      "GPS metadata was found but could not be read from this photo. Please upload the original geotagged photo.",
       "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information.",
       "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo.",
       "The selected planting site is inactive.",
@@ -369,12 +371,8 @@ const getPlantingReport = async (
         id
       );
 
-    const isParticipantContributor = report.submissions?.some(
-      (submission) => submission.contributorId === req.user.uid
-    );
     if (req.user.role === "participant" &&
-        report.participantId !== req.user.uid &&
-        !isParticipantContributor) {
+        !(await participantCanAccessReport(report, req.user.uid))) {
       return res.status(404).json({ success: false, message: "Planting report not found." });
     }
 
@@ -479,7 +477,8 @@ const approveReport = async (
       ? 404
       : error.message === "Invalid planting report ID."
         ? 400
-        : error.message === "Only pending review planting reports can be approved."
+        : ["Only pending review planting reports can be approved.",
+            "Only submissions pending Staff review can be accepted."].includes(error.message)
           ? 409
           : 500;
     if (statusCode === 500) console.error(error);
@@ -536,7 +535,8 @@ const rejectReport = async (
       ? 404
       : error.message === "Invalid planting report ID."
         ? 400
-        : error.message === "Only pending review planting reports can be rejected."
+        : ["Only pending review planting reports can be rejected.",
+            "Only submissions pending Staff review can be rejected."].includes(error.message)
           ? 409
           : error.message === "Rejection reason is required."
             ? 400

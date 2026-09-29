@@ -46,12 +46,13 @@ test("analytics uses actual releases, contribution rows, final approvals, and la
   assert.equal(result.decisionSupport.distributionPlantingDifference, 0);
 });
 
-test("analytics filters remain synchronized and valid empty periods retain zero buckets", async () => {
+test("analytics filters remain synchronized and empty periods do not invent chart points", async () => {
   const narra = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31", species: "Narra" });
   assert.equal(narra.summary.totalSaplingsDistributed, 50);
   assert.equal(narra.summary.totalTreesPlanted, 50);
   const empty = await getDashboard({ dateFrom: "2025-01-01", dateTo: "2025-03-31" });
   assert.equal(empty.summary.totalTreesPlanted, 0);
-  assert.deepEqual(empty.plantingTrend.map((row) => row.count), [0, 0, 0]);
-  assert.deepEqual(empty.survivalTrend.map((row) => row.rate), [0, 0, 0]);
+  assert.deepEqual(empty.plantingTrend, []);
+  assert.deepEqual(empty.survivalTrend, []);
+  assert.equal(empty.summary.overallSurvivalRate, null);
 });

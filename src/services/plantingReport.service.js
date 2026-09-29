@@ -71,9 +71,6 @@ const MAX_EVIDENCE_PHOTOS =
 const PHOTO_EXIF_LOCATION_SOURCE =
   "Photo Metadata (EXIF)";
 
-const DEVICE_CAPTURE_LOCATION_SOURCE =
-  "Device Location at Capture";
-
 const normalizeBarangay = (value) => String(value || "")
   .trim()
   .replace(/Ã±/gi, "n")
@@ -133,7 +130,7 @@ const participantSafeReport = (report, participantId) => {
   const ownLatest = ownSubmissions[ownSubmissions.length - 1] || null;
   return {
     ...report,
-    submissions: ownSubmissions.map((submission) => ({
+    submissions: (report.submissions || []).map((submission) => ({
       ...submission,
       participantContactNumber: submission.contributorId === participantId
         ? submission.participantContactNumber || ""
@@ -147,6 +144,18 @@ const participantSafeReport = (report, participantId) => {
     organizationAffiliation: ownLatest?.organizationAffiliation || "",
     participantBarangay: ownLatest?.participantBarangay || "",
   };
+};
+
+const participantCanAccessReport = async (report, participantId) => {
+  if (report.participantId === participantId || (report.submissions || []).some(
+    (submission) => submission.contributorId === participantId || submission.participantId === participantId
+  )) return true;
+  if (!report.eventId) return false;
+  const snapshot = await db.collection("eventParticipants").where("eventId", "==", report.eventId).get();
+  return snapshot.docs.some((doc) => {
+    const participant = doc.data();
+    return participant.userId === participantId || participant.participantId === participantId || doc.id === participantId;
+  });
 };
 
 
@@ -638,33 +647,8 @@ if (submittedEventId) {
   // --------------------------------
   const preparedPhotos = [];
 
-  const locationSource = data.locationSource === DEVICE_CAPTURE_LOCATION_SOURCE
-    ? DEVICE_CAPTURE_LOCATION_SOURCE
-    : PHOTO_EXIF_LOCATION_SOURCE;
-  const usesDeviceCaptureLocation = locationSource === DEVICE_CAPTURE_LOCATION_SOURCE;
-  const submittedLatitude = Number(data.latitude);
-  const submittedLongitude = Number(data.longitude);
-  const submittedAccuracy = data.accuracy === "" || data.accuracy === undefined
-    ? null
-    : Number(data.accuracy);
-  const submittedLocationCapturedAt = toTimestampOrNull(data.locationCapturedAt);
-  const submittedPhotoCapturedAt = toTimestampOrNull(data.photoCapturedAt);
-
-  if (usesDeviceCaptureLocation && (
-    !Number.isFinite(submittedLatitude) || submittedLatitude < -90 || submittedLatitude > 90
-  )) {
-    throw new Error("Latitude must be between -90 and 90.");
-  }
-
-  if (usesDeviceCaptureLocation && (
-    !Number.isFinite(submittedLongitude) || submittedLongitude < -180 || submittedLongitude > 180
-  )) {
-    throw new Error("Longitude must be between -180 and 180.");
-  }
-
-  if (usesDeviceCaptureLocation && (!submittedLocationCapturedAt || !submittedPhotoCapturedAt)) {
-    throw new Error("A valid device location and capture timestamp are required for a photo taken within the system.");
-  }
+  // Never trust client/device coordinates as planting-photo evidence.
+  const locationSource = PHOTO_EXIF_LOCATION_SOURCE;
 
   const submissionHashes =
     new Set();
@@ -733,21 +717,19 @@ if (submittedEventId) {
 
     const hasPhotoGpsValues = metadata.latitude !== null && metadata.latitude !== undefined &&
       metadata.longitude !== null && metadata.longitude !== undefined;
-    const photoLatitude = usesDeviceCaptureLocation
-      ? submittedLatitude
-      : hasPhotoGpsValues ? Number(metadata.latitude) : NaN;
-    const photoLongitude = usesDeviceCaptureLocation
-      ? submittedLongitude
-      : hasPhotoGpsValues ? Number(metadata.longitude) : NaN;
+    const photoLatitude = hasPhotoGpsValues ? Number(metadata.latitude) : NaN;
+    const photoLongitude = hasPhotoGpsValues ? Number(metadata.longitude) : NaN;
     const hasValidPhotoGps =
       Number.isFinite(photoLatitude) && photoLatitude >= -90 && photoLatitude <= 90 &&
       Number.isFinite(photoLongitude) && photoLongitude >= -180 && photoLongitude <= 180;
 
     if (!hasValidPhotoGps) {
       throw new Error(
-        hasPhotoGpsValues && !usesDeviceCaptureLocation
-          ? "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information."
-          : "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again."
+        metadata.gpsStatus === "unparseable"
+          ? "GPS metadata was found but could not be read from this photo. Please upload the original geotagged photo."
+          : hasPhotoGpsValues || metadata.gpsStatus === "invalid"
+            ? "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information."
+            : "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again."
       );
     }
 
@@ -766,14 +748,7 @@ if (submittedEventId) {
 
     // Existing automated
     // photo verification
-    const verificationMetadata = usesDeviceCaptureLocation
-      ? {
-          ...metadata,
-          latitude: photoLatitude,
-          longitude: photoLongitude,
-          capturedAt: data.photoCapturedAt,
-        }
-      : metadata;
+    const verificationMetadata = metadata;
 
     const photoVerification =
       validatePlantingReport({
@@ -843,27 +818,15 @@ if (submittedEventId) {
 
       locationSource,
 
-      locationAccuracyMeters: usesDeviceCaptureLocation && Number.isFinite(submittedAccuracy)
-        ? submittedAccuracy
-        : null,
+      locationAccuracyMeters: null,
 
-      locationCapturedAt: usesDeviceCaptureLocation
-        ? submittedLocationCapturedAt
-        : toTimestampOrNull(metadata.capturedAt),
+      locationCapturedAt: toTimestampOrNull(metadata.capturedAt),
 
-      photoCapturedAt: usesDeviceCaptureLocation
-        ? submittedPhotoCapturedAt
-        : toTimestampOrNull(metadata.capturedAt),
+      photoCapturedAt: toTimestampOrNull(metadata.capturedAt),
 
-      gpsMetadataPresent:
-        usesDeviceCaptureLocation
-          ? false
-          : photoVerification.gpsMetadataPresent,
+      gpsMetadataPresent: photoVerification.gpsMetadataPresent,
 
-      timestampMetadataPresent:
-        usesDeviceCaptureLocation
-          ? false
-          : photoVerification.timestampMetadataPresent,
+      timestampMetadataPresent: photoVerification.timestampMetadataPresent,
 
       // GPS validity and assigned-site matching are separate results.
       // Reaching this point means the original photo has valid EXIF GPS.
@@ -937,6 +900,10 @@ if (submittedEventId) {
     );
 
   const automatedStatus = automatedVerificationStatus(suspiciousFlags);
+  const submissionVerificationStatus = automatedStatus === "Passed Automated Check"
+    ? "Verified" : "Needs Review";
+  const submissionStaffReviewStatus = submissionVerificationStatus === "Verified"
+    ? "Not Required" : "Pending Review";
 
 
   // --------------------------------
@@ -1476,7 +1443,16 @@ if (submittedEventId) {
           throw new Error("Duplicate planting image detected.");
         }
         const parent = await parentForEventInTransaction(
-          transaction, submittedEventId, event, now, quantityPlanted, "Pending Review"
+          transaction, submittedEventId, event, now, quantityPlanted, "Pending Review", {
+            activeSubmittedQuantity: quantityPlanted,
+            acceptedQuantity: submissionVerificationStatus === "Verified" ? quantityPlanted : 0,
+            pendingReviewQuantity: submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0,
+            reportingProgress: quantityPlanted >= Number(event.seedlingTotalQuantity || 0) &&
+              submissionStaffReviewStatus === "Pending Review"
+              ? "Fully Reported — Awaiting Review"
+              : quantityPlanted >= Number(event.seedlingTotalQuantity || 0)
+                ? "Completed" : "Partial",
+          }
         );
         if (!parent.created && !["Draft", "Pending", "Pending Review"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
@@ -1491,8 +1467,21 @@ if (submittedEventId) {
           updatedAt: now,
         });
         if (!parent.created) {
+          const nextActive = Number(parent.data.activeSubmittedQuantity ?? parent.data.quantityPlanted ?? 0) + quantityPlanted;
+          const nextAccepted = Number(parent.data.acceptedQuantity || 0) +
+            (submissionVerificationStatus === "Verified" ? quantityPlanted : 0);
+          const nextPending = Number(parent.data.pendingReviewQuantity || 0) +
+            (submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0);
+          const totalReleased = Number(event.seedlingTotalQuantity || parent.data.quantityReleased || 0);
           transaction.update(parent.ref, {
             quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
+            activeSubmittedQuantity: nextActive,
+            acceptedQuantity: nextAccepted,
+            pendingReviewQuantity: nextPending,
+            remainingAvailableQuantity: Math.max(0, totalReleased - nextActive),
+            reportingProgress: nextActive >= totalReleased && nextPending > 0
+              ? "Fully Reported — Awaiting Review"
+              : nextAccepted >= totalReleased && nextPending === 0 ? "Completed" : "Partial",
             verificationStatus: "Pending Review",
             submittedAt: now,
             updatedAt: now,
@@ -1519,6 +1508,13 @@ if (submittedEventId) {
           photos: uploadedPhotos,
           imageHashes: uploadedPhotos.map((photo) => photo.imageHash),
           automatedVerificationStatus: automatedStatus,
+          verificationStatus: submissionVerificationStatus,
+          staffReviewStatus: submissionStaffReviewStatus,
+          verificationDetails: suspiciousFlags,
+          reviewedBy: "",
+          reviewedByName: "",
+          reviewedAt: null,
+          rejectionReason: "",
           suspiciousFlags,
           plantingDate: data.plantingDate,
           latitude: photoLatitude,
@@ -1702,7 +1698,7 @@ const getPlantingReportById =
 // --------------------------------
 const getPlantingReportsByParticipantId =
   async (participantId) => {
-    const [ownedSnapshot, contributionSnapshot] = await Promise.all([
+    const [ownedSnapshot, contributionSnapshot, participantSnapshot] = await Promise.all([
       reportCollection
         .where(
           "participantId",
@@ -1711,6 +1707,7 @@ const getPlantingReportsByParticipantId =
         )
         .get(),
       contributionCollection.where("contributorId", "==", participantId).get(),
+      db.collection("eventParticipants").get(),
     ]);
 
     const reportsById = new Map(
@@ -1725,6 +1722,17 @@ const getPlantingReportsByParticipantId =
     contributedDocs
       .filter((doc) => doc.exists)
       .forEach((doc) => reportsById.set(doc.id, withWorkflowStatus(doc)));
+    const authorizedEventIds = new Set(participantSnapshot.docs
+      .filter((doc) => {
+        const participant = doc.data();
+        return participant.userId === participantId || participant.participantId === participantId || doc.id === participantId;
+      })
+      .map((doc) => doc.data().eventId).filter(Boolean));
+    if (authorizedEventIds.size) {
+      const sharedSnapshot = await reportCollection.get();
+      sharedSnapshot.docs.filter((doc) => authorizedEventIds.has(doc.data().eventId))
+        .forEach((doc) => reportsById.set(doc.id, withWorkflowStatus(doc)));
+    }
 
     const reports = [...reportsById.values()];
 
@@ -1745,9 +1753,10 @@ const getPlantingReportsByParticipantId =
       );
     });
 
-    return Promise.all(reports.map((report) =>
+    const detailed = await Promise.all(reports.map((report) =>
       report.reportType === "parent" ? reportDetails(report.id, report) : report
     ));
+    return detailed.map((report) => participantSafeReport(report, participantId));
   };
 
 
@@ -1762,6 +1771,53 @@ const approvePlantingReport =
     remarks,
     reviewedByName
   ) => {
+    const contributionRef = contributionCollection.doc(id);
+    const contributionDoc = await contributionRef.get();
+    if (contributionDoc.exists) {
+      let parentId = "";
+      await db.runTransaction(async (transaction) => {
+        const currentDoc = await transaction.get(contributionRef);
+        if (!currentDoc.exists) throw new Error("Planting report submission not found.");
+        const current = currentDoc.data();
+        if (current.verificationStatus !== "Needs Review" || current.staffReviewStatus !== "Pending Review") {
+          throw new Error("Only submissions pending Staff review can be accepted.");
+        }
+        parentId = current.reportId;
+        const parentRef = reportRefFor(parentId);
+        const parentDoc = await transaction.get(parentRef);
+        if (!parentDoc.exists) throw new Error("Planting report not found.");
+        const parent = parentDoc.data();
+        const quantity = Number(current.quantity || 0);
+        const accepted = Number(parent.acceptedQuantity || 0) + quantity;
+        const pending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
+        const released = Number(parent.quantityReleased || 0);
+        const now = Timestamp.now();
+        transaction.update(contributionRef, {
+          staffReviewStatus: "Accepted", reviewedBy: approvedBy,
+          reviewedByName: reviewedByName || "", reviewedAt: now,
+          reviewRemarks: remarks?.trim() || "", updatedAt: now,
+        });
+        transaction.update(parentRef, {
+          acceptedQuantity: accepted, pendingReviewQuantity: pending,
+          reportingProgress: released > 0 && accepted >= released && pending === 0
+            ? "Completed" : "Partial",
+          updatedAt: now,
+        });
+        createVerificationLogInTransaction(transaction, {
+          plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
+          previousStatus: "Pending Review", newStatus: "Accepted",
+          performedBy: approvedBy, performedByRole: "staff",
+          remarks: remarks?.trim() || "", createdAt: now,
+        });
+        createNotificationInTransaction(transaction, {
+          recipientUserId: current.contributorId || current.participantId,
+          type: "planting_report_accepted", title: "Planting report submission accepted",
+          message: "Your planting report submission was accepted.",
+          relatedRecordType: "plantingReport", relatedRecordId: parentId, createdAt: now,
+        });
+      });
+      return getPlantingReportById(parentId);
+    }
     const reportRef =
       reportRefFor(id);
 
@@ -1886,6 +1942,69 @@ const rejectPlantingReport =
   ) => {
     if (typeof remarks !== "string" || !remarks.trim()) {
       throw new Error("Rejection reason is required.");
+    }
+    const contributionRef = contributionCollection.doc(id);
+    const contributionDoc = await contributionRef.get();
+    if (contributionDoc.exists) {
+      let parentId = "";
+      await db.runTransaction(async (transaction) => {
+        const currentDoc = await transaction.get(contributionRef);
+        if (!currentDoc.exists) throw new Error("Planting report submission not found.");
+        const current = currentDoc.data();
+        if (current.verificationStatus !== "Needs Review" || current.staffReviewStatus !== "Pending Review") {
+          throw new Error("Only submissions pending Staff review can be rejected.");
+        }
+        parentId = current.reportId;
+        const parentRef = reportRefFor(parentId);
+        const eventRef = db.collection(EVENT_COLLECTION).doc(current.eventId);
+        const [parentDoc, eventDoc] = await Promise.all([
+          transaction.get(parentRef), transaction.get(eventRef),
+        ]);
+        if (!parentDoc.exists || !eventDoc.exists) throw new Error("Planting report not found.");
+        const parent = parentDoc.data();
+        const event = eventDoc.data();
+        const quantity = Number(current.quantity || 0);
+        const inventoryId = current.inventoryId;
+        const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
+        recorded[inventoryId] = Math.max(0, Number(recorded[inventoryId] || 0) - quantity);
+        const nextActive = Math.max(0, Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0) - quantity);
+        const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
+        const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
+        const accepted = Number(parent.acceptedQuantity || 0);
+        const now = Timestamp.now();
+        transaction.update(contributionRef, {
+          staffReviewStatus: "Rejected", reviewedBy: rejectedBy,
+          reviewedByName: reviewedByName || "", reviewedAt: now,
+          rejectionReason: remarks.trim(), updatedAt: now,
+        });
+        transaction.update(eventRef, {
+          recordedSeedlingsByInventory: recorded,
+          recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
+          remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
+            Number(event.remainingSeedlingQuantity || 0) + quantity),
+          updatedAt: now,
+        });
+        transaction.update(parentRef, {
+          quantityPlanted: nextActive, activeSubmittedQuantity: nextActive,
+          pendingReviewQuantity: nextPending,
+          rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity,
+          remainingAvailableQuantity: Math.max(0, released - nextActive),
+          reportingProgress: nextActive === 0 && accepted === 0 ? "Awaiting Submission" : "Partial",
+          updatedAt: now,
+        });
+        createVerificationLogInTransaction(transaction, {
+          plantingReportId: parentId, submissionId: id, action: "Staff Rejection",
+          previousStatus: "Pending Review", newStatus: "Rejected",
+          performedBy: rejectedBy, performedByRole: "staff", remarks: remarks.trim(), createdAt: now,
+        });
+        createNotificationInTransaction(transaction, {
+          recipientUserId: current.contributorId || current.participantId,
+          type: "planting_report_rejected", title: "Planting report submission rejected",
+          message: `Your planting report submission was rejected. Reason: ${remarks.trim()}`,
+          relatedRecordType: "plantingReport", relatedRecordId: parentId, createdAt: now,
+        });
+      });
+      return getPlantingReportById(parentId);
     }
     const reportRef =
       reportRefFor(id);
@@ -2025,6 +2144,7 @@ module.exports = {
   getPlantingReportById,
   getPlantingReportsByParticipantId,
   participantSafeReport,
+  participantCanAccessReport,
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,

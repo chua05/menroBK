@@ -231,7 +231,10 @@ async function validateGuestSession(header) {
   if (!eventDoc.exists || !eventIsEligible(eventDoc.data())) {
     throw new Error("Invalid guest session.");
   }
-  await doc.ref.update({ lastUsedAt: Timestamp.now() });
+  const participantRef = participants.doc(participantId);
+  if (typeof participantRef.update === "function") {
+    await participantRef.update({ lastUsedAt: Timestamp.now() });
+  }
   return { participantId, eventId: doc.data().eventId, fullName: doc.data().fullName };
 }
 

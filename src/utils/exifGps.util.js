@@ -24,7 +24,11 @@ function dmsParts(value) {
   if (value && typeof value === "object" && (value.degrees !== undefined || value.degree !== undefined)) {
     return [value.degrees ?? value.degree, value.minutes ?? value.minute ?? 0, value.seconds ?? value.second ?? 0];
   }
-  if (typeof value === "string" && value.includes(",")) return value.split(",");
+  if (typeof value === "string") {
+    const cleaned = value.trim().replace(/[NSEW]\s*$/i, "");
+    const tokens = cleaned.match(/-?\d+(?:\.\d+)?(?:\s*\/\s*-?\d+(?:\.\d+)?)?/g);
+    if (tokens?.length >= 3) return tokens.slice(0, 3);
+  }
   return null;
 }
 
@@ -49,12 +53,13 @@ function parseExifCoordinate(value, reference, maximum) {
 }
 
 function extractGpsCoordinates(metadata = {}) {
-  const rawLatitude = metadata.latitude ?? metadata.GPSLatitude;
-  const rawLongitude = metadata.longitude ?? metadata.GPSLongitude;
+  const gps = metadata.gps || metadata.GPS || metadata.GPSInfo || {};
+  const rawLatitude = metadata.latitude ?? metadata.GPSLatitude ?? gps.latitude ?? gps.GPSLatitude;
+  const rawLongitude = metadata.longitude ?? metadata.GPSLongitude ?? gps.longitude ?? gps.GPSLongitude;
   if (rawLatitude == null && rawLongitude == null) return { status: "missing", latitude: null, longitude: null };
   if (rawLatitude == null || rawLongitude == null) return { status: "unparseable", latitude: null, longitude: null };
-  const latitude = parseExifCoordinate(rawLatitude, metadata.GPSLatitudeRef, 90);
-  const longitude = parseExifCoordinate(rawLongitude, metadata.GPSLongitudeRef, 180);
+  const latitude = parseExifCoordinate(rawLatitude, metadata.GPSLatitudeRef ?? gps.GPSLatitudeRef, 90);
+  const longitude = parseExifCoordinate(rawLongitude, metadata.GPSLongitudeRef ?? gps.GPSLongitudeRef, 180);
   if (latitude.status === "invalid" || longitude.status === "invalid") return { status: "invalid", latitude: latitude.value, longitude: longitude.value };
   if (latitude.status !== "valid" || longitude.status !== "valid") return { status: "unparseable", latitude: null, longitude: null };
   return { status: "valid", latitude: latitude.value, longitude: longitude.value };
