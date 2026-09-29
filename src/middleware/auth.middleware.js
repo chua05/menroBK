@@ -2,9 +2,12 @@ const { auth } = require("../config/firebase");
 const { sendError } = require("../utils/response.util");
 const { getUserByUid } = require("../services/user.service");
 
-const isUnverifiedPasswordUser = (decodedToken) =>
+const requiresVerifiedParticipantEmail = (decodedToken, userProfile) =>
   decodedToken?.firebase?.sign_in_provider === "password" &&
-  decodedToken.email_verified !== true;
+  decodedToken.email_verified !== true &&
+  !["admin", "staff"].includes(
+    String(userProfile?.role || "participant").toLowerCase()
+  );
 
 const verifyToken = async (req, res, next) => {
   try {
@@ -26,10 +29,6 @@ const verifyToken = async (req, res, next) => {
     const decodedToken =
       await auth.verifyIdToken(token, true);
 
-    if (isUnverifiedPasswordUser(decodedToken)) {
-      return sendError(res, 403, "Please verify your email address before continuing.");
-    }
-
     const userProfile =
       await getUserByUid(decodedToken.uid);
 
@@ -47,6 +46,10 @@ const verifyToken = async (req, res, next) => {
         403,
         "User account is inactive."
       );
+    }
+
+    if (requiresVerifiedParticipantEmail(decodedToken, userProfile)) {
+      return sendError(res, 403, "Please verify your email address before continuing.");
     }
 
     req.user = {
@@ -104,10 +107,6 @@ const verifyTokenForBootstrap = async (req, res, next) => {
     const decodedToken =
       await auth.verifyIdToken(token, true);
 
-    if (isUnverifiedPasswordUser(decodedToken)) {
-      return sendError(res, 403, "Please verify your email address before continuing.");
-    }
-
     const userProfile =
       await getUserByUid(decodedToken.uid);
 
@@ -117,6 +116,10 @@ const verifyTokenForBootstrap = async (req, res, next) => {
         403,
         "User account is inactive."
       );
+    }
+
+    if (requiresVerifiedParticipantEmail(decodedToken, userProfile)) {
+      return sendError(res, 403, "Please verify your email address before continuing.");
     }
 
     req.firebaseUser = {
