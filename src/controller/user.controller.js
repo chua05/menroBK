@@ -190,7 +190,8 @@ const changeUserRole = async (
       await userService
         .updateUserRole(
           uid,
-          role
+          role,
+          req.user.uid
         );
 
 
@@ -285,7 +286,8 @@ const changeUserStatus = async (
       await userService
         .updateUserStatus(
           uid,
-          status
+          status,
+          req.user.uid
         );
 
 

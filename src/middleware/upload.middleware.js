@@ -2,6 +2,40 @@ const multer = require("multer");
 const path = require("path");
 
 const storage = multer.memoryStorage();
+const MAX_AGGREGATE_BYTES = 60 * 1024 * 1024;
+const MAX_CONCURRENT_UPLOADS = 3;
+let activeUploads = 0;
+
+const uploadConcurrencyGuard = (req, res, next) => {
+  if (activeUploads >= MAX_CONCURRENT_UPLOADS) {
+    return res.status(503).json({
+      success: false,
+      message: "The upload service is busy. Please try again shortly.",
+    });
+  }
+  activeUploads += 1;
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    activeUploads = Math.max(0, activeUploads - 1);
+  };
+  res.once("finish", release);
+  res.once("close", release);
+  next();
+};
+
+const validateAggregateUploadSize = (files) => {
+  const list = Array.isArray(files)
+    ? files
+    : Object.values(files || {}).flat();
+  const total = list.reduce((sum, file) => sum + Number(file?.size || file?.buffer?.length || 0), 0);
+  if (total > MAX_AGGREGATE_BYTES) {
+    const error = new Error("The combined evidence upload must not exceed 60 MB.");
+    error.code = "LIMIT_AGGREGATE_FILE_SIZE";
+    throw error;
+  }
+};
 
 const imageFileFilter = (
   req,
@@ -77,13 +111,22 @@ const uploadPlantingPhoto = multer({
 
 const uploadContributionEvidence = (req, res, next) =>
   uploadPlantingPhoto.array("photos", 10)(req, res, (error) => {
-    if (!error) return next();
+    if (!error) {
+      try {
+        validateAggregateUploadSize(req.files);
+        return next();
+      } catch (aggregateError) {
+        error = aggregateError;
+      }
+    }
     return res.status(400).json({
       success: false,
       message: error.code === "LIMIT_FILE_SIZE"
         ? "Each planting evidence photo must not exceed 10 MB."
         : error.code === "LIMIT_UNEXPECTED_FILE"
           ? "A maximum of 10 planting evidence photos is allowed."
+          : error.code === "LIMIT_AGGREGATE_FILE_SIZE"
+            ? error.message
           : error.message || "Invalid planting evidence photos.",
     });
   });
@@ -91,4 +134,6 @@ const uploadContributionEvidence = (req, res, next) =>
 module.exports = {
   uploadPlantingPhoto,
   uploadContributionEvidence,
+  uploadConcurrencyGuard,
+  validateAggregateUploadSize,
 };

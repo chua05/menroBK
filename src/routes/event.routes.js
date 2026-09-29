@@ -27,7 +27,8 @@ const guestService = require("../services/guestEvent.service");
 const contributionService = require("../services/plantingContribution.service");
 const { sendSuccess, sendError } = require("../utils/response.util");
 const { attachEvidence } = require("../services/plantingEvidence.service");
-const { uploadContributionEvidence } = require("../middleware/upload.middleware");
+const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
+const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
 
 router.post("/:id/join", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -76,7 +77,8 @@ router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), as
 });
 
 router.post("/:id/contributions/:contributionId/evidence", verifyToken,
-  authorizeRoles("participant"), uploadContributionEvidence, async (req, res) => {
+  authorizeRoles("participant"), uploadLimiter, uploadConcurrencyGuard,
+  uploadContributionEvidence, async (req, res) => {
     try {
       const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);
       const data = await attachEvidence(req.params.id, participantId,

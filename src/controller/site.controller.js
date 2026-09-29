@@ -74,8 +74,12 @@ const getAllSites = async (
   res
 ) => {
   try {
-    const sites =
+    let sites =
       await siteService.getAllSites();
+
+    if (req.user.role === "participant") {
+      sites = sites.map(siteService.participantSafeSite);
+    }
 
     return sendSuccess(
       res,
@@ -130,10 +134,14 @@ const getSiteById = async (
   res
 ) => {
   try {
-    const site =
+    let site =
       await siteService.getSiteById(
         req.params.id
       );
+
+    if (req.user.role === "participant") {
+      site = siteService.participantSafeSite(site);
+    }
 
     return sendSuccess(
       res,

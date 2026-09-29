@@ -3,6 +3,9 @@ const crypto = require("crypto");
 const exifr = require("exifr");
 
 const sharp = require("sharp");
+const { extractGpsCoordinates } = require("./exifGps.util");
+const MAX_IMAGE_PIXELS = 40_000_000;
+const MAX_IMAGE_DIMENSION = 12_000;
 
 // SHA-256 IMAGE HASH
 const generateImageHash = (buffer) => {
@@ -22,7 +25,11 @@ const validateImageBuffer = async (
   try {
 
     const metadata =
-      await sharp(imageBuffer)
+      await sharp(imageBuffer, {
+        failOn: "warning",
+        limitInputPixels: MAX_IMAGE_PIXELS,
+        sequentialRead: true,
+      })
         .metadata();
 
     if (
@@ -32,6 +39,11 @@ const validateImageBuffer = async (
 
       throw new Error();
 
+    }
+
+    if (metadata.width > MAX_IMAGE_DIMENSION || metadata.height > MAX_IMAGE_DIMENSION ||
+        metadata.width * metadata.height > MAX_IMAGE_PIXELS) {
+      throw new Error("IMAGE_DIMENSIONS_EXCEEDED");
     }
 
     return {
@@ -49,7 +61,11 @@ const validateImageBuffer = async (
 
   }
 
-  catch {
+  catch (error) {
+
+    if (error?.message === "IMAGE_DIMENSIONS_EXCEEDED") {
+      throw new Error("The image dimensions are too large to process safely.");
+    }
 
     throw new Error(
       "The uploaded file is not a valid image."
@@ -77,19 +93,21 @@ const extractImageMetadata =
           }
         );
 
+      const gps = extractGpsCoordinates(metadata || {});
+
       return {
 
-        latitude:
-          metadata?.latitude ??
-          null,
+        latitude: gps.latitude,
 
-        longitude:
-          metadata?.longitude ??
-          null,
+        longitude: gps.longitude,
+
+        gpsStatus: gps.status,
 
         capturedAt:
           metadata?.DateTimeOriginal ??
+          metadata?.DateTimeDigitized ??
           metadata?.CreateDate ??
+          metadata?.DateTime ??
           null,
 
         deviceMake:
@@ -119,6 +137,8 @@ const extractImageMetadata =
         latitude: null,
 
         longitude: null,
+
+        gpsStatus: "missing",
 
         capturedAt: null,
 

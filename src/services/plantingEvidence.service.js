@@ -155,7 +155,10 @@ async function attachEvidence(eventId, participantId, contributionId, files, inp
         latitude: optionalLocation ? (firstPhotoWithGps?.metadata?.latitude ?? null) : latitude,
         longitude: optionalLocation ? (firstPhotoWithGps?.metadata?.longitude ?? null) : longitude,
         automatedVerificationStatus: photos.some((photo) => photo.automatedStatus === "Flagged")
-          ? "Flagged" : "Passed Automated Check",
+          ? "Flagged"
+          : photos.some((photo) => photo.automatedStatus === "Not Evaluated")
+            ? "Not Evaluated"
+            : "Passed Automated Check",
         suspiciousFlags: [...new Set(photos.flatMap((photo) => photo.suspiciousFlags))],
         updatedAt: now,
       });

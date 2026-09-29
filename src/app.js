@@ -1,5 +1,4 @@
 const express = require("express");
-const path = require("path");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
@@ -22,6 +21,7 @@ const analyticsRoutes = require("./routes/analytics.routes");
 const guestEventRoutes = require("./routes/guestEvent.routes");
 const reportRoutes = require("./routes/report.routes");
 const searchRoutes = require("./routes/search.routes");
+const evidenceRoutes = require("./routes/evidence.routes");
 
 const app = express();
 
@@ -65,15 +65,6 @@ app.use(
   })
 );
 
-// ---------------------------------------------
-// Local uploaded files
-// ---------------------------------------------
-
-app.use(
-  "/uploads",
-  express.static(path.join(process.cwd(), "uploads"))
-);
-
 if (process.env.NODE_ENV === "development") {
   app.use(morgan("dev"));
 }
@@ -114,6 +105,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/search", searchRoutes);
+app.use("/api/evidence", evidenceRoutes);
 
 // ---------------------------------------------
 // 404

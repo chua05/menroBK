@@ -29,9 +29,12 @@ const {
 
 const {
   uploadPlantingPhoto,
+  uploadConcurrencyGuard,
+  validateAggregateUploadSize,
 } = require(
   "../middleware/upload.middleware"
 );
+const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
 
 
 // --------------------------------
@@ -71,7 +74,12 @@ const handlePlantingEvidenceUpload = (
     res,
     (error) => {
       if (!error) {
-        return next();
+        try {
+          validateAggregateUploadSize(req.files);
+          return next();
+        } catch (aggregateError) {
+          error = aggregateError;
+        }
       }
 
       if (
@@ -96,6 +104,10 @@ const handlePlantingEvidenceUpload = (
         });
       }
 
+      if (error.code === "LIMIT_AGGREGATE_FILE_SIZE") {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+
       return res.status(400).json({
         success: false,
         message:
@@ -112,6 +124,8 @@ router.post(
   "/",
   verifyToken,
   authorizeRoles("participant"),
+  uploadLimiter,
+  uploadConcurrencyGuard,
   handlePlantingEvidenceUpload,
   submitPlantingReport
 );

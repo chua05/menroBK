@@ -1,5 +1,7 @@
 const express = require("express");
 const multer = require("multer");
+const { uploadConcurrencyGuard } = require("../middleware/upload.middleware");
+const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
 
 const router =
   express.Router();
@@ -82,6 +84,8 @@ router.post(
   authorizeRoles(
     "participant"
   ),
+  uploadLimiter,
+  uploadConcurrencyGuard,
   upload.single("photo"),
   addMonitoringRecord
 );

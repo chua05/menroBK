@@ -5,7 +5,8 @@ const { sendSuccess, sendError } = require("../utils/response.util");
 const guest = require("../services/guestEvent.service");
 const contributions = require("../services/plantingContribution.service");
 const { attachEvidence } = require("../services/plantingEvidence.service");
-const { uploadContributionEvidence } = require("../middleware/upload.middleware");
+const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
+const { uploadLimiter, guestContributionLimiter } = require("../middleware/rateLimiter.middleware");
 
 router.get("/invitation/:eventId", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -23,7 +24,9 @@ router.get("/session", async (req, res) => {
     const session = await guest.getGuestSessionContext(req.headers.authorization);
     return sendSuccess(res, 200, "Guest session retrieved", session);
   } catch (error) {
-    return sendError(res, 401, "Invalid guest session.");
+    return sendError(res, 401, error.message === "Guest session expired."
+      ? "Your guest session has expired. Please use a valid invitation link."
+      : "Invalid guest session.");
   }
 });
 
@@ -31,8 +34,10 @@ router.get("/session/contributions", async (req, res) => {
   let session;
   try {
     session = await guest.validateGuestSession(req.headers.authorization);
-  } catch {
-    return sendError(res, 401, "Invalid guest session.");
+  } catch (error) {
+    return sendError(res, 401, error.message === "Guest session expired."
+      ? "Your guest session has expired. Please use a valid invitation link."
+      : "Invalid guest session.");
   }
   try {
     const data = await contributions.getOwnContributions(session.eventId, session.participantId);
@@ -43,12 +48,18 @@ router.get("/session/contributions", async (req, res) => {
   }
 });
 
-router.post("/session/contributions", async (req, res) => {
+router.post("/session/contributions", async (req, res, next) => {
   let session;
+  req.guestSession = session;
+  return next();
+}, guestContributionLimiter, async (req, res) => {
+  const session = req.guestSession;
   try {
     session = await guest.validateGuestSession(req.headers.authorization);
   } catch (error) {
-    return sendError(res, 401, "Invalid guest session.");
+    return sendError(res, 401, error.message === "Guest session expired."
+      ? "Your guest session has expired. Please use a valid invitation link."
+      : "Invalid guest session.");
   }
   try {
     const data = await contributions.recordContribution(
@@ -75,10 +86,12 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
   try {
     req.guestSession = await guest.validateGuestSession(req.headers.authorization);
     return next();
-  } catch {
-    return sendError(res, 401, "Invalid guest session.");
+  } catch (error) {
+    return sendError(res, 401, error.message === "Guest session expired."
+      ? "Your guest session has expired. Please use a valid invitation link."
+      : "Invalid guest session.");
   }
-}, uploadContributionEvidence, async (req, res) => {
+}, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
   try {
     const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
       req.params.id, req.files, req.body, { optionalLocation: true });
@@ -97,7 +110,9 @@ router.get("/:token", async (req, res) => {
     const { eventId, event } = await guest.validateInvitation(req.params.token);
     return sendSuccess(res, 200, "Guest event retrieved", await guest.publicEvent(eventId, event));
   } catch (error) {
-    return sendError(res, 404, "Guest event not found.");
+    return sendError(res, error.message === "This invitation link has expired." ? 410 : 404,
+      error.message === "This invitation link has expired."
+        ? error.message : "Guest event not found.");
   }
 });
 
@@ -114,6 +129,7 @@ router.post("/:token/join", async (req, res) => {
     if (message === "Invalid guest invitation." || message === "Event not found.") {
       return sendError(res, 404, "Guest event not found.");
     }
+    if (message === "This invitation link has expired.") return sendError(res, 410, message);
     console.error(error);
     return sendError(res, 500, "Failed to join event.");
   }

@@ -391,6 +391,41 @@ const getSiteById = async (siteId) => {
   return formatSiteDocument(await ensureReadableSiteId(doc));
 };
 
+const participantSafeSite = (site) => {
+  const safeFields = [
+    "id",
+    "siteId",
+    "siteNumber",
+    "siteName",
+    "name",
+    "barangay",
+    "municipality",
+    "province",
+    "siteType",
+    "areaHectares",
+    "maximumCapacity",
+    "targetTrees",
+    "planted",
+    "latitude",
+    "longitude",
+    "polygon",
+    "coverageRadiusMeters",
+    "locationDescription",
+    "treeCondition",
+    "survivalRate",
+    "treeAgeMonths",
+    "relatedEventId",
+    "relatedEventName",
+    "status",
+  ];
+
+  return Object.fromEntries(
+    safeFields
+      .filter((field) => Object.prototype.hasOwnProperty.call(site, field))
+      .map((field) => [field, site[field]])
+  );
+};
+
 // Edit the same site document while preserving workflow and audit fields.
 const updateSite = async (siteId, input, updatedBy) => {
   const siteRef = db.collection(SITE_COLLECTION).doc(siteId);
@@ -535,6 +570,7 @@ module.exports = {
   getAllSites,
   getArchivedSites,
   getSiteById,
+  participantSafeSite,
   updateSite,
   archiveSite,
   restoreSite,

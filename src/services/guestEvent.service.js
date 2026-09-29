@@ -7,6 +7,40 @@ const participants = db.collection("eventParticipants");
 const events = db.collection("events");
 const sites = db.collection("sites");
 const requests = db.collection("seedlingRequests");
+const DEFAULT_INVITATION_TTL_HOURS = 30 * 24;
+const DEFAULT_SESSION_TTL_HOURS = 24;
+
+function configuredHours(name, fallback, maximum) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 && value <= maximum ? value : fallback;
+}
+
+function toMillis(value) {
+  if (value && typeof value.toMillis === "function") return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function expiryFor(createdAt, hours) {
+  const base = toMillis(createdAt);
+  return Timestamp.fromMillis((Number.isFinite(base) ? base : Date.now()) + hours * 60 * 60 * 1000);
+}
+
+function expired(data, fallbackHours) {
+  const expiresAt = toMillis(data?.expiresAt);
+  if (Number.isFinite(expiresAt)) return expiresAt <= Date.now();
+  const createdAt = toMillis(data?.createdAt || data?.joinedAt);
+  return !Number.isFinite(createdAt) || createdAt + fallbackHours * 60 * 60 * 1000 <= Date.now();
+}
+
+function eventIsEligible(event) {
+  const status = String(event?.status || "").trim().toLowerCase();
+  const recordStatus = String(event?.recordStatus || "").trim().toLowerCase();
+  return event && event.archived !== true &&
+    !["cancelled", "completed"].includes(status) &&
+    !["cancelled", "completed", "archived"].includes(recordStatus);
+}
 
 function secret() {
   const value = String(process.env.GUEST_INVITATION_SECRET || "").trim();
@@ -37,15 +71,20 @@ function createInvitationInTransaction(transaction, eventId, requestId, createdA
 
   const nonce = crypto.randomBytes(32).toString("hex");
   const tokenHash = digest(invitationToken(eventId, nonce));
+  const expiresAt = expiryFor(createdAt, configuredHours(
+    "GUEST_INVITATION_TTL_HOURS", DEFAULT_INVITATION_TTL_HOURS, 90 * 24
+  ));
   transaction.create(invitations.doc(eventId), {
-    eventId, requestId, nonce, tokenHash, active: true, createdAt,
+    eventId, requestId, nonce, tokenHash, active: true, createdAt, expiresAt, revokedAt: null,
   });
   return true;
 }
 
 async function getInvitationForRequester(eventId, userId) {
   const invitationDoc = await invitations.doc(eventId).get();
-  if (!invitationDoc.exists || !invitationDoc.data().active) {
+  const invitation = invitationDoc.data();
+  if (!invitationDoc.exists || !invitation?.active || invitation.revokedAt ||
+      expired(invitation, DEFAULT_INVITATION_TTL_HOURS)) {
     throw new Error("Invitation not found.");
   }
   const requestDoc = await db.collection("seedlingRequests")
@@ -53,7 +92,7 @@ async function getInvitationForRequester(eventId, userId) {
   if (!requestDoc.exists || requestDoc.data().participantId !== userId) {
     throw new Error("Invitation not found.");
   }
-  return { eventId, token: invitationToken(eventId, invitationDoc.data().nonce) };
+  return { eventId, token: invitationToken(eventId, invitation.nonce), expiresAt: invitation.expiresAt || null };
 }
 
 async function validateInvitation(token) {
@@ -62,16 +101,20 @@ async function validateInvitation(token) {
   }
   const eventId = token.split(".")[0];
   const invitationDoc = await invitations.doc(eventId).get();
-  if (!invitationDoc.exists || !invitationDoc.data().active) {
+  const invitation = invitationDoc.data();
+  if (!invitationDoc.exists || !invitation?.active || invitation.revokedAt) {
     throw new Error("Invalid guest invitation.");
   }
-  const expected = Buffer.from(invitationDoc.data().tokenHash, "hex");
+  if (expired(invitation, DEFAULT_INVITATION_TTL_HOURS)) {
+    throw new Error("This invitation link has expired.");
+  }
+  const expected = Buffer.from(invitation.tokenHash, "hex");
   const actual = Buffer.from(digest(token), "hex");
   if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
     throw new Error("Invalid guest invitation.");
   }
   const eventDoc = await events.doc(eventId).get();
-  if (!eventDoc.exists || eventDoc.data().archived === true || eventDoc.data().status === "Cancelled") {
+  if (!eventDoc.exists || !eventIsEligible(eventDoc.data())) {
     throw new Error("Event not found.");
   }
   return { eventId, event: eventDoc.data() };
@@ -138,6 +181,10 @@ async function joinGuest(token, details) {
   const normalizedContactNumber = normalizeContact(details?.contactNumber);
   const participantId = digest(`${eventId}:${normalizedContactNumber}`);
   const sessionToken = `${participantId}.${crypto.randomBytes(32).toString("hex")}`;
+  const joinedAt = Timestamp.now();
+  const expiresAt = expiryFor(joinedAt, configuredHours(
+    "GUEST_SESSION_TTL_HOURS", DEFAULT_SESSION_TTL_HOURS, 7 * 24
+  ));
   const ref = participants.doc(participantId);
   await db.runTransaction(async (transaction) => {
     const existing = await transaction.get(ref);
@@ -152,10 +199,14 @@ async function joinGuest(token, details) {
       contactNumber: normalizedContactNumber,
       normalizedContactNumber,
       sessionHash: digest(sessionToken),
-      joinedAt: Timestamp.now(),
+      joinedAt,
+      createdAt: joinedAt,
+      expiresAt,
+      lastUsedAt: joinedAt,
+      revokedAt: null,
     });
   });
-  return { eventId, participantId, sessionToken };
+  return { eventId, participantId, sessionToken, expiresAt };
 }
 
 async function validateGuestSession(header) {
@@ -167,18 +218,27 @@ async function validateGuestSession(header) {
   if (!doc.exists || doc.data().participantType !== "guest") {
     throw new Error("Invalid guest session.");
   }
+  if (doc.data().revokedAt) throw new Error("Invalid guest session.");
+  if (expired(doc.data(), DEFAULT_SESSION_TTL_HOURS)) {
+    throw new Error("Guest session expired.");
+  }
   const expected = Buffer.from(doc.data().sessionHash, "hex");
   const actual = Buffer.from(digest(token), "hex");
   if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
     throw new Error("Invalid guest session.");
   }
+  const eventDoc = await events.doc(doc.data().eventId).get();
+  if (!eventDoc.exists || !eventIsEligible(eventDoc.data())) {
+    throw new Error("Invalid guest session.");
+  }
+  await doc.ref.update({ lastUsedAt: Timestamp.now() });
   return { participantId, eventId: doc.data().eventId, fullName: doc.data().fullName };
 }
 
 async function getGuestSessionContext(header) {
   const session = await validateGuestSession(header);
   const eventDoc = await events.doc(session.eventId).get();
-  if (!eventDoc.exists || eventDoc.data().archived === true || eventDoc.data().status === "Cancelled") {
+  if (!eventDoc.exists || !eventIsEligible(eventDoc.data())) {
     throw new Error("Invalid guest session.");
   }
   return { ...session, event: await publicEvent(eventDoc.id, eventDoc.data()) };

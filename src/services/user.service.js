@@ -1,6 +1,8 @@
 const { db } = require("../config/firebase");
+const { Timestamp } = require("firebase-admin/firestore");
 
 const USERS_COLLECTION = "users";
+const AUDIT_COLLECTION = "auditLogs";
 
 const VALID_ROLES = [
   "admin",
@@ -50,7 +52,33 @@ const getAllUsers = async () => {
   }));
 };
 
-const updateUserRole = async (uid, role) => {
+const updatePrivilegedField = async ({ uid, field, value, actorId, action }) => {
+  if (typeof uid !== "string" || !uid.trim() || uid.includes("/") || !actorId) {
+    throw new Error("Invalid user operation.");
+  }
+  const userRef = db.collection(USERS_COLLECTION).doc(uid);
+  const auditRef = db.collection(AUDIT_COLLECTION).doc();
+  await db.runTransaction(async (transaction) => {
+    const userDoc = await transaction.get(userRef);
+    if (!userDoc.exists) throw new Error("User not found.");
+    const oldValue = userDoc.data()[field];
+    if (oldValue === value) return;
+    const timestamp = Timestamp.now();
+    transaction.update(userRef, { [field]: value, updatedAt: timestamp });
+    transaction.create(auditRef, {
+      action,
+      targetUserId: uid,
+      performedBy: actorId,
+      oldValue: oldValue ?? null,
+      newValue: value,
+      timestamp,
+    });
+  });
+  const updatedDoc = await userRef.get();
+  return { ...updatedDoc.data(), uid: updatedDoc.id };
+};
+
+const updateUserRole = async (uid, role, actorId) => {
    const normalizedRole =
     String(role || "").toLowerCase();
     
@@ -58,57 +86,19 @@ const updateUserRole = async (uid, role) => {
     throw new Error("Invalid user role.");
   }
 
-  const userRef = db
-    .collection(USERS_COLLECTION)
-    .doc(uid);
-
-  const userDoc = await userRef.get();
-
-  if (!userDoc.exists) {
-    throw new Error("User not found.");
-  }
-
-  await userRef.update({
-    role: normalizedRole,
-    updatedAt: new Date(),
-  });
-
-  const updatedDoc = await userRef.get();
-
-  return {
-    ...updatedDoc.data(),
-    uid: updatedDoc.id,
-  };
+  return updatePrivilegedField({ uid, field: "role", value: normalizedRole,
+    actorId, action: "USER_ROLE_CHANGED" });
 };
 
-const updateUserStatus = async (uid, status) => {
+const updateUserStatus = async (uid, status, actorId) => {
   const normalizedStatus = String(status || "").toLowerCase();
   
   if (!VALID_STATUSES.includes(normalizedStatus)) {
     throw new Error("Invalid user status.");
   }
 
-  const userRef = db
-    .collection(USERS_COLLECTION)
-    .doc(uid);
-
-  const userDoc = await userRef.get();
-
-  if (!userDoc.exists) {
-    throw new Error("User not found.");
-  }
-
-  await userRef.update({
-    status: normalizedStatus,
-    updatedAt: new Date(),
-  });
-
-  const updatedDoc = await userRef.get();
-
-  return {
-    ...updatedDoc.data(),
-    uid: updatedDoc.id,
-  };
+  return updatePrivilegedField({ uid, field: "status", value: normalizedStatus,
+    actorId, action: "USER_STATUS_CHANGED" });
 };
 
 const updateUserProfile = async (uid, data) => {

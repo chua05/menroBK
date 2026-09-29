@@ -1,10 +1,12 @@
 const router = require("express").Router();
+const { reportLimiter } = require("../middleware/rateLimiter.middleware");
 const { verifyToken } = require("../middleware/auth.middleware");
 const { authorizeRoles } = require("../middleware/role.middleware");
 const { sendSuccess, sendError } = require("../utils/response.util");
 const reports = require("../services/generatedReport.service");
 
 router.use(verifyToken, authorizeRoles("staff", "admin"));
+router.use(reportLimiter);
 
 router.get("/", async (req, res) => {
   try {

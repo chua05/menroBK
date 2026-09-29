@@ -2,6 +2,10 @@ const { auth } = require("../config/firebase");
 const { sendError } = require("../utils/response.util");
 const { getUserByUid } = require("../services/user.service");
 
+const isUnverifiedPasswordUser = (decodedToken) =>
+  decodedToken?.firebase?.sign_in_provider === "password" &&
+  decodedToken.email_verified !== true;
+
 const verifyToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -20,7 +24,11 @@ const verifyToken = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
 
     const decodedToken =
-      await auth.verifyIdToken(token);
+      await auth.verifyIdToken(token, true);
+
+    if (isUnverifiedPasswordUser(decodedToken)) {
+      return sendError(res, 403, "Please verify your email address before continuing.");
+    }
 
     const userProfile =
       await getUserByUid(decodedToken.uid);
@@ -94,7 +102,11 @@ const verifyTokenForBootstrap = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
 
     const decodedToken =
-      await auth.verifyIdToken(token);
+      await auth.verifyIdToken(token, true);
+
+    if (isUnverifiedPasswordUser(decodedToken)) {
+      return sendError(res, 403, "Please verify your email address before continuing.");
+    }
 
     const userProfile =
       await getUserByUid(decodedToken.uid);
