@@ -2,6 +2,7 @@ const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
+const { createCorsOptions } = require("./config/cors");
 
 // Middlewares
 const { generalLimiter } = require("./middleware/rateLimiter.middleware");
@@ -31,50 +32,7 @@ app.use(helmet());
 // CORS
 // ---------------------------------------------
 
-const allowedOrigins = [
-  ...(process.env.FRONTEND_URL || "")
-    .split(",")
-    .map((origin) => origin.trim().replace(/\/$/, ""))
-    .filter(Boolean),
-];
-
-const isDevelopmentLoopbackOrigin = (origin) => {
-  if (process.env.NODE_ENV === "production") return false;
-
-  try {
-    const url = new URL(origin);
-    return (
-      url.protocol === "http:" &&
-      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
-    );
-  } catch {
-    return false;
-  }
-};
-
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Allow requests without an Origin header,
-      // such as Postman/server-to-server requests.
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (
-        allowedOrigins.includes(origin.replace(/\/$/, "")) ||
-        isDevelopmentLoopbackOrigin(origin)
-      ) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error(`CORS blocked request from origin: ${origin}`)
-      );
-    },
-    credentials: true,
-  })
-);
+app.use(cors(createCorsOptions()));
 
 app.use(express.json());
 
