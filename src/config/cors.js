@@ -7,6 +7,11 @@ const splitOrigins = (value) =>
     .map(normalizeOrigin)
     .filter(Boolean);
 
+// Public deployment identifiers for this MENRO frontend. Environment values
+// can override them if the Vercel project or team slug changes.
+const DEFAULT_VERCEL_FRONTEND_PROJECT = "menrofrontend-xxtt";
+const DEFAULT_VERCEL_FRONTEND_TEAM = "chuas-projects-310db6fd";
+
 const getConfiguredOrigins = (env = process.env) =>
   new Set([
     ...splitOrigins(env.FRONTEND_URL),
@@ -28,10 +33,12 @@ const isDevelopmentLoopbackOrigin = (origin, env = process.env) => {
 };
 
 const isAuthorizedVercelPreviewOrigin = (origin, env = process.env) => {
-  const project = String(env.VERCEL_FRONTEND_PROJECT || "")
+  const project = String(
+    env.VERCEL_FRONTEND_PROJECT || DEFAULT_VERCEL_FRONTEND_PROJECT
+  )
     .trim()
     .toLowerCase();
-  const team = String(env.VERCEL_FRONTEND_TEAM || "")
+  const team = String(env.VERCEL_FRONTEND_TEAM || DEFAULT_VERCEL_FRONTEND_TEAM)
     .trim()
     .toLowerCase();
 

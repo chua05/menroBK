@@ -46,6 +46,22 @@ test("CORS permits only this project's Vercel preview deployment pattern", () =>
     isOriginAllowed("https://attacker.vercel.app", productionEnv),
     false
   );
+
+  const renderProductionEnv = { NODE_ENV: "production" };
+  assert.equal(
+    isOriginAllowed(
+      "https://menrofrontend-xxtt-lydk6lzj3-chuas-projects-310db6fd.vercel.app",
+      renderProductionEnv
+    ),
+    true
+  );
+  assert.equal(
+    isOriginAllowed(
+      "https://menrofrontend-xxtt-lydk6lzj3-another-team.vercel.app",
+      renderProductionEnv
+    ),
+    false
+  );
 });
 
 test("CORS allows loopback development origins but not arbitrary development origins", () => {
