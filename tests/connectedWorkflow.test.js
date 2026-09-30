@@ -5,6 +5,7 @@ process.env.GUEST_INVITATION_SECRET = "test-only-guest-invitation-secret-with-su
 
 const records = new Map();
 let generated = 0;
+let transactionQueue = Promise.resolve();
 function table(name) {
   if (!records.has(name)) records.set(name, new Map());
   return records.get(name);
@@ -38,20 +39,25 @@ const db = {
       },
     };
   },
-  async runTransaction(callback) {
-    const writes = [];
-    const transaction = {
-      get: (reference) => reference.get(),
-      update(reference, value) { writes.push(["update", reference, value]); },
-      set(reference, value) { writes.push(["set", reference, value]); },
-      create(reference, value) { writes.push(["create", reference, value]); },
+  runTransaction(callback) {
+    const execute = async () => {
+      const writes = [];
+      const transaction = {
+        get: (reference) => reference.get(),
+        update(reference, value) { writes.push(["update", reference, value]); },
+        set(reference, value) { writes.push(["set", reference, value]); },
+        create(reference, value) { writes.push(["create", reference, value]); },
+      };
+      const transactionResult = await callback(transaction);
+      for (const [operation, reference, value] of writes) {
+        const target = table(reference.name);
+        if (operation === "create" && target.has(reference.id)) throw new Error("Already exists");
+        target.set(reference.id, operation === "update" ? { ...target.get(reference.id), ...value } : value);
+      }
+      return transactionResult;
     };
-    const result = await callback(transaction);
-    for (const [operation, reference, value] of writes) {
-      const target = table(reference.name);
-      if (operation === "create" && target.has(reference.id)) throw new Error("Already exists");
-      target.set(reference.id, operation === "update" ? { ...target.get(reference.id), ...value } : value);
-    }
+    const result = transactionQueue.then(execute, execute);
+    transactionQueue = result.catch(() => undefined);
     return result;
   },
 };
@@ -63,6 +69,27 @@ require.cache[firebasePath] = {
 const requestService = require("../src/services/seedlingRequest.service");
 const guestService = require("../src/services/guestEvent.service");
 const contributionService = require("../src/services/plantingContribution.service");
+const guestRoutes = require("../src/routes/guestEvent.routes");
+
+function routeResponse() {
+  return {
+    result: {},
+    status(code) { this.result.code = code; return this; },
+    json(body) { this.result.body = body; return this; },
+  };
+}
+
+async function invokeGuestContribution(headers, body) {
+  const layer = guestRoutes.stack.find((entry) =>
+    entry.route?.path === "/session/contributions" && entry.route.methods.post);
+  assert.ok(layer, "guest contribution route exists");
+  const req = { headers, body, ip: "127.0.0.1" };
+  const res = routeResponse();
+  let authenticated = false;
+  await layer.route.stack[0].handle(req, res, () => { authenticated = true; });
+  if (authenticated) await layer.route.stack.at(-1).handle(req, res);
+  return res.result;
+}
 
 function seedApproved(id, eventId, available = 250) {
   table("seedlingRequests").set(id, {
@@ -257,15 +284,21 @@ test("all authorized participants can use released event distributions with actu
   const unrelatedRes = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
   await controller.getMyDistributions({ user: { uid: "participant-unrelated" } }, unrelatedRes);
-  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), true);
+  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), false);
 });
 
-test("a different authenticated participant can submit without owning or joining the request", async () => {
+test("only the request owner or an event participant can submit planting evidence", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
-  const reportId = "event_EVT-2026-001";
-  const event = table("events").get("EVT-2026-001");
+  const eventId = "EVT-AUTH-SCOPE";
+  const requestId = "request-auth-scope";
+  const reportId = `event_${eventId}`;
+  seedApproved(requestId, eventId);
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", {
+    items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged" }],
+  });
+  const event = table("events").get(eventId);
   Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
   table("sites").set("site-1", {
     status: "active", siteName: "Site One", barangay: "Bacolod",
@@ -282,11 +315,11 @@ test("a different authenticated participant can submit without owning or joining
     })
     .toBuffer();
   const payload = {
-    distributionId: "request-1", inventoryId: "calamansi", siteId: "site-1",
+    distributionId: requestId, inventoryId: "calamansi", siteId: "site-1",
     participantId: "participant-unrelated", participantName: "Maria Santos",
     participantType: "Volunteer", participantBarangay: "Bacolod", barangay: "Bacolod",
     quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
-    eventId: "EVT-2026-001",
+    eventId,
   };
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   await assert.rejects(reportService.createPlantingReport(payload, []), /photo is required/);
@@ -297,13 +330,21 @@ test("a different authenticated participant can submit without owning or joining
   let submitted;
   try {
     await assert.rejects(
+      reportService.createPlantingReport({ ...payload, participantId: "participant-not-joined" },
+        [{ buffer: image, mimetype: "image/jpeg", originalname: "unauthorized.jpg" }]),
+      /not authorized to submit planting reports/
+    );
+    await assert.rejects(
       reportService.createPlantingReport({ ...payload, barangay: "Calmayon" },
         [{ buffer: image, mimetype: "image/jpeg", originalname: "wrong-barangay.jpg" }]),
       /does not belong to the selected barangay/
     );
+    table("eventParticipants").set("member-1", {
+      eventId, userId: "participant-unrelated",
+    });
     submitted = await reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]);
-    assert.equal(submitted.verificationStatus, "Pending Review");
+    assert.equal(submitted.verificationStatus, "Partial");
     assert.ok(submitted.submittedAt);
     assert.equal(submitted.submissions.length, 1);
     assert.equal(submitted.submissions[0].plantingDate, "2026-09-17");
@@ -325,7 +366,7 @@ test("a different authenticated participant can submit without owning or joining
     assert.equal(submitted.locationVerificationStatus, "site_match");
     const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-unrelated");
     assert.equal(mariaReports.some((report) => report.id === reportId), true);
-    assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending Review");
+    assert.equal(table("plantingReports").get(reportId).verificationStatus, "Partial");
     const secondImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "lime" } })
       .jpeg()
       .withExif({
@@ -337,9 +378,9 @@ test("a different authenticated participant can submit without owning or joining
       })
       .toBuffer();
     await assert.rejects(
-      reportService.createPlantingReport({ ...payload, participantId: "participant-3", quantityPlanted: 71 },
+      reportService.createPlantingReport({ ...payload, quantityPlanted: 71 },
         [{ buffer: secondImage, mimetype: "image/jpeg", originalname: "too-many.jpg" }]),
-      /cannot exceed the remaining released sapling quantity/
+      /Only 70 trees remain available for reporting/
     );
     await assert.rejects(reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]));
@@ -408,7 +449,7 @@ test("client device coordinates never substitute for missing photo EXIF GPS", as
   assert.equal(table("sites").get("site-outside").latitude, 12);
 });
 
-test("Take Photo accepts fresh device location without mislabeling it as EXIF", async () => {
+test("device coordinates cannot replace missing GPS in a Take Photo image", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -430,9 +471,8 @@ test("Take Photo accepts fresh device location without mislabeling it as EXIF", 
   const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "green" } })
     .jpeg().toBuffer();
   const capturedAt = new Date().toISOString();
-  let submitted;
-  try {
-    submitted = await reportService.createPlantingReport({
+  const existingContributionCount = table("plantingContributions").size;
+  await assert.rejects(reportService.createPlantingReport({
       distributionId: "request-device-photo", inventoryId: "calamansi",
       siteId: "site-device-photo", participantId: "participant-1",
       participantType: "Student / School Representative", participantBarangay: "", barangay: "Bacolod",
@@ -441,24 +481,10 @@ test("Take Photo accepts fresh device location without mislabeling it as EXIF", 
       plantingLocation: "Assigned Site", eventId: "EVT-DEVICE-PHOTO",
       locationSource: "Device Location at Capture", latitude: 12.82, longitude: 124,
       accuracy: 8, photoCapturedAt: capturedAt, locationCapturedAt: capturedAt,
-    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]);
-
-    assert.equal(submitted.verificationStatus, "Pending Review");
-    assert.equal(submitted.locationSource, "Device Location at Capture");
-    assert.equal(submitted.gpsMetadataPresent, false);
-    assert.equal(submitted.gpsValid, true);
-    assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
-    assert.equal(submitted.latitude, 12.82);
-    assert.equal(submitted.longitude, 124);
-    assert.equal(submitted.municipalityScope, "inside");
-    assert.equal(submitted.siteMatch, false);
-    assert.equal(submitted.locationVerificationStatus, "site_mismatch");
-    assert.equal(submitted.requiresStaffReview, true);
-    assert.equal(submitted.photos[0].locationSource, "Device Location at Capture");
-    assert.equal(submitted.photos[0].gpsMetadataPresent, false);
-  } finally {
-    for (const photo of submitted?.photos || []) await deletePlantingPhoto(photo.photoPath);
-  }
+    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]),
+  /GPS location metadata was not found/);
+  assert.equal(table("events").get("EVT-DEVICE-PHOTO").recordedSeedlingQuantity || 0, 0);
+  assert.equal(table("plantingContributions").size, existingContributionCount);
 });
 
 test("valid EXIF GPS outside the assigned site is preserved, flagged, and submitted", async () => {
@@ -500,7 +526,7 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
       plantingLocation: "Assigned Site", eventId: "EVT-VALID-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-original.jpg" }]);
 
-    assert.equal(submitted.verificationStatus, "Pending Review");
+    assert.equal(submitted.verificationStatus, "Partial");
     assert.equal(submitted.automatedVerificationStatus, "Flagged");
     assert.equal(submitted.gpsMetadataPresent, true);
     assert.equal(submitted.gpsValid, true);
@@ -586,9 +612,13 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
     participantName: "Requester One",
   });
   table("events").set("EVT-GUEST-SCOPE", {
-    sourceRequestId: "request-3", status: "Upcoming", name: "Planting",
+    sourceRequestId: "request-3", status: "Upcoming", name: "Planting", date: "2026-09-29",
     allocationReleasedAt: new Date(), seedlingItems: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 90 }],
-    seedlingTotalQuantity: 90,
+    seedlingTotalQuantity: 90, plantingSiteId: "site-guest-scope", barangay: "Bacolod",
+  });
+  table("sites").set("site-guest-scope", {
+    status: "active", siteName: "Guest Site", barangay: "Bacolod",
+    latitude: 12.795, longitude: 124, coverageRadiusMeters: 100,
   });
   await db.runTransaction(async (transaction) => {
     guestService.createInvitationInTransaction(transaction, "EVT-GUEST-SCOPE", "request-3", new Date());
@@ -609,22 +639,119 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   await assert.rejects(guestService.joinGuest(token, {
     fullName: "Another", contactNumber: "+639123456789",
   }), /already joined/);
-  const first = await contributionService.recordContribution(
-    "EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123"
+  const routeResult = await invokeGuestContribution(
+    { authorization: `Guest ${joined.sessionToken}` },
+    { inventoryId: "calamansi", quantity: 85, submissionKey: "submission_key_123" }
   );
+  assert.equal(routeResult.code, 201);
+  const first = routeResult.body.data;
   assert.equal(first.quantity, 85);
-  const duplicate = await contributionService.recordContribution(
-    "EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123"
+  assert.equal(first.participantId, joined.participantId);
+  assert.equal(first.eventId, "EVT-GUEST-SCOPE");
+  const duplicateResult = await invokeGuestContribution(
+    { authorization: `Guest ${joined.sessionToken}` },
+    { inventoryId: "calamansi", quantity: 85, submissionKey: "submission_key_123" }
   );
+  assert.equal(duplicateResult.code, 201);
+  const duplicate = duplicateResult.body.data;
   assert.equal(duplicate.id, first.id);
-  await assert.rejects(contributionService.recordContribution("EVT-GUEST-SCOPE", joined.participantId, "calamansi", 10), /Only 5/);
+  const invalidSessionResult = await invokeGuestContribution(
+    { authorization: "Guest invalid" },
+    { inventoryId: "calamansi", quantity: 1, submissionKey: "invalid_session_key" }
+  );
+  assert.equal(invalidSessionResult.code, 401);
+  assert.equal(invalidSessionResult.body.message, "Invalid guest session.");
+  const expiredGuest = await guestService.joinGuest(token, {
+    fullName: "Expired Guest", contactNumber: "09987654321",
+  });
+  table("eventParticipants").get(expiredGuest.participantId).expiresAt = new Date(0);
+  const expiredSessionResult = await invokeGuestContribution(
+    { authorization: `Guest ${expiredGuest.sessionToken}` },
+    { inventoryId: "calamansi", quantity: 1, submissionKey: "expired_session_key" }
+  );
+  assert.equal(expiredSessionResult.code, 401);
+  assert.match(expiredSessionResult.body.message, /expired/i);
+  assert.equal(table("events").get("EVT-GUEST-SCOPE").recordedSeedlingQuantity || 0, 0);
+  const sharp = require("sharp");
+  const evidenceImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "green" } })
+    .jpeg()
+    .withExif({
+      IFD0: { Make: "Test Camera", Model: "Guest Photo" },
+      IFD3: {
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
+        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+      },
+    })
+    .toBuffer();
+  const { attachEvidence } = require("../src/services/plantingEvidence.service");
+  await attachEvidence("EVT-GUEST-SCOPE", joined.participantId, first.id,
+    [{ buffer: evidenceImage, mimetype: "image/jpeg", originalname: "guest-original.jpg" }]);
+  const excessiveResult = await invokeGuestContribution(
+    { authorization: `Guest ${joined.sessionToken}` },
+    { inventoryId: "calamansi", quantity: 10, submissionKey: "excess_quantity_key" }
+  );
+  assert.equal(excessiveResult.code, 400);
+  assert.match(excessiveResult.body.message, /Only 5 seedlings remain available/);
   assert.equal(table("events").get("EVT-GUEST-SCOPE").recordedSeedlingQuantity, 85);
-  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").verificationStatus, "Pending");
+  assert.equal(table("plantingContributions").get(first.id).staffReviewStatus, "Pending Review");
+  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").reportingProgress, "Partial");
   assert.equal(table("plantingContributions").get(first.id).reportId, "event_EVT-GUEST-SCOPE");
   table("plantingContributions").get(first.id).photos = [{ imageHash: "guest-only-photo" }];
   const parentService = require("../src/services/parentPlantingReport.service");
   await assert.rejects(parentService.finalizeParent("event_EVT-GUEST-SCOPE", "participant-1"), /Planting evidence photos/);
-  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").verificationStatus, "Pending");
+  assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").reportingProgress, "Partial");
+});
+
+test("concurrent guest evidence submissions cannot exceed the released allocation", async () => {
+  const sharp = require("sharp");
+  const { attachEvidence } = require("../src/services/plantingEvidence.service");
+  const eventId = "EVT-GUEST-CONCURRENT";
+  table("seedlingRequests").set("request-guest-concurrent", {
+    participantId: "owner-concurrent", status: "Approved", eventId,
+  });
+  table("events").set(eventId, {
+    sourceRequestId: "request-guest-concurrent", status: "Upcoming", date: "2026-09-30",
+    allocationReleasedAt: new Date(), plantingSiteId: "site-guest-concurrent", barangay: "Bacolod",
+    seedlingItems: [{ inventoryId: "narra", species: "Narra", quantity: 10 }],
+    seedlingTotalQuantity: 10,
+  });
+  table("sites").set("site-guest-concurrent", {
+    status: "active", siteName: "Concurrent Site", barangay: "Bacolod",
+    latitude: 12.795, longitude: 124, coverageRadiusMeters: 100,
+  });
+  for (const guestId of ["guest-concurrent-a", "guest-concurrent-b"]) {
+    table("eventParticipants").set(guestId, {
+      eventId, participantType: "guest", fullName: guestId,
+    });
+  }
+  const [first, second] = await Promise.all([
+    contributionService.recordContribution(eventId, "guest-concurrent-a", "narra", 10, "concurrent_key_a"),
+    contributionService.recordContribution(eventId, "guest-concurrent-b", "narra", 10, "concurrent_key_b"),
+  ]);
+  const makeImage = (background, model) => sharp({
+    create: { width: 5, height: 5, channels: 3, background },
+  }).jpeg().withExif({
+    IFD0: { Make: "Test Camera", Model: model },
+    IFD3: {
+      GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
+      GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+    },
+  }).toBuffer();
+  const [firstImage, secondImage] = await Promise.all([
+    makeImage("red", "Concurrent A"), makeImage("blue", "Concurrent B"),
+  ]);
+  const results = await Promise.allSettled([
+    attachEvidence(eventId, "guest-concurrent-a", first.id,
+      [{ buffer: firstImage, mimetype: "image/jpeg", originalname: "concurrent-a.jpg" }]),
+    attachEvidence(eventId, "guest-concurrent-b", second.id,
+      [{ buffer: secondImage, mimetype: "image/jpeg", originalname: "concurrent-b.jpg" }]),
+  ]);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.match(results.find((result) => result.status === "rejected").reason.message,
+    /remaining reportable quantity|no longer accepting evidence/);
+  assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 10);
+  assert.equal(table("plantingReports").get(`event_${eventId}`).activeSubmittedQuantity, 10);
 });
 
 test("one parent groups multiple contributors and separate events get separate parents", async () => {
@@ -658,6 +785,12 @@ test("one parent groups multiple contributors and separate events get separate p
   const three = await contributionService.recordContribution("EVT-2026-005", "requester-5", "calamansi", 7);
   assert.equal(one.reportId, two.reportId);
   assert.notEqual(one.reportId, three.reportId);
+  table("plantingContributions").get(one.id).photos = [
+    { imageHash: `${one.id}-hash`, automatedStatus: "Flagged" },
+  ];
+  table("plantingContributions").get(two.id).photos = [
+    { imageHash: `${two.id}-hash`, automatedStatus: "Passed Automated Check" },
+  ];
   const details = await parentService.reportDetails(one.reportId, table("plantingReports").get(one.reportId));
   assert.equal(details.submissions.length, 2);
   assert.equal(details.contributorCount, 2);
@@ -669,18 +802,20 @@ test("one parent groups multiple contributors and separate events get separate p
   assert.equal(participants.find((entry) => entry.id === "guest-4").quantityPlanted, 5);
   assert.equal(JSON.stringify(participants).includes("09123456789"), false);
   await assert.rejects(parentService.finalizeParent(one.reportId, "other"), /Planting evidence photos/);
+  const requesterPhotos = table("plantingContributions").get(one.id).photos;
+  table("plantingContributions").get(one.id).photos = [];
   await assert.rejects(parentService.finalizeParent(one.reportId, "same-requester"), /evidence photos/);
-  table("plantingContributions").get(one.id).photos = [
-    { imageHash: `${one.id}-hash`, automatedStatus: "Flagged" },
-  ];
-  assert.equal(table("plantingContributions").get(two.id).photos, undefined);
+  table("plantingContributions").get(one.id).photos = requesterPhotos;
   const finalized = await parentService.finalizeParent(one.reportId, "same-requester");
-  assert.equal(finalized.verificationStatus, "Pending Review");
+  assert.equal(finalized.reportingProgress, "Partial");
   const plantingReportService = require("../src/services/plantingReport.service");
-  const approved = await plantingReportService.approvePlantingReport(one.reportId, "staff-1", "", "MENRO Staff");
-  assert.equal(approved.verificationStatus, "Approved");
-  await assert.rejects(contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1),
-    /already been finalized/);
+  Object.assign(table("plantingContributions").get(one.id), {
+    verificationStatus: "Needs Review", staffReviewStatus: "Pending Review",
+  });
+  const reviewed = await plantingReportService.approvePlantingReport(one.id, "staff-1", "", "MENRO Staff");
+  assert.equal(reviewed.reportingProgress, "Partial");
+  const additional = await contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1);
+  assert.equal(additional.quantity, 1);
   assert.equal(table("plantingReports").get(three.reportId).verificationStatus, "Pending");
 });
 

@@ -167,19 +167,19 @@ router.get(
 // STAFF FINAL APPROVAL
 router.patch("/:id/finalize", verifyToken, authorizeRoles("participant"), finalizeReport);
 
-// STAFF FINAL APPROVAL
+// STAFF / ADMIN FINAL APPROVAL
 router.patch(
   "/:id/approve",
   verifyToken,
-  authorizeRoles("staff"),
+  authorizeRoles("staff", "admin"),
   approveReport
 );
 
-// STAFF FINAL REJECTION
+// STAFF / ADMIN FINAL REJECTION
 router.patch(
   "/:id/reject",
   verifyToken,
-  authorizeRoles("staff"),
+  authorizeRoles("staff", "admin"),
   rejectReport
 );
 

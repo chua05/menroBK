@@ -66,10 +66,13 @@ router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), as
     );
     return sendSuccess(res, 201, "Contribution recorded", data);
   } catch (error) {
-    if (error.message.startsWith("Only ") || error.message.includes("required") ||
+    if (error.message.startsWith("Only ") || error.message.includes("remaining reportable quantity") ||
+      error.message.includes("required") ||
         error.message.includes("not allocated") || error.message.includes("not been released") ||
         error.message === "Event participation not found.") {
-      return sendError(res, 400, error.message);
+        return sendError(res, 400, error.message);
+      } else if (error.message.includes("not authorized") || error.message.includes("available planting quantity")) {
+        return sendError(res, 400, error.message);
     }
     console.error(error);
     return sendError(res, 500, "Failed to record contribution.");
@@ -82,11 +85,11 @@ router.post("/:id/contributions/:contributionId/evidence", verifyToken,
     try {
       const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);
       const data = await attachEvidence(req.params.id, participantId,
-        req.params.contributionId, req.files, req.body);
+        req.params.contributionId, req.files);
       return sendSuccess(res, 200, "Planting evidence recorded", data);
     } catch (error) {
-      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates/i
-        .test(error.message);
+      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Juban|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
+          .test(error.message);
       if (!expected) console.error(error);
       return sendError(res, expected ? 400 : 500,
         expected ? error.message : "Failed to record planting evidence.");

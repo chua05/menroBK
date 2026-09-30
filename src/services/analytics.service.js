@@ -1,10 +1,11 @@
 const { db } = require("../config/firebase");
 
 const COLLECTIONS = [
-  "distributions", "events", "plantingReports", "plantingContributions",
+  "seedlingInventory", "distributions", "events", "plantingReports", "plantingContributions",
   "monitoringRecords", "sites",
 ];
 const CONDITION_NAMES = ["Healthy", "Damaged", "Dead"];
+const LOW_SURVIVAL_THRESHOLD = 70;
 const text = (value) => String(value || "").trim();
 const key = (value) => text(value).toLocaleLowerCase();
 const number = (value) => {
@@ -147,20 +148,28 @@ async function getDashboard(rawFilters = {}) {
     const context = reportContext(report);
     const contributions = contributionsByReport.get(report.id) || [];
     if (contributions.length) {
-      for (const contribution of contributions) plantingActivities.push({
+      for (const contribution of contributions.filter((entry) => entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid")) plantingActivities.push({
         reportId: report.id, quantity: number(contribution.quantity),
         date: contribution.recordedAt || contribution.plantingDate || report.plantingDate || report.eventDate,
         ...context, species: contribution.species || context.species,
-        verificationStatus: report.verificationStatus,
+        verificationStatus: contribution.verificationStatus || report.verificationStatus,
+        staffReviewStatus: contribution.staffReviewStatus || "",
+        reportingProgress: report.reportingProgress,
+        accounted: contribution.staffReviewStatus === "Accepted" ||
+          (contribution.verificationStatus === "Verified" &&
+            ["", "Not Required", "Accepted"].includes(contribution.staffReviewStatus || "")) ||
+          (!contribution.verificationStatus && !contribution.staffReviewStatus &&
+            (report.verificationStatus === "Approved" || report.reportingProgress === "Completed")),
       });
     } else if (report.reportType !== "parent") {
       plantingActivities.push({ reportId: report.id, quantity: number(report.quantityPlanted),
         date: report.plantingDate || report.eventDate || report.submittedAt || report.createdAt,
-        ...context, verificationStatus: report.verificationStatus });
+        ...context, verificationStatus: report.verificationStatus, reportingProgress: report.reportingProgress,
+        accounted: report.verificationStatus === "Approved" || report.reportingProgress === "Completed" });
     }
   }
   const filteredRecordedPlanting = plantingActivities.filter((item) => matches(item, filters));
-  const filteredPlanting = filteredRecordedPlanting.filter((item) => item.verificationStatus === "Approved");
+  const filteredPlanting = filteredRecordedPlanting.filter((item) => item.accounted === true);
 
   const distributionActivities = [];
   for (const distribution of records.distributions.filter((item) => item.archived !== true && key(item.status || "Released") === "released")) {
@@ -186,7 +195,7 @@ async function getDashboard(rawFilters = {}) {
   });
   const lifecycleReportIds = new Set(monitoringLifecycles.map((record) => record.plantingReportId).filter(Boolean));
   for (const report of records.plantingReports) {
-    if (report.archived === true || report.verificationStatus !== "Approved" || lifecycleReportIds.has(report.id)) continue;
+    if (report.archived === true || (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || lifecycleReportIds.has(report.id)) continue;
     const baseDate = dateOnly(report.plantingDate || report.eventDate);
     if (!baseDate) continue;
     monitoringLifecycles.push({
@@ -211,10 +220,14 @@ async function getDashboard(rawFilters = {}) {
   const monitoredTotal = sum(latestMonitoring, (entry) => entry.total);
   const survivingTotal = sum(latestMonitoring, (entry) => entry.healthy + entry.damaged);
 
-  const approvedReports = records.plantingReports.filter((report) => report.archived !== true && report.verificationStatus === "Approved" &&
-    matches({ ...reportContext(report), date: report.approvedAt || report.reviewedAt || report.updatedAt }, filters));
+  const accountedReportIds = new Set(filteredPlanting.map((item) => item.reportId));
+  const approvedReports = records.plantingReports.filter((report) => report.archived !== true &&
+    (accountedReportIds.has(report.id) ||
+      (!(contributionsByReport.get(report.id) || []).length &&
+        (report.verificationStatus === "Approved" || report.reportingProgress === "Completed"))) &&
+    matches({ ...reportContext(report), date: report.approvedAt || report.reviewedAt || report.updatedAt || report.createdAt }, filters));
   const activityScopedSiteIds = new Set(filteredPlanting.map((item) => item.siteId).filter(Boolean));
-  const activityScopeRequired = Boolean(filters.dateFrom || filters.dateTo || (filters.species && filters.species !== "All"));
+  const activityScopeRequired = Boolean(filters.species && filters.species !== "All");
   const activeSites = records.sites.filter((site) => site.archived !== true &&
     !["inactive", "archived", "closed"].includes(key(site.status || "active")) &&
     matches({ barangay: site.barangay, siteId: site.id, siteName: site.siteName || site.name }, filters, { useDate: false }) &&
@@ -240,6 +253,12 @@ async function getDashboard(rawFilters = {}) {
     Dead: sum(latestMonitoring, (entry) => entry.dead),
   };
   const species = new Map();
+  for (const item of records.seedlingInventory) {
+    const name = text(item.species || item.commonName || item.seedlingName || item.name);
+    if (name && (!filters.species || filters.species === "All" || key(name) === key(filters.species))) {
+      species.set(name, { planted: 0, monitored: 0, survived: 0 });
+    }
+  }
   for (const item of filteredPlanting) if (text(item.species)) {
     const row = species.get(item.species) || { planted: 0, monitored: 0, survived: 0 };
     row.planted += item.quantity;
@@ -252,6 +271,9 @@ async function getDashboard(rawFilters = {}) {
     species.set(entry.species, row);
   }
   const barangayRows = new Map();
+  for (const site of activeSites) if (text(site.barangay)) {
+    barangayRows.set(site.barangay, { planted: 0, healthy: 0, damaged: 0, dead: 0, surviving: 0, total: 0 });
+  }
   for (const item of filteredPlanting) if (text(item.barangay)) {
     const row = barangayRows.get(item.barangay) || { planted: 0, healthy: 0, damaged: 0, dead: 0, surviving: 0, total: 0 };
     row.planted += item.quantity;
@@ -279,23 +301,56 @@ async function getDashboard(rawFilters = {}) {
     else if (status === "Not Yet Available" || status === "Next Monitoring Scheduled") lifecycleCounts.monitoringNotYetEligible += 1;
     else lifecycleCounts.monitoringEligible += 1;
   }
-  const pendingPlantingReports = records.plantingReports.filter((report) => report.archived !== true &&
-    ["Pending Review", "Reviewed", "Flagged", "Passed Automated Check"].includes(report.verificationStatus) &&
-    matches({ ...reportContext(report), date: report.submittedAt || report.updatedAt || report.createdAt }, filters)).length;
+  const reviewableContributions = records.plantingContributions.filter((contribution) => {
+    const report = reportById.get(contribution.reportId);
+    if (!report || report.archived === true) return false;
+    return matches({
+      ...reportContext(report),
+      species: contribution.species || report.species || "",
+      date: contribution.recordedAt || contribution.submittedAt || report.submittedAt || report.createdAt,
+    }, filters);
+  });
+  const pendingPlantingReports = reviewableContributions.filter((contribution) =>
+    contribution.verificationStatus === "Needs Review" &&
+    contribution.staffReviewStatus === "Pending Review").length +
+    records.plantingReports.filter((report) => report.archived !== true &&
+      (report.reportType !== "parent" || !(contributionsByReport.get(report.id) || []).length) &&
+      ["Pending Review", "Reviewed", "Flagged", "Passed Automated Check", "Needs Review"].includes(report.verificationStatus) &&
+      matches({ ...reportContext(report), date: report.submittedAt || report.updatedAt || report.createdAt }, filters)).length;
   const totalReleased = sum(filteredDistributions, (item) => item.quantity);
   const totalPlanted = sum(filteredPlanting, (item) => item.quantity);
   const totalRecordedPlanted = sum(filteredRecordedPlanting, (item) => item.quantity);
-  const rejectedReports = records.plantingReports.filter((report) => report.archived !== true &&
+  const rejectedReports = reviewableContributions.filter((contribution) =>
+    contribution.staffReviewStatus === "Rejected").length +
+    records.plantingReports.filter((report) => report.archived !== true &&
+      (report.reportType !== "parent" || !(contributionsByReport.get(report.id) || []).length) &&
     report.verificationStatus === "Rejected" &&
     matches({ ...reportContext(report), date: report.rejectedAt || report.reviewedAt || report.updatedAt }, filters)).length;
-  const approvalDurations = approvedReports.map((report) => {
+  const reviewedContributions = reviewableContributions.filter((contribution) =>
+    contribution.staffReviewStatus === "Accepted");
+  const approvalDurations = [...reviewedContributions.map((contribution) => {
+    const started = dateValue(contribution.recordedAt || contribution.submittedAt || contribution.createdAt);
+    const ended = dateValue(contribution.reviewedAt || contribution.acceptedAt);
+    return !started || !ended || ended < started ? null : (ended - started) / 3_600_000;
+  }), ...approvedReports.filter((report) => !(contributionsByReport.get(report.id) || []).length).map((report) => {
     const started = dateValue(report.submittedAt || report.createdAt);
     const ended = dateValue(report.approvedAt || report.reviewedAt);
     return !started || !ended || ended < started
       ? null : (ended - started) / 3_600_000;
-  }).filter((value) => value !== null);
+  })].filter((value) => value !== null);
 
-  const siteMap = activeSites.map((site) => ({
+  const siteMap = activeSites.map((site) => {
+    const sitePlanting = filteredPlanting.filter((item) => item.siteId === site.id);
+    const siteMonitoring = latestMonitoring.filter((entry) => entry.siteId === site.id);
+    const planted = sum(sitePlanting, (item) => item.quantity);
+    const monitored = sum(siteMonitoring, (entry) => entry.total);
+    const surviving = sum(siteMonitoring, (entry) => entry.healthy + entry.damaged);
+    const damaged = sum(siteMonitoring, (entry) => entry.damaged);
+    const dead = sum(siteMonitoring, (entry) => entry.dead);
+    const treeCondition = monitored <= 0 ? "Not Yet Monitored"
+      : dead === monitored ? "Critical"
+        : damaged > 0 || dead > 0 ? "Needs Attention" : "Healthy";
+    return ({
     id: site.id,
     siteId: site.siteId || site.id,
     siteName: site.siteName || site.name || site.id,
@@ -305,11 +360,11 @@ async function getDashboard(rawFilters = {}) {
     polygon: Array.isArray(site.polygon) ? site.polygon : [],
     coverageRadiusMeters: number(site.coverageRadiusMeters),
     maximumCapacity: number(site.maximumCapacity),
-    planted: number(site.planted),
-    treeCondition: site.treeCondition || "Not Yet Monitored",
-    survivalRate: site.survivalRate ?? null,
+    planted,
+    treeCondition,
+    survivalRate: monitored > 0 ? Number(((surviving / monitored) * 100).toFixed(2)) : null,
     status: site.status || "active",
-  }));
+  }); });
   const barangayOptions = new Set();
   const speciesOptions = new Set();
   for (const site of records.sites) if (text(site.barangay)) barangayOptions.add(site.barangay);
@@ -317,20 +372,31 @@ async function getDashboard(rawFilters = {}) {
     if (text(activity.barangay)) barangayOptions.add(activity.barangay);
     if (text(activity.species)) speciesOptions.add(activity.species);
   }
+  for (const item of records.seedlingInventory) {
+    const name = text(item.species || item.commonName || item.seedlingName || item.name);
+    if (name) speciesOptions.add(name);
+  }
+
+  const lowSurvivalBarangays = [...barangayRows.entries()].filter(([, row]) => row.total > 0 &&
+    (row.surviving / row.total) * 100 < LOW_SURVIVAL_THRESHOLD).map(([barangay, row]) => ({
+      barangay,
+      rate: Number(((row.surviving / row.total) * 100).toFixed(2)),
+    })).sort((a, b) => a.rate - b.rate);
+  const periods = monthBuckets(filters);
 
   return {
     summary: {
       totalSaplingsDistributed: totalReleased, totalTreesPlanted: totalPlanted,
-      overallSurvivalRate: monitoredTotal > 0 ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2)) : null,
+      overallSurvivalRate: monitoredTotal > 0 ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2)) : 0,
       verifiedPlantingReports: approvedReports.length,
-      barangaysCovered: new Set(approvedReports.map((report) => text(reportContext(report).barangay)).filter(Boolean)).size,
+      barangaysCovered: new Set(filteredPlanting.map((item) => text(item.barangay)).filter(Boolean)).size,
       activePlantingSites: activeSites.length,
     },
-    plantingTrend: [...plantingByMonth.entries()].sort(([a], [b]) => a.localeCompare(b))
-      .map(([period, count]) => ({ period: monthLabel(period), count })),
-    survivalTrend: [...survivalByMonth.entries()].sort(([a], [b]) => a.localeCompare(b))
-      .filter(([, row]) => row.total > 0)
-      .map(([period, row]) => ({ period: monthLabel(period), rate: Number(((row.surviving / row.total) * 100).toFixed(2)) })),
+    plantingTrend: periods.map((period) => ({ period: period.period, count: plantingByMonth.get(period.key) || 0 })),
+    survivalTrend: periods.map((period) => {
+      const row = survivalByMonth.get(period.key);
+      return { period: period.period, rate: row?.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : 0 };
+    }),
     monitoringConditions: CONDITION_NAMES.map((condition) => ({ condition, count: conditions[condition] || 0 })),
     speciesDistribution: [...species.entries()].map(([name, row]) => ({
       species: name, planted: row.planted, monitored: row.monitored, survived: row.survived,
@@ -364,6 +430,8 @@ async function getDashboard(rawFilters = {}) {
       releasedQuantity: totalReleased, recordedPlantedQuantity: totalRecordedPlanted,
       verifiedPlantedQuantity: totalPlanted,
       distributionPlantingDifference: Math.max(0, totalReleased - totalPlanted),
+      lowSurvivalThreshold: LOW_SURVIVAL_THRESHOLD,
+      lowSurvivalBarangays,
     },
     options: {
       barangays: [...barangayOptions].sort((a, b) => a.localeCompare(b)),

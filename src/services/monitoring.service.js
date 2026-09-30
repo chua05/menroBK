@@ -142,7 +142,7 @@ async function createMonitoringRecord(data) {
   const reportDoc = await reportRef.get();
   if (!reportDoc.exists) throw new Error("Planting report not found.");
   const report = { id: reportDoc.id, ...reportDoc.data() };
-  if (report.verificationStatus !== "Approved") throw new Error("Only approved planting reports can be monitored.");
+  if (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") throw new Error("Only completed planting reports can be monitored.");
   if (data.requesterRole === "participant" && report.participantId !== data.monitoredBy) {
     throw new Error("You can only monitor your own approved planting reports.");
   }
@@ -305,7 +305,7 @@ async function getMonitoringRecordsByParticipantId(participantId) {
   const byReport = new Map(existing.map((record) => [record.plantingReportId, record]));
   for (const doc of reportSnapshot.docs) {
     const report = { id: doc.id, ...doc.data() };
-    if (report.verificationStatus !== "Approved" || byReport.has(doc.id)) continue;
+    if ((report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || byReport.has(doc.id)) continue;
     try {
       const id = lifecycleId(participantId, doc.id, report.eventId || "", report.siteId || "");
       byReport.set(doc.id, present(baseLifecycle(id, report)));

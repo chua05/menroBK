@@ -108,8 +108,9 @@ test("municipality scope uses the Juban barangay polygons", () => {
   assert.equal(isPointInGeoJsonFeatureCollection(14, 123.5, jubanBarangayBoundaries), false);
 });
 
-test("evidence stays with its contributor and records real missing-metadata findings", async () => {
-  table("events").set("event-1", { latitude: 12.1, longitude: 124.1 });
+test("evidence stays scoped to its contributor and missing photo GPS is blocked", async () => {
+  table("events").set("event-1", { date: "2026-09-17", plantingSiteId: "site-1" });
+  table("sites").set("site-1", { latitude: 12.795, longitude: 124, coverageRadiusMeters: 20 });
   table("plantingReports").set("event_event-1", { verificationStatus: "Draft" });
   table("plantingContributions").set("contribution-1", {
     eventId: "event-1", participantId: "guest-1", reportId: "event_event-1", quantity: 5,
@@ -120,16 +121,8 @@ test("evidence stays with its contributor and records real missing-metadata find
   await assert.rejects(attachEvidence("event-1", "guest-2", "contribution-1", [file], {
     plantingDate: "2026-09-17", latitude: 12.1, longitude: 124.1,
   }), /not found/);
-  const result = await attachEvidence("event-1", "guest-1", "contribution-1", [file], {
-    plantingDate: "2026-09-17", latitude: 12.1, longitude: 124.1,
-  });
-  assert.equal(result.photos.length, 1);
-  assert.equal(result.automatedVerificationStatus, "Flagged");
-  assert.ok(result.suspiciousFlags.includes("GPS_METADATA_MISSING"));
-  assert.ok(result.suspiciousFlags.includes("TIMESTAMP_METADATA_MISSING"));
-  assert.equal(result.participantId, "guest-1");
-  assert.equal(table("plantingEvidenceHashes").size, 1);
   await assert.rejects(attachEvidence("event-1", "guest-1", "contribution-1", [file], {
     plantingDate: "2026-09-17", latitude: 12.1, longitude: 124.1,
-  }), /Duplicate|unavailable/);
+  }), /No GPS Metadata/);
+  assert.equal(table("plantingEvidenceHashes").size, 0);
 });

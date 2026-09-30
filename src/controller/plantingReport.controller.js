@@ -83,13 +83,6 @@ const submitPlantingReport = async (
       eventId,
       eventName,
 
-      locationSource,
-      latitude,
-      longitude,
-      accuracy,
-      photoCapturedAt,
-      locationCapturedAt,
-
       remarks,
     } = req.body || {};
 
@@ -208,15 +201,6 @@ const submitPlantingReport = async (
           eventName:
             eventName || "",
 
-          locationSource:
-            locationSource || "Photo Metadata (EXIF)",
-
-          latitude,
-          longitude,
-          accuracy,
-          photoCapturedAt,
-          locationCapturedAt,
-
           remarks:
             remarks || "",
         },
@@ -230,20 +214,16 @@ const submitPlantingReport = async (
     let message =
       "Planting report submitted successfully.";
 
-    if (
-      report.automatedVerificationStatus ===
-      "Passed Automated Check"
-    ) {
-      message =
-        "Planting report submitted successfully and passed the automated verification check.";
-    }
-
-    if (
-      report.automatedVerificationStatus ===
-      "Flagged"
-    ) {
-      message =
-        "Planting report submitted successfully, but some verification checks were flagged for staff review.";
+    const newestSubmission = (report.submissions || [])
+      .filter((submission) => (submission.contributorId || submission.participantId) === participantId)
+      .sort((left, right) => {
+        const leftTime = left.recordedAt?.toMillis?.() || 0;
+        const rightTime = right.recordedAt?.toMillis?.() || 0;
+        return rightTime - leftTime;
+      })[0];
+    if (newestSubmission?.verificationStatus === "Needs Review" ||
+      (report.reportType !== "parent" && report.verificationStatus === "Needs Review")) {
+      message = "Planting report submitted successfully and is pending MENRO Staff review.";
     }
 
 
@@ -267,6 +247,7 @@ const submitPlantingReport = async (
       "Only released distributions can have planting reports.",
       "Please enter a valid quantity of planted saplings.",
       "The quantity planted cannot exceed the remaining released sapling quantity.",
+      "You are not authorized to submit planting reports for this event.",
       "The linked distribution has an invalid released quantity.",
       "A planting report already exists for this distribution.",
       "Duplicate planting image detected.",
@@ -298,11 +279,12 @@ const submitPlantingReport = async (
       "The selected planting event does not belong to the selected planting site.",
       "The selected planting event does not belong to the selected barangay.",
       "Your photo is outside the Municipality of Juban coverage area. Please use a photo taken within Juban and try again.",
+      "Photo capture timestamp is in the future and cannot be verified.",
     ];
 
     const statusCode = notFoundErrors.includes(error.message)
       ? 404
-      : validationErrors.includes(error.message)
+      : validationErrors.includes(error.message) || error.message.startsWith("Quantity exceeds the remaining reportable quantity.")
       ? 400
       : 500;
 
@@ -331,7 +313,10 @@ const getPlantingReports = async (
       distributionId,
     } = req.query;
 
-    if (verificationStatus && !["Draft", "Pending", "Pending Review", "Approved", "Rejected"].includes(verificationStatus)) {
+    if (verificationStatus && ![
+      "Awaiting Submission", "Partial", "Fully Reported — Awaiting Review", "Completed",
+      "Verified", "Needs Review", "Invalid", "Not Required", "Pending Review", "Accepted", "Rejected",
+    ].includes(verificationStatus)) {
       return res.status(400).json({ success: false, message: "Invalid planting report status filter." });
     }
 
@@ -463,7 +448,8 @@ const approveReport = async (
         id,
         approvedBy,
         remarks,
-        req.user.fullName
+        req.user.fullName,
+        req.user.role
       );
 
     return res.status(200).json({
@@ -521,7 +507,8 @@ const rejectReport = async (
         id,
         rejectedBy,
         remarks,
-        req.user.fullName
+        req.user.fullName,
+        req.user.role
       );
 
     return res.status(200).json({

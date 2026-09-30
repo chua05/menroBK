@@ -341,10 +341,11 @@ const getDistributionsByParticipantId =
 // Planting-report eligibility is event/distribution based, not requester based.
 // The route remains participant-only, while every released distribution tied to
 // a usable planting event is available for recording actual planting activity.
-const getEligibleDistributionsForParticipant = async () => {
-  const [distributionSnapshot, eventSnapshot] = await Promise.all([
+const getEligibleDistributionsForParticipant = async (participantId) => {
+  const [distributionSnapshot, eventSnapshot, participantSnapshot] = await Promise.all([
     distributionCollection.get(),
     db.collection("events").get(),
+    db.collection("eventParticipants").get(),
   ]);
 
   const usableEvents = new Map(
@@ -358,6 +359,12 @@ const getEligibleDistributionsForParticipant = async () => {
       })
       .map((event) => [event.id, event])
   );
+  const participantEventIds = new Set(participantSnapshot.docs
+    .map((doc) => doc.data())
+    .filter((participant) => participant.userId === participantId ||
+      participant.participantId === participantId)
+    .map((participant) => participant.eventId)
+    .filter(Boolean));
 
   return distributionSnapshot.docs
     .map((doc) => ({ id: doc.id, ...doc.data() }))
@@ -365,8 +372,10 @@ const getEligibleDistributionsForParticipant = async () => {
       if (distribution.status !== "Released") return false;
       const event = usableEvents.get(String(distribution.eventId || ""));
       if (!event || !event.allocationReleasedAt || !event.plantingSiteId) return false;
-      return !event.sourceRequestId ||
+      const eventRequestMatches = !event.sourceRequestId ||
         String(event.sourceRequestId) === String(distribution.requestId || distribution.id);
+      const isRequester = distribution.participantId === participantId;
+      return eventRequestMatches && (isRequester || participantEventIds.has(event.id));
     });
 };
 

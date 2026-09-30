@@ -284,6 +284,7 @@ async function getEventParticipants(eventId) {
   const byParticipant = new Map();
   for (const doc of contributionSnapshot.docs) {
     const entry = doc.data();
+    if (!Array.isArray(entry.photos) || entry.photos.length === 0 || entry.staffReviewStatus === "Rejected") continue;
     const value = byParticipant.get(entry.participantId) || { quantityPlanted: 0, submissionCount: 0 };
     value.quantityPlanted += Number(entry.quantity || 0);
     value.submissionCount += 1;

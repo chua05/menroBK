@@ -107,15 +107,28 @@ const workflowStatus = (status) =>
 
 const withWorkflowStatus = (doc) => {
   const data = doc.data();
+  const rawStatus = String(data.verificationStatus || "").trim();
   const legacyAutomatedStatus = ["Flagged", "Passed Automated Check"]
-    .includes(data.verificationStatus)
-    ? data.verificationStatus
+    .includes(rawStatus)
+    ? rawStatus
     : undefined;
+  const needsReview = ["Flagged", "Reviewed", "Pending Review"]
+    .includes(rawStatus) || data.automatedVerificationStatus === "Flagged";
+  const verificationStatus = ["Verified", "Needs Review", "Invalid"].includes(rawStatus)
+    ? rawStatus
+    : needsReview ? "Needs Review" : "Verified";
+  const rawReviewStatus = String(data.staffReviewStatus || rawStatus).trim();
+  const staffReviewStatus = ["Not Required", "Pending Review", "Accepted", "Rejected"]
+    .includes(data.staffReviewStatus)
+    ? data.staffReviewStatus
+    : rawReviewStatus === "Rejected" ? "Rejected"
+      : ["Approved", "Accepted"].includes(rawReviewStatus) ? "Accepted"
+        : verificationStatus === "Verified" ? "Not Required" : "Pending Review";
   return {
     id: doc.id,
     ...data,
-    verificationStatus: data.reportType === "parent" && data.verificationStatus === "Draft"
-      ? "Pending" : workflowStatus(data.verificationStatus),
+    verificationStatus,
+    staffReviewStatus,
     ...(data.automatedVerificationStatus === undefined && legacyAutomatedStatus
       ? { automatedVerificationStatus: legacyAutomatedStatus }
       : {}),
@@ -423,16 +436,6 @@ const createPlantingReport = async (
     );
   }
 
-  if (
-    quantityPlanted >
-    quantityReleased
-  ) {
-    throw new Error(
-      "The quantity planted cannot exceed the remaining released sapling quantity."
-    );
-  }
-
-
   // --------------------------------
   // 6. ONE REPORT PER DISTRIBUTION
   // --------------------------------
@@ -640,6 +643,10 @@ if (submittedEventId) {
 
 }
 
+if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
+  throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${quantityReleased} trees remain available for reporting.`);
+}
+
 
   // --------------------------------
   // 12. VALIDATE ALL PHOTOS
@@ -760,6 +767,10 @@ if (submittedEventId) {
           data.plantingDate,
         metadata: verificationMetadata,
       });
+
+    if (photoVerification.suspiciousFlags.includes("FUTURE_IMAGE_TIMESTAMP")) {
+      throw new Error("Photo capture timestamp is in the future and cannot be verified.");
+    }
 
 
     // Create a new array so
@@ -1385,7 +1396,8 @@ if (submittedEventId) {
         automatedStatus,
 
       verificationStatus:
-        "Pending Review",
+        submissionVerificationStatus,
+      staffReviewStatus: submissionStaffReviewStatus,
 
 
       reviewedBy: "",
@@ -1428,13 +1440,27 @@ if (submittedEventId) {
         const eventDoc = await transaction.get(eventRef);
         if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
         const event = eventDoc.data();
+        const requestDoc = event.sourceRequestId
+          ? await transaction.get(db.collection("seedlingRequests").doc(event.sourceRequestId))
+          : null;
+        const membershipSnapshot = await transaction.get(db.collection("eventParticipants")
+          .where("eventId", "==", submittedEventId));
+        const isRequester = requestDoc?.exists && requestDoc.data().participantId === data.participantId;
+        const isEventParticipant = membershipSnapshot.docs.some((doc) => {
+          const participant = doc.data();
+          return participant.userId === data.participantId || participant.participantId === data.participantId;
+        });
+        if (!isRequester && !isEventParticipant) {
+          throw new Error("You are not authorized to submit planting reports for this event.");
+        }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
           throw new Error("Sapling tree item has not been released for this event.");
         }
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
-        if (current + quantityPlanted > Number(currentAllocation.quantity)) {
-          throw new Error("The quantity planted cannot exceed the remaining released sapling quantity.");
+        const remaining = Math.max(0, Number(currentAllocation.quantity) - current);
+        if (quantityPlanted > remaining) {
+          throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
         }
         parentId = `event_${submittedEventId}`;
         const hashDocs = await Promise.all(uploadedPhotos.map((photo) =>
@@ -1442,19 +1468,21 @@ if (submittedEventId) {
         if (hashDocs.some((doc) => doc.exists)) {
           throw new Error("Duplicate planting image detected.");
         }
+        const initialProgress = quantityPlanted >= Number(event.seedlingTotalQuantity || 0) &&
+          submissionStaffReviewStatus === "Pending Review"
+          ? "Fully Reported — Awaiting Review"
+          : quantityPlanted >= Number(event.seedlingTotalQuantity || 0)
+            ? "Completed" : "Partial";
         const parent = await parentForEventInTransaction(
-          transaction, submittedEventId, event, now, quantityPlanted, "Pending Review", {
+          transaction, submittedEventId, event, now, quantityPlanted, initialProgress, {
             activeSubmittedQuantity: quantityPlanted,
             acceptedQuantity: submissionVerificationStatus === "Verified" ? quantityPlanted : 0,
             pendingReviewQuantity: submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0,
-            reportingProgress: quantityPlanted >= Number(event.seedlingTotalQuantity || 0) &&
-              submissionStaffReviewStatus === "Pending Review"
-              ? "Fully Reported — Awaiting Review"
-              : quantityPlanted >= Number(event.seedlingTotalQuantity || 0)
-                ? "Completed" : "Partial",
+            reportingProgress: initialProgress,
           }
         );
-        if (!parent.created && !["Draft", "Pending", "Pending Review"].includes(parent.data.verificationStatus)) {
+        if (!parent.created && !["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial",
+          "Fully Reported — Awaiting Review", "Fully Reported â€” Awaiting Review"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
         }
         const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
@@ -1473,16 +1501,19 @@ if (submittedEventId) {
           const nextPending = Number(parent.data.pendingReviewQuantity || 0) +
             (submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0);
           const totalReleased = Number(event.seedlingTotalQuantity || parent.data.quantityReleased || 0);
+          const nextProgress = nextActive >= totalReleased && nextPending > 0
+            ? "Fully Reported — Awaiting Review"
+            : nextAccepted >= totalReleased && nextPending === 0
+              ? "Completed"
+              : nextActive > 0 ? "Partial" : "Awaiting Submission";
           transaction.update(parent.ref, {
             quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
             activeSubmittedQuantity: nextActive,
             acceptedQuantity: nextAccepted,
             pendingReviewQuantity: nextPending,
             remainingAvailableQuantity: Math.max(0, totalReleased - nextActive),
-            reportingProgress: nextActive >= totalReleased && nextPending > 0
-              ? "Fully Reported — Awaiting Review"
-              : nextAccepted >= totalReleased && nextPending === 0 ? "Completed" : "Partial",
-            verificationStatus: "Pending Review",
+            reportingProgress: nextProgress,
+            verificationStatus: nextProgress,
             submittedAt: now,
             updatedAt: now,
           });
@@ -1555,8 +1586,13 @@ if (submittedEventId) {
     }
 
     const docRef = reportCollection.doc();
+    const hashRefs = uploadedPhotos.map((photo) => evidenceHashCollection.doc(photo.imageHash));
     let reportNumber = "";
     await db.runTransaction(async (transaction) => {
+      const hashDocs = await Promise.all(hashRefs.map((hashRef) => transaction.get(hashRef)));
+      if (hashDocs.some((hashDoc) => hashDoc.exists)) {
+        throw new Error("Duplicate planting image detected.");
+      }
       reportNumber = await nextRecordNumber(transaction, {
         prefix: "RPT",
         counterKey: "plantingReports",
@@ -1564,6 +1600,10 @@ if (submittedEventId) {
         timestamp: now,
       });
       transaction.create(docRef, { ...reportData, reportNumber });
+      hashRefs.forEach((hashRef) => transaction.create(hashRef, {
+        reportId: docRef.id,
+        createdAt: now,
+      }));
     });
     persisted = true;
     return { id: docRef.id, ...reportData, reportNumber };
@@ -1769,7 +1809,8 @@ const approvePlantingReport =
     id,
     approvedBy,
     remarks,
-    reviewedByName
+    reviewedByName,
+    reviewerRole = "staff"
   ) => {
     const contributionRef = contributionCollection.doc(id);
     const contributionDoc = await contributionRef.get();
@@ -1791,6 +1832,12 @@ const approvePlantingReport =
         const accepted = Number(parent.acceptedQuantity || 0) + quantity;
         const pending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || 0);
+        const active = Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0);
+        const reportingProgress = released > 0 && accepted >= released && pending === 0
+          ? "Completed"
+          : released > 0 && active >= released && pending > 0
+            ? "Fully Reported — Awaiting Review"
+            : active > 0 ? "Partial" : "Awaiting Submission";
         const now = Timestamp.now();
         transaction.update(contributionRef, {
           staffReviewStatus: "Accepted", reviewedBy: approvedBy,
@@ -1799,14 +1846,14 @@ const approvePlantingReport =
         });
         transaction.update(parentRef, {
           acceptedQuantity: accepted, pendingReviewQuantity: pending,
-          reportingProgress: released > 0 && accepted >= released && pending === 0
-            ? "Completed" : "Partial",
+          reportingProgress,
+          verificationStatus: reportingProgress,
           updatedAt: now,
         });
         createVerificationLogInTransaction(transaction, {
           plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
           previousStatus: "Pending Review", newStatus: "Accepted",
-          performedBy: approvedBy, performedByRole: "staff",
+          performedBy: approvedBy, performedByRole: reviewerRole,
           remarks: remarks?.trim() || "", createdAt: now,
         });
         createNotificationInTransaction(transaction, {
@@ -1938,7 +1985,8 @@ const rejectPlantingReport =
     id,
     rejectedBy,
     remarks,
-    reviewedByName
+    reviewedByName,
+    reviewerRole = "staff"
   ) => {
     if (typeof remarks !== "string" || !remarks.trim()) {
       throw new Error("Rejection reason is required.");
@@ -1971,6 +2019,13 @@ const rejectPlantingReport =
         const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
         const accepted = Number(parent.acceptedQuantity || 0);
+        const reportingProgress = released > 0 && accepted >= released && nextPending === 0
+          ? "Completed"
+          : released > 0 && nextActive >= released && nextPending > 0
+            ? "Fully Reported — Awaiting Review"
+            : nextActive === 0 && accepted === 0
+              ? "Awaiting Submission"
+              : nextActive > 0 ? "Partial" : "Awaiting Submission";
         const now = Timestamp.now();
         transaction.update(contributionRef, {
           staffReviewStatus: "Rejected", reviewedBy: rejectedBy,
@@ -1989,13 +2044,14 @@ const rejectPlantingReport =
           pendingReviewQuantity: nextPending,
           rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity,
           remainingAvailableQuantity: Math.max(0, released - nextActive),
-          reportingProgress: nextActive === 0 && accepted === 0 ? "Awaiting Submission" : "Partial",
+          reportingProgress,
+          verificationStatus: reportingProgress,
           updatedAt: now,
         });
         createVerificationLogInTransaction(transaction, {
           plantingReportId: parentId, submissionId: id, action: "Staff Rejection",
           previousStatus: "Pending Review", newStatus: "Rejected",
-          performedBy: rejectedBy, performedByRole: "staff", remarks: remarks.trim(), createdAt: now,
+          performedBy: rejectedBy, performedByRole: reviewerRole, remarks: remarks.trim(), createdAt: now,
         });
         createNotificationInTransaction(transaction, {
           recipientUserId: current.contributorId || current.participantId,

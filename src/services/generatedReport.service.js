@@ -153,7 +153,7 @@ async function buildRows(filters) {
     quantityReleased: pick(distributions, "releasedAt", period)
       .reduce((sum, item) => sum + Number(item.totalQuantityReleased ?? item.quantityReleased ?? 0), 0),
     approvedPlantingReports: pick(reports, "approvedAt", period)
-      .filter((item) => item.verificationStatus === "Approved").length,
+      .filter((item) => item.verificationStatus === "Approved" || item.reportingProgress === "Completed").length,
     monitoringRecords: pick(monitoring, "monitoringDate", period).length,
     participantsJoined: pick(participants, "joinedAt", period).length,
   }));

@@ -49,18 +49,16 @@ router.get("/session/contributions", async (req, res) => {
 });
 
 router.post("/session/contributions", async (req, res, next) => {
-  let session;
-  req.guestSession = session;
-  return next();
-}, guestContributionLimiter, async (req, res) => {
-  const session = req.guestSession;
   try {
-    session = await guest.validateGuestSession(req.headers.authorization);
+    req.guestSession = await guest.validateGuestSession(req.headers.authorization);
+    return next();
   } catch (error) {
     return sendError(res, 401, error.message === "Guest session expired."
       ? "Your guest session has expired. Please use a valid invitation link."
       : "Invalid guest session.");
   }
+}, guestContributionLimiter, async (req, res) => {
+  const session = req.guestSession;
   try {
     const data = await contributions.recordContribution(
       session.eventId,
@@ -71,11 +69,14 @@ router.post("/session/contributions", async (req, res, next) => {
     );
     return sendSuccess(res, 201, "Contribution recorded", data);
   } catch (error) {
-    if (error.message.startsWith("Only ") || error.message.includes("available planting quantity") ||
+    if (error.message.startsWith("Only ") || error.message.includes("remaining reportable quantity") ||
+      error.message.includes("available planting quantity") ||
         error.message.includes("required") ||
         error.message.includes("not allocated") || error.message.includes("not been released") ||
         error.message.includes("submission key") || error.message.includes("finalized")) {
-      return sendError(res, 400, error.message);
+        return sendError(res, 400, error.message);
+      } else if (error.message.includes("not authorized") || error.message.includes("available planting quantity")) {
+        return sendError(res, 400, error.message);
     }
     console.error(error);
     return sendError(res, 500, "Failed to record contribution.");
@@ -94,10 +95,10 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
 }, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
   try {
     const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
-      req.params.id, req.files, req.body, { optionalLocation: true });
+      req.params.id, req.files);
     return sendSuccess(res, 200, "Planting evidence recorded", data);
   } catch (error) {
-    const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates/i
+    const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Juban|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
       .test(error.message);
     if (!expected) console.error(error);
     return sendError(res, expected ? 400 : 500,

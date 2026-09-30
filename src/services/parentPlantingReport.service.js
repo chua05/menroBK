@@ -8,10 +8,19 @@ const events = db.collection("events");
 const requests = db.collection("seedlingRequests");
 
 function normalizeSubmission(entry = {}) {
-  const verificationStatus = entry.verificationStatus ||
-    (entry.automatedVerificationStatus === "Flagged" ? "Needs Review" : "Verified");
-  const staffReviewStatus = entry.staffReviewStatus ||
-    (verificationStatus === "Verified" ? "Not Required" : "Pending Review");
+  const rawVerification = String(entry.verificationStatus || "").trim();
+  const legacyNeedsReview = ["Flagged", "Reviewed", "Pending Review"]
+    .includes(rawVerification) || entry.automatedVerificationStatus === "Flagged";
+  const verificationStatus = ["Verified", "Needs Review", "Invalid"].includes(rawVerification)
+    ? rawVerification
+    : legacyNeedsReview ? "Needs Review" : "Verified";
+  const rawReview = String(entry.staffReviewStatus || rawVerification).trim();
+  const staffReviewStatus = ["Not Required", "Pending Review", "Accepted", "Rejected"]
+    .includes(entry.staffReviewStatus)
+    ? entry.staffReviewStatus
+    : rawReview === "Rejected" ? "Rejected"
+      : ["Approved", "Accepted"].includes(rawReview) ? "Accepted"
+        : verificationStatus === "Verified" ? "Not Required" : "Pending Review";
   return { ...entry, verificationStatus, staffReviewStatus };
 }
 
@@ -119,7 +128,8 @@ async function reportDetails(id, data) {
     db.collection("eventParticipants").where("eventId", "==", data.eventId).get(),
   ]);
   const event = eventDoc.exists ? eventDoc.data() : {};
-  const contributions = submissionSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  const allContributions = submissionSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+  const contributions = allContributions.filter((entry) => Array.isArray(entry.photos) && entry.photos.length > 0);
   const participantById = new Map(participantSnapshot.docs.map((doc) => [doc.id, doc.data()]));
   const quantityReleased = (event.seedlingItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   const summary = summarizeSubmissions(contributions, quantityReleased || data.quantityReleased);
@@ -143,6 +153,7 @@ async function reportDetails(id, data) {
   const suspiciousFlags = [...new Set(evidence.flatMap((photo) => photo.suspiciousFlags || []))];
   return {
     id, ...data,
+    verificationStatus: summary.reportingProgress,
     photos: evidence,
     participantName: data.participantName || "",
     participantType: data.participantType || "",
@@ -210,16 +221,14 @@ async function finalizeParent(id, requesterId) {
     if (!reportDoc.exists || reportDoc.data().reportType !== "parent") {
       throw new Error("Planting report not found.");
     }
-    if (reportDoc.data().verificationStatus === "Pending Review") return;
-    if (!["Draft", "Pending"].includes(reportDoc.data().verificationStatus)) {
+    if (reportDoc.data().submittedAt) return;
+    if (!["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial",
+      "Fully Reported — Awaiting Review"].includes(reportDoc.data().reportingProgress ||
+        reportDoc.data().verificationStatus)) {
       throw new Error("Only pending planting reports can be submitted for review.");
     }
     const eventDoc = await transaction.get(events.doc(reportDoc.data().eventId));
     const submissionSnapshot = await transaction.get(submissions.where("reportId", "==", id));
-    if (!eventDoc.exists || !eventDoc.data().allocationReleasedAt ||
-        Number(eventDoc.data().recordedSeedlingQuantity || 0) <= 0) {
-      throw new Error("The report has no recorded planting contributions.");
-    }
     const submitterSubmissions = submissionSnapshot.docs.filter((doc) =>
       doc.data().contributorId === requesterId || doc.data().participantId === requesterId);
     if (submitterSubmissions.length === 0) {
@@ -228,10 +237,13 @@ async function finalizeParent(id, requesterId) {
     if (submitterSubmissions.some((doc) => !doc.data().photos?.length)) {
       throw new Error("Planting evidence photos are required before review.");
     }
+    const recordedQuantity = submissionSnapshot.docs.reduce(
+      (total, doc) => total + Number(doc.data().quantity || 0), 0);
+    if (!eventDoc.exists || !eventDoc.data().allocationReleasedAt || recordedQuantity <= 0) {
+      throw new Error("The report has no recorded planting contributions.");
+    }
     const now = Timestamp.now();
     transaction.update(ref, {
-      verificationStatus: "Pending Review",
-      quantityPlanted: Number(eventDoc.data().recordedSeedlingQuantity),
       submittedAt: now,
       updatedAt: now,
     });
