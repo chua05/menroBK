@@ -1381,50 +1381,6 @@ const markEventCompleted =
   };
 
 // ========================================
-// CANCEL EVENT
-// ========================================
-
-const cancelEvent = async (
-  eventId,
-  updatedBy
-) => {
-  const eventRef =
-    db
-      .collection(
-        EVENTS_COLLECTION
-      )
-      .doc(
-        cleanString(
-          eventId
-        )
-      );
-
-  const eventDoc =
-    await eventRef.get();
-
-  if (!eventDoc.exists) {
-    throw new Error(
-      "Event not found."
-    );
-  }
-
-  await eventRef.update({
-    status:
-      "Cancelled",
-
-    updatedBy,
-
-    updatedAt:
-      new Date(),
-  });
-
-  const updatedDoc =
-    await eventRef.get();
-
-  return updatedDoc.data();
-};
-
-// ========================================
 // ARCHIVE EVENT
 // ========================================
 
@@ -1564,7 +1520,6 @@ module.exports = {
   updateEvent,
   updateRecordStatus,
   markEventCompleted,
-  cancelEvent,
   archiveEvent,
   restoreEvent,
   deleteEvent,

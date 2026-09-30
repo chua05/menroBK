@@ -215,32 +215,6 @@ const markEventCompleted = async (
   }
 };
 
-// CANCEL EVENT
-const cancelEvent = async (req, res) => {
-  try {
-    const event =
-      await eventService.cancelEvent(
-        req.params.id,
-        req.user.uid
-      );
-
-    return sendSuccess(
-      res,
-      200,
-      "Event cancelled successfully",
-      event
-    );
-  } catch (error) {
-    console.error(error);
-
-    return sendError(
-      res,
-      getErrorStatus(error),
-      error.message
-    );
-  }
-};
-
 // ARCHIVE EVENT
 const archiveEvent = async (req, res) => {
   try {
@@ -326,7 +300,6 @@ module.exports = {
   updateEvent,
   updateRecordStatus,
   markEventCompleted,
-  cancelEvent,
   archiveEvent,
   restoreEvent,
   deleteEvent,

@@ -304,3 +304,8 @@ test("Staff and Admin can read event participants; guests have no decision route
   assert.equal(guestRoutes.stack.some((layer) =>
     /approve|reject/.test(layer.route?.path || "")), false);
 });
+
+test("events do not expose a cancellation endpoint", () => {
+  assert.equal(eventRoutes.stack.some((layer) =>
+    layer.route?.path === "/:id/cancel"), false);
+});

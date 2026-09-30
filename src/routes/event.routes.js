@@ -10,7 +10,6 @@ const {
   updateEvent,
   updateRecordStatus,
   markEventCompleted,
-  cancelEvent,
   archiveEvent,
   restoreEvent,
   deleteEvent,
@@ -136,14 +135,6 @@ router.patch(
   verifyToken,
   authorizeRoles("admin", "staff"),
   markEventCompleted
-);
-
-// CANCEL EVENT
-router.patch(
-  "/:id/cancel",
-  verifyToken,
-  authorizeRoles("admin", "staff"),
-  cancelEvent
 );
 
 // ARCHIVE EVENT
