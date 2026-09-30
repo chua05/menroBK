@@ -32,9 +32,25 @@ app.use(helmet());
 // ---------------------------------------------
 
 const allowedOrigins = [
-  ...(process.env.NODE_ENV === "production" ? [] : ["http://localhost:5173"]),
-  process.env.FRONTEND_URL?.trim().replace(/\/$/, ""),
-].filter(Boolean);
+  ...(process.env.FRONTEND_URL || "")
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean),
+];
+
+const isDevelopmentLoopbackOrigin = (origin) => {
+  if (process.env.NODE_ENV === "production") return false;
+
+  try {
+    const url = new URL(origin);
+    return (
+      url.protocol === "http:" &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+};
 
 app.use(
   cors({
@@ -45,7 +61,10 @@ app.use(
         return callback(null, true);
       }
 
-      if (allowedOrigins.includes(origin)) {
+      if (
+        allowedOrigins.includes(origin.replace(/\/$/, "")) ||
+        isDevelopmentLoopbackOrigin(origin)
+      ) {
         return callback(null, true);
       }
 
