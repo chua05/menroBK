@@ -50,6 +50,13 @@ test("CORS permits only this project's Vercel preview deployment pattern", () =>
   const renderProductionEnv = { NODE_ENV: "production" };
   assert.equal(
     isOriginAllowed(
+      "https://menrofrontend-xxtt.vercel.app",
+      renderProductionEnv
+    ),
+    true
+  );
+  assert.equal(
+    isOriginAllowed(
       "https://menrofrontend-xxtt-lydk6lzj3-chuas-projects-310db6fd.vercel.app",
       renderProductionEnv
     ),

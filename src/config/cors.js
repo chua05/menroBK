@@ -11,9 +11,13 @@ const splitOrigins = (value) =>
 // can override them if the Vercel project or team slug changes.
 const DEFAULT_VERCEL_FRONTEND_PROJECT = "menrofrontend-xxtt";
 const DEFAULT_VERCEL_FRONTEND_TEAM = "chuas-projects-310db6fd";
+const DEFAULT_PRODUCTION_ORIGINS = [
+  "https://menrofrontend-xxtt.vercel.app",
+];
 
 const getConfiguredOrigins = (env = process.env) =>
   new Set([
+    ...DEFAULT_PRODUCTION_ORIGINS,
     ...splitOrigins(env.FRONTEND_URL),
     ...splitOrigins(env.ALLOWED_ORIGINS),
   ]);
