@@ -22,6 +22,7 @@ const generalLimiter = rateLimit({
   // A signed-in dashboard can make many read requests while navigating.
   // Keep a bounded per-IP ceiling without throttling ordinary page loads.
   max: 300,
+  skip: (req) => req.method === "OPTIONS",
   message: {
     success: false,
     message: "Too many requests. Please slow down.",

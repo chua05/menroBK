@@ -1,5 +1,24 @@
-const normalizeOrigin = (value) =>
-  String(value || "").trim().replace(/\/$/, "");
+const normalizeOrigin = (value) => {
+  const candidate = String(value || "").trim();
+  if (!candidate) return "";
+
+  try {
+    const url = new URL(candidate);
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.pathname !== "/" ||
+      url.search ||
+      url.hash
+    ) {
+      return "";
+    }
+    return url.origin;
+  } catch {
+    return "";
+  }
+};
 
 const splitOrigins = (value) =>
   String(value || "")
@@ -7,12 +26,11 @@ const splitOrigins = (value) =>
     .map(normalizeOrigin)
     .filter(Boolean);
 
-// Public deployment identifiers for this MENRO frontend. Environment values
-// can override them if the Vercel project or team slug changes.
-const DEFAULT_VERCEL_FRONTEND_PROJECT = "menrofrontend-xxtt";
-const DEFAULT_VERCEL_FRONTEND_TEAM = "chuas-projects-310db6fd";
+// The stable MENRO frontend remains available if Render's environment is
+// temporarily incomplete. Additional origins must be explicit environment
+// values; arbitrary Vercel deployments are never trusted.
 const DEFAULT_PRODUCTION_ORIGINS = [
-  "https://menrofrontend-xxtt.vercel.app",
+  "https://menro-xxtt-five.vercel.app",
 ];
 
 const getConfiguredOrigins = (env = process.env) =>
@@ -37,12 +55,14 @@ const isDevelopmentLoopbackOrigin = (origin, env = process.env) => {
 };
 
 const isAuthorizedVercelPreviewOrigin = (origin, env = process.env) => {
-  const project = String(
-    env.VERCEL_FRONTEND_PROJECT || DEFAULT_VERCEL_FRONTEND_PROJECT
-  )
+  if (String(env.ALLOW_VERCEL_PREVIEWS || "").trim().toLowerCase() !== "true") {
+    return false;
+  }
+
+  const project = String(env.VERCEL_FRONTEND_PROJECT || "")
     .trim()
     .toLowerCase();
-  const team = String(env.VERCEL_FRONTEND_TEAM || DEFAULT_VERCEL_FRONTEND_TEAM)
+  const team = String(env.VERCEL_FRONTEND_TEAM || "")
     .trim()
     .toLowerCase();
 
