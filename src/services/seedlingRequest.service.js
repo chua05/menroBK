@@ -34,6 +34,12 @@ const {
 } = require("./notification.service");
 const { createInvitationInTransaction } = require("./guestEvent.service");
 const { parentForEventInTransaction } = require("./parentPlantingReport.service");
+const {
+  IDENTIFICATION_COLLECTION,
+  buildIdentificationRecord,
+  getMaskedIdentifications,
+  revealIdentification,
+} = require("./requestIdentification.service");
 
 const COLLECTION =
   "seedlingRequests";
@@ -49,6 +55,26 @@ const REQUEST_COUNTER_DOCUMENT = "seedlingRequests";
 const REVIEW_COUNTER_DOCUMENT = "seedlingRequestReviews";
 const REQUEST_NUMBER_PATTERN = /^REQ-(\d{4})-(\d{3,})$/;
 const REVIEW_ID_PATTERN = /^REV-(\d{4})-(\d{3,})$/;
+
+const stripSensitiveIdentification = (request) => {
+  const sanitized = { ...request };
+  for (const field of [
+    "identification",
+    "identificationType",
+    "idNumber",
+    "encryptedIdNumber",
+    "schoolInstitutionName",
+    "ciphertext",
+    "iv",
+    "authTag",
+  ]) delete sanitized[field];
+  return sanitized;
+};
+
+const withAdminIdentification = (request, identification) => ({
+  ...stripSensitiveIdentification(request),
+  ...(identification ? { identification } : {}),
+});
 
 const getManilaYear = (value = new Date()) => {
   const date = typeof value?.toDate === "function"
@@ -458,7 +484,7 @@ const validateItemStructure = (
 // ========================================
 
 const createSeedlingRequest =
-  async (data) => {
+  async (data, identification = null) => {
     const submittedItems =
       normalizeRequestItems(
         data
@@ -586,6 +612,9 @@ const createSeedlingRequest =
     }
 
     const docRef = db.collection(COLLECTION).doc();
+    const identificationRecord = identification
+      ? buildIdentificationRecord(docRef.id, data.participantId, identification, now)
+      : null;
     const requestYear = Number(new Intl.DateTimeFormat("en", {
       timeZone: "Asia/Manila",
       year: "numeric",
@@ -617,15 +646,21 @@ const createSeedlingRequest =
         ...requestData,
         requestNumber,
       });
+      if (identificationRecord) {
+        transaction.create(
+          db.collection(IDENTIFICATION_COLLECTION).doc(docRef.id),
+          identificationRecord,
+        );
+      }
       requestData.requestNumber = requestNumber;
     });
 
-    return {
+    return stripSensitiveIdentification({
       id:
         docRef.id,
 
       ...requestData,
-    };
+    });
   };
 
 // ========================================
@@ -633,14 +668,14 @@ const createSeedlingRequest =
 // ========================================
 
 const getAllSeedlingRequests =
-  async () => {
+  async ({ includeIdentification = false } = {}) => {
     const [snapshot, distributions] = await Promise.all([
       db.collection(COLLECTION).get(),
       releasedDistributionMap(),
     ]);
     const readableDocs = await ensureReadableRequestDocuments(snapshot.docs);
 
-    return readableDocs.map(
+    const requests = readableDocs.map(
       (doc) => withLegacyReleaseState({
         id:
           doc.id,
@@ -648,6 +683,12 @@ const getAllSeedlingRequests =
         ...doc.data(),
       }, distributions.get(doc.id))
     );
+    if (!includeIdentification) return requests.map(stripSensitiveIdentification);
+    const identifications = await getMaskedIdentifications(requests.map((request) => request.id));
+    return requests.map((request) => withAdminIdentification(
+      request,
+      identifications.get(request.id),
+    ));
   };
 
 // ========================================
@@ -655,7 +696,7 @@ const getAllSeedlingRequests =
 // ========================================
 
 const getSeedlingRequestById =
-  async (id) => {
+  async (id, { includeIdentification = false } = {}) => {
     const [doc, allRequestsSnapshot] = await Promise.all([
       db.collection(COLLECTION).doc(id).get(),
       db.collection(COLLECTION).get(),
@@ -680,10 +721,13 @@ const getSeedlingRequestById =
     const distribution = request.status === "Approved"
       ? await db.collection("distributions").doc(id).get()
       : null;
-    return withLegacyReleaseState(
+    const result = withLegacyReleaseState(
       request,
       distribution?.exists ? { id: distribution.id, ...distribution.data() } : null
     );
+    if (!includeIdentification) return stripSensitiveIdentification(result);
+    const identifications = await getMaskedIdentifications([id]);
+    return withAdminIdentification(result, identifications.get(id));
   };
 
 // ========================================
@@ -691,8 +735,8 @@ const getSeedlingRequestById =
 // ========================================
 
 const getSeedlingRequestsByStatus =
-  async (status) => {
-    const requests = await getAllSeedlingRequests();
+  async (status, options = {}) => {
+    const requests = await getAllSeedlingRequests(options);
     return requests.filter((request) => request.status === status);
   };
 
@@ -721,6 +765,7 @@ const getSeedlingRequestsByParticipantId =
 
         ...doc.data(),
       }, distributions.get(doc.id))
+    ).map(stripSensitiveIdentification
     );
   };
 
@@ -1784,6 +1829,7 @@ module.exports = {
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
+  revealIdentification,
 
   // Useful for other modules that need
   // backward-compatible request items.

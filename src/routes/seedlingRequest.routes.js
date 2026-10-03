@@ -15,6 +15,7 @@ const {
   getSeedlingRequests,
   getSeedlingRequest,
   getMySeedlingRequests,
+  getRequestIdentification,
   markRequestReviewed,
   returnRequestForRevision,
   resubmitRequest,
@@ -89,6 +90,15 @@ router.patch(
   verifyToken,
   authorizeRoles("participant"),
   resubmitRequest
+);
+
+// Admin-only intentional reveal. Ordinary request reads contain only masked
+// identification metadata for Admin and no identification fields for Staff.
+router.get(
+  "/:id/identification",
+  verifyToken,
+  authorizeRoles("admin"),
+  getRequestIdentification
 );
 
 // ========================================

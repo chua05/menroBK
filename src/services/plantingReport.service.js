@@ -68,6 +68,46 @@ const SITE_GPS_TOLERANCE_METERS =
 const MAX_EVIDENCE_PHOTOS =
   10;
 
+const NON_REPORTABLE_EVENT_STATUSES = new Set([
+  "cancelled", "canceled", "rejected", "deleted", "archived",
+]);
+
+const eventDateValue = (event) => String(
+  event?.date || event?.eventDate || event?.startDate || ""
+).slice(0, 10);
+
+const eventStartDate = (event) => {
+  const date = eventDateValue(event);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const time = /^\d{2}:\d{2}/.test(String(event?.startTime || ""))
+    ? String(event.startTime).slice(0, 5)
+    : "00:00";
+  const value = new Date(`${date}T${time}:00+08:00`);
+  return Number.isNaN(value.getTime()) ? null : value;
+};
+
+const assertReportableEvent = (event, now = new Date()) => {
+  if (event?.archived === true) {
+    throw new Error("The selected planting event is archived.");
+  }
+  const statuses = [event?.status, event?.recordStatus]
+    .map((value) => String(value || "").trim().toLowerCase());
+  if (statuses.some((status) => NON_REPORTABLE_EVENT_STATUSES.has(status))) {
+    throw new Error("The selected planting event is cancelled, rejected, or unavailable.");
+  }
+  if (!["authorized", "scheduled", "approved", "completed"].includes(statuses[1])) {
+    throw new Error("The selected planting event is not available for planting reports.");
+  }
+  const startsAt = eventStartDate(event);
+  // Legacy event records may predate the official date field. They remain
+  // reportable, but new/current records are always checked against their date.
+  if (!startsAt) return null;
+  if (startsAt.getTime() > now.getTime()) {
+    throw new Error("Planting reports cannot be submitted before the planting event begins.");
+  }
+  return eventDateValue(event);
+};
+
 const PHOTO_EXIF_LOCATION_SOURCE =
   "Photo Metadata (EXIF)";
 
@@ -568,50 +608,9 @@ if (submittedEventId) {
     throw new Error("Selected planting site does not match the released distribution.");
   }
 
-  if (
-    linkedEvent.archived === true
-  ) {
-    throw new Error(
-      "The selected planting event is archived."
-    );
-  }
-
-  if (
-    String(
-      linkedEvent.status || ""
-    )
-      .trim()
-      .toLowerCase() ===
-    "cancelled"
-  ) {
-    throw new Error(
-      "The selected planting event has been cancelled."
-    );
-  }
-
-  const eventRecordStatus =
-    String(
-      linkedEvent.recordStatus ||
-        ""
-    )
-      .trim()
-      .toLowerCase();
-
-  const allowedEventStatuses = [
-    "authorized",
-    "scheduled",
-    "approved",
-    "completed",
-  ];
-
-  if (
-    !allowedEventStatuses.includes(
-      eventRecordStatus
-    )
-  ) {
-    throw new Error(
-      "The selected planting event is not available for planting reports."
-    );
+  const officialEventDate = assertReportableEvent(linkedEvent);
+  if (officialEventDate && plantingDate !== officialEventDate) {
+    throw new Error("Planting event date does not match the selected event.");
   }
 
   const eventSiteId =
@@ -1440,6 +1439,11 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         const eventDoc = await transaction.get(eventRef);
         if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
         const event = eventDoc.data();
+        assertReportableEvent(event);
+        if (String(event.plantingSiteId || "") !== String(data.siteId) ||
+            normalizeBarangay(event.barangay) !== normalizeBarangay(site.barangay)) {
+          throw new Error("The selected planting event does not match the selected site and barangay.");
+        }
         const requestDoc = event.sourceRequestId
           ? await transaction.get(db.collection("seedlingRequests").doc(event.sourceRequestId))
           : null;
@@ -2204,4 +2208,6 @@ module.exports = {
   approvePlantingReport,
   rejectPlantingReport,
   getPlantingReportVerificationLogs,
+  assertReportableEvent,
+  eventStartDate,
 };

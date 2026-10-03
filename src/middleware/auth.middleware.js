@@ -142,7 +142,31 @@ const verifyTokenForBootstrap = async (req, res, next) => {
   }
 };
 
+// Verifies Firebase identity without requiring email verification. This is
+// intentionally limited to recovery operations such as resending the secure
+// verification message; it grants no access to protected MENRO resources.
+const verifyTokenForVerificationEmail = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return sendError(res, 401, "Unauthorized");
+    }
+    const decodedToken = await auth.verifyIdToken(authHeader.slice(7), true);
+    const userProfile = await getUserByUid(decodedToken.uid);
+    if (!userProfile) return sendError(res, 403, "User profile not found.");
+    if (userProfile.status !== "active") {
+      return sendError(res, 403, "User account is inactive.");
+    }
+    req.user = { uid: decodedToken.uid, email: decodedToken.email || userProfile.email };
+    next();
+  } catch (error) {
+    console.error(error);
+    return sendError(res, 401, "Invalid token");
+  }
+};
+
 module.exports = {
   verifyToken,
   verifyTokenForBootstrap,
+  verifyTokenForVerificationEmail,
 };

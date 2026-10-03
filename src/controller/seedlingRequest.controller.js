@@ -10,7 +10,11 @@ const {
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
+  revealIdentification,
 } = require("../services/seedlingRequest.service");
+const {
+  validateIdentificationInput,
+} = require("../services/requestIdentification.service");
 const {
   validatePreferredReleaseDate,
   validateProposedEventDate,
@@ -233,13 +237,32 @@ const submitSeedlingRequest = async (
     const participantId =
       req.user.uid;
 
+    const forbiddenSensitiveFields = [
+      "identificationType",
+      "idNumber",
+      "encryptedIdNumber",
+      "schoolInstitutionName",
+      "ciphertext",
+      "iv",
+      "authTag",
+    ];
+    if (forbiddenSensitiveFields.some((field) => Object.hasOwn(req.body || {}, field))) {
+      return res.status(400).json({
+        success: false,
+        message: "Identification information must use the supported request structure.",
+      });
+    }
+
     const {
       items,
       purpose,
       plantingLocation,
       preferredReleaseDate,
       eventProposal,
+      identification,
     } = req.body || {};
+
+    const validatedIdentification = validateIdentificationInput(identification);
 
     // Profile identity is server-owned; never trust request-body overrides.
     const participantName = req.user.fullName || req.user.name || "";
@@ -573,7 +596,7 @@ const submitSeedlingRequest = async (
 
         inventoryReleased:
           false,
-      });
+      }, validatedIdentification);
 
     return res.status(201).json({
       success: true,
@@ -584,16 +607,18 @@ const submitSeedlingRequest = async (
   } catch (error) {
     console.error(
       "submitSeedlingRequest error:",
-      error
+      error.code || error.message
     );
+
+    const publicMessage = error.code === "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED"
+      ? "Request submission is temporarily unavailable. Please contact MENRO."
+      : error.message || "Failed to submit seedling request.";
 
     return res
       .status(400)
       .json({
         success: false,
-        message:
-          error.message ||
-          "Failed to submit seedling request.",
+        message: publicMessage,
       });
   }
 };
@@ -610,12 +635,14 @@ const getSeedlingRequests = async (
     const { status } =
       req.query;
 
+    const options = { includeIdentification: req.user.role === "admin" };
     const requests =
       status
         ? await getSeedlingRequestsByStatus(
-            status
+            status,
+            options,
           )
-        : await getAllSeedlingRequests();
+        : await getAllSeedlingRequests(options);
 
     return res.status(200).json({
       success: true,
@@ -646,7 +673,8 @@ const getSeedlingRequest = async (
   try {
     const request =
       await getSeedlingRequestById(
-        req.params.id
+        req.params.id,
+        { includeIdentification: req.user.role === "admin" },
       );
 
     if (req.user.role === "participant" && request.participantId !== req.user.uid) {
@@ -697,6 +725,22 @@ const getMySeedlingRequests =
       });
     }
   };
+
+const getRequestIdentification = async (req, res) => {
+  try {
+    const identification = await revealIdentification(req.params.id, req.user.uid);
+    return res.status(200).json({ success: true, data: identification });
+  } catch (error) {
+    const notFound = error.code === "IDENTIFICATION_NOT_FOUND";
+    if (!notFound) console.error("getRequestIdentification error:", error.code || error.message);
+    return res.status(notFound ? 404 : 500).json({
+      success: false,
+      message: notFound
+        ? "Identification information not found."
+        : "Unable to retrieve identification information.",
+    });
+  }
+};
 
 // ========================================
 // STAFF — REVIEW
@@ -973,6 +1017,7 @@ module.exports = {
   getSeedlingRequests,
   getSeedlingRequest,
   getMySeedlingRequests,
+  getRequestIdentification,
   markRequestReviewed,
   returnRequestForRevision,
   resubmitRequest,

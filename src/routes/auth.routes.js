@@ -15,6 +15,7 @@ const {
   getProfile,
 
   updateProfile,
+  resendVerification,
 
 } = require(
   "../controller/auth.controller"
@@ -26,6 +27,7 @@ const {
   verifyToken,
 
   verifyTokenForBootstrap,
+  verifyTokenForVerificationEmail,
 
 } = require(
   "../middleware/auth.middleware"
@@ -62,6 +64,13 @@ router.post(
 
   register
 
+);
+
+router.post(
+  "/resend-verification",
+  authLimiter,
+  verifyTokenForVerificationEmail,
+  resendVerification
 );
 
 

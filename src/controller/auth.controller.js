@@ -227,6 +227,22 @@ const register = async (req, res) => {
 
 };
 
+const resendVerification = async (req, res) => {
+  try {
+    const result = await authService.resendVerificationEmail(req.user.uid);
+    if (result.alreadyVerified) {
+      return sendSuccess(res, 200, "Email address is already verified.", result);
+    }
+    if (!result.sent) {
+      return sendError(res, 503, "Verification email delivery is not configured. Please contact the administrator.");
+    }
+    return sendSuccess(res, 200, "Verification email sent.", { sent: true });
+  } catch (error) {
+    console.error("Verification email resend failed:", error.code || error.message);
+    return sendError(res, 502, "Unable to send the verification email right now.");
+  }
+};
+
 
 module.exports = {
 
@@ -236,6 +252,7 @@ module.exports = {
 
   getProfile,
 
-  updateProfile
+  updateProfile,
+  resendVerification,
 
 };

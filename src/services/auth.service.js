@@ -1,6 +1,7 @@
 const { auth, db } = require("../config/firebase");
 const { validateParticipantProfile, isParticipantProfileComplete } = require("../utils/userProfile.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
+const { sendRegistrationEmails, sendVerificationEmail } = require("./email.service");
 
 const users = db.collection("users");
 const clean = (value) => typeof value === "string" ? value.trim() : "";
@@ -120,7 +121,24 @@ async function registerUser({ fullName, username, email, contactNumber, password
     }
     throw new Error("User profile could not be created.");
   }
-  return profile;
+  const emailDelivery = await sendRegistrationEmails({ email, displayName: fullName });
+  return { ...profile, emailDelivery };
 }
 
-module.exports = { registerUser, createUserProfile, getUserProfile, updateUserProfile };
+async function resendVerificationEmail(uid) {
+  const [firebaseUser, profile] = await Promise.all([
+    auth.getUser(uid),
+    getUserProfile(uid),
+  ]);
+  if (firebaseUser.emailVerified) {
+    return { sent: false, alreadyVerified: true };
+  }
+  const email = firebaseUser.email || profile.email;
+  if (!email) throw new Error("Account email is unavailable.");
+  return sendVerificationEmail({
+    email,
+    displayName: profile.fullName || firebaseUser.displayName || "there",
+  });
+}
+
+module.exports = { registerUser, createUserProfile, getUserProfile, updateUserProfile, resendVerificationEmail };

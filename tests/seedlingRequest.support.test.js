@@ -9,6 +9,8 @@ const records = {
   counters: new Map(),
   notifications: new Map(),
   distributions: new Map(),
+  requestIdentifications: new Map(),
+  sensitiveDataAccessLogs: new Map(),
 };
 
 let generatedDocumentId = 0;
@@ -78,6 +80,7 @@ require.cache[firebasePath] = {
 };
 
 const service = require("../src/services/seedlingRequest.service");
+const identificationService = require("../src/services/requestIdentification.service");
 const seedlingController = require("../src/controller/seedlingRequest.controller");
 const siteService = require("../src/services/site.service");
 const siteController = require("../src/controller/site.controller");
@@ -320,11 +323,21 @@ test("details return full stored data and missing requests return 404", async ()
   records.seedlingRequests.set("request-details", {
     status: "Reviewed", participantId: "participant-1",
     reviewRemarks: "Site verified", items: [{ inventoryId: "inventory-1", quantity: 2 }],
+    identificationType: "passport", idNumber: "SHOULD-NOT-LEAK",
+    encryptedIdNumber: "legacy-sensitive-value", schoolInstitutionName: "Hidden School",
   });
   const found = response();
   await seedlingController.getSeedlingRequest({ params: { id: "request-details" }, user: { role: "participant", uid: "participant-1" } }, found);
   assert.equal(found.result.code, 200);
   assert.equal(found.result.body.data.reviewRemarks, "Site verified");
+  for (const field of ["identificationType", "idNumber", "encryptedIdNumber", "schoolInstitutionName"]) {
+    assert.equal(found.result.body.data[field], undefined);
+  }
+  const staff = response();
+  await seedlingController.getSeedlingRequest({ params: { id: "request-details" }, user: { role: "staff", uid: "staff-1" } }, staff);
+  assert.equal(staff.result.code, 200);
+  assert.equal(staff.result.body.data.identification, undefined);
+  assert.equal(JSON.stringify(staff.result.body.data).includes("SHOULD-NOT-LEAK"), false);
   const missing = response();
   await seedlingController.getSeedlingRequest({ params: { id: "missing" }, user: { role: "participant", uid: "participant-1" } }, missing);
   assert.equal(missing.result.code, 404);
@@ -383,14 +396,84 @@ test("request submission rejects a real site in a different barangay", async () 
     participantId: "participant-1", status: "Pending",
   };
   await assert.rejects(service.createSeedlingRequest(payload), /does not belong/);
-  const created = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: " bacolod " } });
+  const previousKey = process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
+  process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+  const identification = identificationService.validateIdentificationInput({
+    identificationType: "drivers_license",
+    idNumber: "  N01-23-456789  ",
+    confirmed: true,
+  });
+  const created = await service.createSeedlingRequest(
+    { ...payload, eventProposal: { ...payload.eventProposal, barangay: " bacolod " } },
+    identification,
+  );
   assert.equal(created.eventProposal.plantingSiteId, "site-2");
   assert.match(created.requestNumber, /^REQ-\d{4}-\d{3,}$/);
+  assert.equal(created.identification, undefined);
+  const storedIdentification = records.requestIdentifications.get(created.id);
+  assert.equal(storedIdentification.identificationType, "drivers_license");
+  assert.equal(storedIdentification.idNumber, undefined);
+  assert.notEqual(storedIdentification.ciphertext, "N01-23-456789");
+  const staffRead = await service.getSeedlingRequestById(created.id);
+  assert.equal(staffRead.identification, undefined);
+  const adminRead = await service.getSeedlingRequestById(created.id, { includeIdentification: true });
+  assert.equal(adminRead.identification.identificationTypeLabel, "Driver's License");
+  assert.match(adminRead.identification.maskedIdNumber, /6789$/);
+  const revealed = await service.revealIdentification(created.id, "admin-1");
+  assert.equal(revealed.idNumber, "N01-23-456789");
+  assert.equal([...records.sensitiveDataAccessLogs.values()].at(-1).action, "VIEW_ID_INFORMATION");
+  assert.equal(JSON.stringify([...records.sensitiveDataAccessLogs.values()]).includes("N01-23-456789"), false);
   const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bacolod" } });
   assert.match(next.requestNumber, /^REQ-\d{4}-\d{3,}$/);
   assert.notEqual(next.requestNumber, created.requestNumber);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
     .some((request) => request.id === created.id));
+  if (previousKey === undefined) delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
+  else process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY = previousKey;
+});
+
+test("identification validation preserves supported string formats and requires school name", () => {
+  for (const idNumber of ["N01-23-456789", "0012345678", "ABC-2026-001", "2026/00125", "2024-12345-A"]) {
+    assert.equal(
+      identificationService.validateIdentificationInput({
+        identificationType: "passport",
+        idNumber: `  ${idNumber}  `,
+        confirmed: true,
+      }).idNumber,
+      idNumber,
+    );
+  }
+  for (const idNumber of ["2023-001234", "2024-12345-A", "BSIT-2025-001", "0012345678", "A-2026-1234", "2026/00125", "123456"]) {
+    assert.equal(
+      identificationService.validateIdentificationInput({
+        identificationType: "school_id",
+        idNumber,
+        schoolInstitutionName: "Sorsogon State University",
+        confirmed: true,
+      }).idNumber,
+      idNumber,
+    );
+  }
+  assert.throws(() => identificationService.validateIdentificationInput({
+    identificationType: "school_id",
+    idNumber: "2026-001",
+    confirmed: true,
+  }), /School \/ Institution Name is required/);
+  assert.throws(() => identificationService.validateIdentificationInput({
+    identificationType: "passport",
+    idNumber: "ABC-1234",
+    confirmed: false,
+  }), /Please confirm/);
+});
+
+test("submission rejects unsupported root-level sensitive fields", async () => {
+  const res = response();
+  await seedlingController.submitSeedlingRequest({
+    user: { uid: "participant-1", fullName: "Participant One" },
+    body: { idNumber: "MUST-NOT-BE-IGNORED" },
+  }, res);
+  assert.equal(res.result.code, 400);
+  assert.match(res.result.body.message, /supported request structure/);
 });
 
 test("legacy request and review IDs are migrated once without changing document IDs", async () => {
@@ -445,6 +528,21 @@ test("review and decision roles remain separate", () => {
     assert.equal(nextCalled, true);
     const denied = response();
     handler({ user: { role: role === "participant" ? "staff" : "participant" } }, denied, () => {});
+    assert.equal(denied.result.code, 403);
+  }
+});
+
+test("only Admin can reach the full identification reveal route", () => {
+  const route = seedlingRoutes.stack.find(
+    (entry) => entry.route?.path === "/:id/identification" && entry.route.methods.get,
+  );
+  assert.ok(route);
+  let adminAllowed = false;
+  route.route.stack[1].handle({ user: { role: "admin" } }, response(), () => { adminAllowed = true; });
+  assert.equal(adminAllowed, true);
+  for (const role of ["staff", "participant"]) {
+    const denied = response();
+    route.route.stack[1].handle({ user: { role } }, denied, () => {});
     assert.equal(denied.result.code, 403);
   }
 });

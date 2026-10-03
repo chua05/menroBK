@@ -24,7 +24,11 @@ Module._load = function mockLoad(request, parent, isMain) {
   return originalLoad.call(this, request, parent, isMain);
 };
 
-const { verifyToken, verifyTokenForBootstrap } = require("../src/middleware/auth.middleware");
+const {
+  verifyToken,
+  verifyTokenForBootstrap,
+  verifyTokenForVerificationEmail,
+} = require("../src/middleware/auth.middleware");
 Module._load = originalLoad;
 
 function makeToken(overrides = {}) {
@@ -128,6 +132,19 @@ test("bootstrap only exempts an existing active admin or staff profile", async (
     const result = await invoke(verifyTokenForBootstrap);
     assert.equal(result.nextCalled, true);
   }
+});
+
+test("verification-email recovery accepts an unverified active identity only", async () => {
+  decodedToken = makeToken();
+  userProfile = makeProfile();
+  const active = await invoke(verifyTokenForVerificationEmail);
+  assert.equal(active.nextCalled, true);
+  assert.equal(active.req.user.uid, "user-1");
+
+  userProfile = makeProfile({ status: "inactive" });
+  const inactive = await invoke(verifyTokenForVerificationEmail);
+  assert.equal(inactive.res.statusCode, 403);
+  assert.equal(inactive.nextCalled, false);
 });
 
 test("missing and invalid Firebase ID tokens are rejected", async () => {

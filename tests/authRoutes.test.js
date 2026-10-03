@@ -17,13 +17,18 @@ require.cache[controllerPath] = {
     verifyUser: handler,
     getProfile: handler,
     updateProfile: handler,
+    resendVerification: handler,
   },
 };
 require.cache[middlewarePath] = {
   id: middlewarePath,
   filename: middlewarePath,
   loaded: true,
-  exports: { verifyToken: handler, verifyTokenForBootstrap: handler },
+  exports: {
+    verifyToken: handler,
+    verifyTokenForBootstrap: handler,
+    verifyTokenForVerificationEmail: handler,
+  },
 };
 require.cache[rolePath] = {
   id: rolePath,
@@ -49,6 +54,7 @@ test("authentication routes expose verify, me, and profile operations", () => {
   assert.equal(hasRoute("get", "/me"), true);
   assert.equal(hasRoute("get", "/profile"), true);
   assert.equal(hasRoute("put", "/profile"), true);
+  assert.equal(hasRoute("post", "/resend-verification"), true);
 });
 
 test("verify and profile routes retain authentication middleware", () => {
@@ -57,6 +63,7 @@ test("verify and profile routes retain authentication middleware", () => {
     ["get", "/me"],
     ["get", "/profile"],
     ["put", "/profile"],
+    ["post", "/resend-verification"],
   ]) {
     const route = authRoutes.stack.find(
       (layer) => layer.route?.path === path && layer.route.methods[method]

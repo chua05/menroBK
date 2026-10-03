@@ -287,6 +287,32 @@ test("all authorized participants can use released event distributions with actu
   assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), false);
 });
 
+test("planting-report event eligibility allows ongoing and completed events but blocks future and invalid events", () => {
+  const { assertReportableEvent } = require("../src/services/plantingReport.service");
+  const now = new Date("2026-10-03T12:00:00+08:00");
+
+  assert.equal(assertReportableEvent({
+    date: "2026-10-03", startTime: "08:00", endTime: "17:00",
+    recordStatus: "scheduled", status: "Ongoing",
+  }, now), "2026-10-03");
+  assert.equal(assertReportableEvent({
+    date: "2026-09-20", startTime: "08:00", endTime: "17:00",
+    recordStatus: "completed", status: "Completed",
+  }, now), "2026-09-20");
+  assert.throws(() => assertReportableEvent({
+    date: "2026-10-04", startTime: "08:00", recordStatus: "scheduled",
+  }, now), /before the planting event begins/);
+  assert.throws(() => assertReportableEvent({
+    date: "2026-09-20", recordStatus: "completed", status: "Cancelled",
+  }, now), /cancelled, rejected, or unavailable/);
+  assert.throws(() => assertReportableEvent({
+    date: "2026-09-20", recordStatus: "rejected",
+  }, now), /cancelled, rejected, or unavailable/);
+  assert.throws(() => assertReportableEvent({
+    date: "2026-09-20", recordStatus: "completed", archived: true,
+  }, now), /archived/);
+});
+
 test("only the request owner or an event participant can submit planting evidence", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");

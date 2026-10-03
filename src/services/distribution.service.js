@@ -354,8 +354,15 @@ const getEligibleDistributionsForParticipant = async (participantId) => {
       .filter((event) => {
         const recordStatus = String(event.recordStatus || "").trim().toLowerCase();
         const calendarStatus = String(event.status || "").trim().toLowerCase();
-        return event.archived !== true && calendarStatus !== "cancelled" &&
-          ["authorized", "scheduled", "approved", "completed"].includes(recordStatus);
+        const date = String(event.date || event.eventDate || event.startDate || "").slice(0, 10);
+        const time = /^\d{2}:\d{2}/.test(String(event.startTime || ""))
+          ? String(event.startTime).slice(0, 5) : "00:00";
+        const startsAt = new Date(`${date}T${time}:00+08:00`);
+        const unavailable = [recordStatus, calendarStatus].some((status) =>
+          ["cancelled", "canceled", "rejected", "deleted", "archived"].includes(status));
+        return event.archived !== true && !unavailable &&
+          ["authorized", "scheduled", "approved", "completed"].includes(recordStatus) &&
+          (Number.isNaN(startsAt.getTime()) || startsAt <= new Date());
       })
       .map((event) => [event.id, event])
   );
