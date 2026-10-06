@@ -5,6 +5,7 @@ const router = express.Router();
 const {
   createSite,
   getAllSites,
+  getBarangayBoundaries,
   getArchivedSites,
   getSiteById,
   updateSite,
@@ -65,6 +66,12 @@ router.get(
     "staff"
   ),
   getArchivedSites
+);
+
+// Keep static routes before "/:id".
+router.get(
+  "/barangay-boundaries",
+  getBarangayBoundaries
 );
 
 // --------------------------------

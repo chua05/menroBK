@@ -55,7 +55,7 @@ const service = require("../src/services/generatedReport.service");
 
 test("event participation report uses real guest records without exporting contact numbers", async () => {
   rows("events").set("event-1", {
-    name: "Juban Planting", date: "2026-09-17", sourceRequestId: "request-1",
+    name: "Bulan Planting", date: "2026-09-17", sourceRequestId: "request-1",
     plantingSiteName: "Site One",
   });
   rows("seedlingRequests").set("request-1", { participantName: "Requester" });

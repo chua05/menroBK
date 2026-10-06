@@ -858,7 +858,7 @@ const createTreePlantingEventInTransaction =
         0,
 
       organizer:
-        "MENRO Juban",
+        "MENRO Bulan",
 
       description:
         cleanString(

@@ -128,7 +128,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
   const review = {
     reviewedBy: "staff-1", reviewedByName: "Staff Name",
     items: [{ inventoryId: "inventory-1", quantity: 12, species: "Forged" }],
-    purpose: "Planting", plantingLocation: "Juban",
+    purpose: "Planting", plantingLocation: "Bulan",
     preferredReleaseDate: validPreferredReleaseDate, reviewRemarks: "Verified site and quantity",
   };
   const result = await service.reviewSeedlingRequest("request-1", review);
@@ -155,7 +155,7 @@ test("Staff review confirmation requires no findings or observation", async () =
     user: { uid: "staff-1", fullName: "Staff Name" },
     body: {
       items: [{ inventoryId: "inventory-1", quantity: 2 }],
-      purpose: "Planting", plantingLocation: "Juban",
+      purpose: "Planting", plantingLocation: "Bulan",
       preferredReleaseDate: validPreferredReleaseDate,
     },
   }, res);
@@ -168,13 +168,13 @@ test("Staff review confirmation requires no findings or observation", async () =
 test("site creation assigns unique year-scoped readable IDs while retaining internal document IDs", async () => {
   const input = {
     siteName: "Readable Site",
-    barangay: "Bacolod",
+    barangay: "Bical",
     siteType: "Public Land",
-    locationDescription: "Bacolod, Juban",
+    locationDescription: "Bical, Bulan",
     areaHectares: 1,
     maximumCapacity: 100,
-    latitude: 12.82,
-    longitude: 124,
+    latitude: 12.57,
+    longitude: 123.965,
     coverageRadiusMeters: 50,
     createdBy: "staff-1",
   };
@@ -191,6 +191,14 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
     siteService.createSite({ ...input, latitude: "" }),
     /Latitude must be between -90 and 90/
   );
+  await assert.rejects(
+    siteService.createSite({ ...input, barangay: "Bacolod" }),
+    /verified Bulan barangays/
+  );
+  await assert.rejects(
+    siteService.createSite({ ...input, latitude: 12.82, longitude: 124 }),
+    /within the Municipality of Bulan/
+  );
 
   const first = await siteService.createSite(input);
   const second = await siteService.createSite({ ...input, siteName: "Readable Site Two" });
@@ -198,7 +206,7 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
     siteService.createSite({ ...input, siteName: "Concurrent Site A" }),
     siteService.createSite({ ...input, siteName: "Concurrent Site B" }),
   ]);
-  const year = siteService.getJubanYear();
+  const year = siteService.getManilaYear();
 
   assert.match(first.id, /^new-\d+$/);
   assert.equal(first.siteId, `SITE-${year}-001`);
@@ -206,12 +214,28 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
   assert.notEqual(first.id, first.siteId);
   assert.notEqual(first.siteId, second.siteId);
   assert.equal(first.coverageRadiusMeters, 50);
+  assert.equal(first.municipality, "Bulan");
+  assert.equal(first.province, "Sorsogon");
   assert.equal(Object.hasOwn(first, "polygon"), false);
   assert.notEqual(third.siteId, fourth.siteId);
   assert.deepEqual(
     [third.siteId, fourth.siteId].sort(),
     [`SITE-${year}-003`, `SITE-${year}-004`]
   );
+
+  records.sites.set("legacy-juban-site", {
+    siteId: "SITE-2026-999",
+    siteName: "Legacy Juban Site",
+    status: "active",
+    municipality: "Juban",
+    province: "Sorsogon",
+    barangay: "Bacolod",
+    latitude: 12.8,
+    longitude: 124,
+  });
+  const activeSites = await siteService.getAllSites();
+  assert.equal(activeSites.some((site) => site.id === "legacy-juban-site"), false);
+  assert.equal(activeSites.every((site) => site.municipality === "Bulan"), true);
 });
 
 test("Staff return and participant resubmission preserve the same request and review history", async () => {
@@ -233,11 +257,11 @@ test("Staff return and participant resubmission preserve the same request and re
   records.sites.set("site-returned", {
     siteName: "Revision Site",
     status: "active",
-    barangay: "Bacolod",
+    barangay: "Bical",
     maximumCapacity: 100,
     planted: 10,
-    latitude: 12.82,
-    longitude: 124,
+    latitude: 12.57,
+    longitude: 123.965,
   });
 
   await assert.rejects(
@@ -265,11 +289,11 @@ test("Staff return and participant resubmission preserve the same request and re
   const data = {
     items: [{ inventoryId: "inventory-returned", quantity: 8 }],
     purpose: "Community planting",
-    plantingLocation: "Revision Site, Bacolod",
+    plantingLocation: "Revision Site, Bical",
     preferredReleaseDate: validPreferredReleaseDate,
     eventProposal: {
       eventName: "Revised Event",
-      barangay: "Bacolod",
+      barangay: "Bical",
       plantingSiteId: "site-returned",
       proposedDate: validPreferredReleaseDate,
       proposedStartTime: "08:00",
@@ -348,7 +372,7 @@ test("details return full stored data and missing requests return 404", async ()
 
 test("site edit updates only permitted fields and keeps the same record for list and map", async () => {
   records.sites.set("site-1", {
-    siteId: "site-1", siteName: "Old Name", barangay: "Bacolod", status: "active",
+    siteId: "site-1", siteName: "Old Name", barangay: "Bical", status: "active",
     latitude: 12, longitude: 123, polygon: [{ lat: 12, lng: 123 }, { lat: 12.1, lng: 123 }, { lat: 12, lng: 123.1 }],
     maximumCapacity: 100, targetTrees: 100, planted: 20, createdBy: "staff-0",
   });
@@ -387,7 +411,7 @@ test("site edit updates only permitted fields and keeps the same record for list
 
 test("request submission rejects a real site in a different barangay", async () => {
   records.sites.set("site-2", {
-    status: "active", barangay: "Bacolod", maximumCapacity: 100, planted: 0,
+    status: "active", barangay: "Bical", maximumCapacity: 100, planted: 0,
   });
   records.seedlingInventory.set("inventory-1", { species: "Narra" });
   const payload = {
@@ -404,7 +428,7 @@ test("request submission rejects a real site in a different barangay", async () 
     confirmed: true,
   });
   const created = await service.createSeedlingRequest(
-    { ...payload, eventProposal: { ...payload.eventProposal, barangay: " bacolod " } },
+    { ...payload, eventProposal: { ...payload.eventProposal, barangay: " bical " } },
     identification,
   );
   assert.equal(created.eventProposal.plantingSiteId, "site-2");
@@ -423,7 +447,7 @@ test("request submission rejects a real site in a different barangay", async () 
   assert.equal(revealed.idNumber, "N01-23-456789");
   assert.equal([...records.sensitiveDataAccessLogs.values()].at(-1).action, "VIEW_ID_INFORMATION");
   assert.equal(JSON.stringify([...records.sensitiveDataAccessLogs.values()]).includes("N01-23-456789"), false);
-  const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bacolod" } });
+  const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bical" } });
   assert.match(next.requestNumber, /^REQ-\d{4}-\d{3,}$/);
   assert.notEqual(next.requestNumber, created.requestNumber);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
@@ -545,4 +569,14 @@ test("only Admin can reach the full identification reveal route", () => {
     route.route.stack[1].handle({ user: { role } }, denied, () => {});
     assert.equal(denied.result.code, 403);
   }
+});
+
+test("proposed Niyogan locations are rejected before resubmission writes", async () => {
+  await assert.rejects(
+    service.resubmitSeedlingRequest("request-returned", "participant-1", {
+      workflow: { siteMode: "proposed", niyogan: "yes" },
+      items: [{ inventoryId: "inventory-1", quantity: 1 }],
+    }),
+    /Planting Location Not Eligible/
+  );
 });

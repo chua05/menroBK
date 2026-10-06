@@ -87,7 +87,7 @@ router.post("/:id/contributions/:contributionId/evidence", verifyToken,
         req.params.contributionId, req.files);
       return sendSuccess(res, 200, "Planting evidence recorded", data);
     } catch (error) {
-      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Juban|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
+      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Bulan|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
           .test(error.message);
       if (!expected) console.error(error);
       return sendError(res, expected ? 400 : 500,

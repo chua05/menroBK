@@ -2,7 +2,7 @@ const { db } = require("../config/firebase");
 
 const COUNTERS_COLLECTION = "counters";
 
-function yearInJuban(date = new Date()) {
+function yearInManila(date = new Date()) {
   return Number(new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Manila",
     year: "numeric",
@@ -24,7 +24,7 @@ function formatRecordNumber(prefix, year, sequence) {
 }
 
 async function nextRecordNumber(transaction, { prefix, counterKey, date = new Date(), timestamp }) {
-  const year = yearInJuban(date);
+  const year = yearInManila(date);
   const counterRef = db.collection(COUNTERS_COLLECTION).doc(`${counterKey}_${year}`);
   const counterDoc = await transaction.get(counterRef);
   const nextSequence = Number(counterDoc.data()?.lastNumber || 0) + 1;
@@ -48,6 +48,6 @@ async function nextRecordNumber(transaction, { prefix, counterKey, date = new Da
 module.exports = {
   formatRecordNumber,
   nextRecordNumber,
-  yearInJuban,
+  yearInManila,
 };
 

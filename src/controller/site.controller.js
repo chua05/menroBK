@@ -1,4 +1,5 @@
 const siteService = require("../services/site.service");
+const { barangayGeoJson } = require("../config/municipality");
 
 const {
   sendSuccess,
@@ -97,6 +98,10 @@ const getAllSites = async (
     );
   }
 };
+
+// Return the single Bulan dataset used by validation and map rendering.
+const getBarangayBoundaries = (req, res) =>
+  res.status(200).json(barangayGeoJson);
 
 // --------------------------------
 // GET ARCHIVED SITES
@@ -236,6 +241,7 @@ const updateSite = async (req, res) => {
 module.exports = {
   createSite,
   getAllSites,
+  getBarangayBoundaries,
   getArchivedSites,
   getSiteById,
   updateSite,

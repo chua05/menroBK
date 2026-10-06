@@ -95,7 +95,7 @@ async function globalSearch({ query, role, userId, limit = 10 }) {
     site.siteNumber, site.siteId, site.id, site.siteName, site.name, site.barangay
   )).forEach((site) => results.push(result(
     "Planting Site", site, [site.siteNumber || site.siteId, site.siteName || site.name].filter(Boolean).join(" — ") || site.id,
-    [site.barangay, "Juban"].filter(Boolean).join(", "),
+    [site.barangay, "Bulan"].filter(Boolean).join(", "),
     `/${role}/planting-sites?site=${encodeURIComponent(site.id)}`
   )));
 

@@ -5,11 +5,11 @@ const data = {
   seedlingInventory: [], seedlingRequests: [],
   distributions: [{ id: "dist-1", status: "Released", plantingSiteId: "site-1", releasedAt: "2026-05-10", totalQuantityReleased: 80,
     items: [{ species: "Narra", releasedQuantity: 50 }, { species: "Molave", releasedQuantity: 30 }] }],
-  events: [{ id: "event-1", plantingSiteId: "site-1", barangay: "Bacolod" }],
+  events: [{ id: "event-1", plantingSiteId: "site-1", barangay: "Bical" }],
   plantingReports: [
-    { id: "report-1", reportType: "parent", eventId: "event-1", siteId: "site-1", barangay: "Bacolod", quantityPlanted: 80,
+    { id: "report-1", reportType: "parent", eventId: "event-1", siteId: "site-1", barangay: "Bical", quantityPlanted: 80,
       verificationStatus: "Approved", approvedAt: "2026-06-20", eventDate: "2026-06-01" },
-    { id: "pending-1", reportType: "parent", eventId: "event-1", siteId: "site-1", barangay: "Bacolod",
+    { id: "pending-1", reportType: "parent", eventId: "event-1", siteId: "site-1", barangay: "Bical",
       verificationStatus: "Pending Review", submittedAt: "2026-06-21", quantityPlanted: 5 },
   ],
   plantingContributions: [
@@ -19,13 +19,13 @@ const data = {
     { id: "c4", reportId: "pending-1", species: "Narra", quantity: 5, recordedAt: "2026-06-21",
       verificationStatus: "Needs Review", staffReviewStatus: "Pending Review" },
   ],
-  monitoringRecords: [{ id: "monitor-1", plantingReportId: "report-1", siteId: "site-1", barangay: "Bacolod", species: "Narra",
+  monitoringRecords: [{ id: "monitor-1", plantingReportId: "report-1", siteId: "site-1", barangay: "Bical", species: "Narra",
     startMonitoringDate: "2026-06-15", nextMonitoringDate: "2026-09-01", monitoringEndDate: "2028-06-01",
     history: [
       { monitoredDate: "2026-06-15", healthyCount: 50, damagedCount: 20, deadCount: 10, totalMonitored: 80 },
       { monitoredDate: "2026-08-01", healthyCount: 60, damagedCount: 10, deadCount: 10, totalMonitored: 80 },
     ] }],
-  sites: [{ id: "site-1", siteName: "Bacolod Site", barangay: "Bacolod", status: "Active" }],
+  sites: [{ id: "site-1", siteName: "Bical Site", barangay: "Bical", status: "Active" }],
 };
 
 const db = { collection: (name) => ({ get: async () => ({ docs: data[name].map((row) => ({ id: row.id, data: () => row })) }) }) };
@@ -63,9 +63,9 @@ test("analytics filters remain synchronized and empty periods do not invent char
 test("analytics counts qualifying submissions without flattening verification, review, and progress", async () => {
   data.distributions.push({ id: "dist-2", status: "Released", plantingSiteId: "site-2", releasedAt: "2026-07-01",
     items: [{ species: "Narra", releasedQuantity: 50 }] });
-  data.sites.push({ id: "site-2", siteName: "Submission Site", barangay: "Calateo", status: "Active",
+  data.sites.push({ id: "site-2", siteName: "Submission Site", barangay: "Calpi", status: "Active",
     maximumCapacity: 100 });
-  data.plantingReports.push({ id: "report-2", reportType: "parent", siteId: "site-2", barangay: "Calateo",
+  data.plantingReports.push({ id: "report-2", reportType: "parent", siteId: "site-2", barangay: "Calpi",
     reportingProgress: "Partial", createdAt: "2026-07-01" });
   data.plantingContributions.push(
     { id: "verified", reportId: "report-2", species: "Narra", quantity: 10, recordedAt: "2026-07-02",

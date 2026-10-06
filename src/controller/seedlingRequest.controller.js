@@ -260,9 +260,20 @@ const submitSeedlingRequest = async (
       preferredReleaseDate,
       eventProposal,
       identification,
+      workflow,
     } = req.body || {};
 
     const validatedIdentification = validateIdentificationInput(identification);
+
+    if (
+      workflow?.siteMode === "proposed" &&
+      String(workflow?.niyogan || workflow?.niyoganStatus || "").trim().toLowerCase() === "yes"
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Planting Location Not Eligible. The proposed planting area is identified as a coconut farm (Niyogan). Please provide another planting location to continue.",
+      });
+    }
 
     // Profile identity is server-owned; never trust request-body overrides.
     const participantName = req.user.fullName || req.user.name || "";
@@ -518,6 +529,8 @@ const submitSeedlingRequest = async (
           ),
 
         preferredReleaseDate,
+
+        workflow: workflow && typeof workflow === "object" ? workflow : {},
 
         eventProposal: {
           eventName:

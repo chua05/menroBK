@@ -37,9 +37,9 @@ function verificationEmail({ displayName, verificationUrl }) {
   const name = escapeHtml(displayName || "there");
   const url = escapeHtml(verificationUrl);
   return {
-    subject: "Verify your MENRO Juban email address",
+    subject: "Verify your MENRO Bulan email address",
     text: [
-      "MENRO Juban",
+      "MENRO Bulan",
       "",
       `Hello ${clean(displayName) || "there"},`,
       "",
@@ -52,9 +52,9 @@ function verificationEmail({ displayName, verificationUrl }) {
       "If you did not create this account, you can safely ignore this email.",
       "",
       "Municipal Environment and Natural Resources Office",
-      "Juban, Sorsogon",
+      "Bulan, Sorsogon",
     ].join("\n"),
-    html: `<!doctype html><html><body style="margin:0;background:#f2f7f3;font-family:Arial,sans-serif;color:#173b2a"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #dce8df"><tr><td style="padding:24px 32px;background:#176b3a;color:#fff"><strong style="font-size:22px">MENRO Juban</strong></td></tr><tr><td style="padding:32px"><p style="font-size:17px">Hello ${name},</p><p>Thank you for creating your MENRO account.</p><p>Please verify your email address to complete your registration.</p><p style="padding:18px 0;text-align:center"><a href="${url}" style="display:inline-block;padding:13px 22px;border-radius:8px;background:#178447;color:#fff;text-decoration:none;font-weight:700">Verify Email Address</a></p><p style="font-size:13px;color:#52645a">If you did not create this account, you can safely ignore this email.</p><p style="margin-top:28px;font-size:13px;color:#52645a">Municipal Environment and Natural Resources Office<br>Juban, Sorsogon</p></td></tr></table></td></tr></table></body></html>`,
+    html: `<!doctype html><html><body style="margin:0;background:#f2f7f3;font-family:Arial,sans-serif;color:#173b2a"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #dce8df"><tr><td style="padding:24px 32px;background:#176b3a;color:#fff"><strong style="font-size:22px">MENRO Bulan</strong></td></tr><tr><td style="padding:32px"><p style="font-size:17px">Hello ${name},</p><p>Thank you for creating your MENRO account.</p><p>Please verify your email address to complete your registration.</p><p style="padding:18px 0;text-align:center"><a href="${url}" style="display:inline-block;padding:13px 22px;border-radius:8px;background:#178447;color:#fff;text-decoration:none;font-weight:700">Verify Email Address</a></p><p style="font-size:13px;color:#52645a">If you did not create this account, you can safely ignore this email.</p><p style="margin-top:28px;font-size:13px;color:#52645a">Municipal Environment and Natural Resources Office<br>Bulan, Sorsogon</p></td></tr></table></td></tr></table></body></html>`,
   };
 }
 
@@ -63,7 +63,7 @@ function welcomeEmail({ displayName }) {
   return {
     subject: "Welcome to the MENRO Reforestation Monitoring System",
     text: [
-      "MENRO Juban",
+      "MENRO Bulan",
       "",
       `Hello ${clean(displayName) || "there"},`,
       "",
@@ -74,9 +74,9 @@ function welcomeEmail({ displayName }) {
       "Thank you.",
       "",
       "Municipal Environment and Natural Resources Office",
-      "Juban, Sorsogon",
+      "Bulan, Sorsogon",
     ].join("\n"),
-    html: `<!doctype html><html><body style="margin:0;background:#f2f7f3;font-family:Arial,sans-serif;color:#173b2a"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #dce8df"><tr><td style="padding:24px 32px;background:#176b3a;color:#fff"><strong style="font-size:22px">MENRO Juban</strong></td></tr><tr><td style="padding:32px"><p style="font-size:17px">Hello ${name},</p><p>Your account has been successfully registered in the MENRO Reforestation Monitoring System.</p><p>Please verify your email address before accessing your account.</p><p>Thank you.</p><p style="margin-top:28px;font-size:13px;color:#52645a">Municipal Environment and Natural Resources Office<br>Juban, Sorsogon</p></td></tr></table></td></tr></table></body></html>`,
+    html: `<!doctype html><html><body style="margin:0;background:#f2f7f3;font-family:Arial,sans-serif;color:#173b2a"><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px 16px"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#fff;border-radius:14px;overflow:hidden;border:1px solid #dce8df"><tr><td style="padding:24px 32px;background:#176b3a;color:#fff"><strong style="font-size:22px">MENRO Bulan</strong></td></tr><tr><td style="padding:32px"><p style="font-size:17px">Hello ${name},</p><p>Your account has been successfully registered in the MENRO Reforestation Monitoring System.</p><p>Please verify your email address before accessing your account.</p><p>Thank you.</p><p style="margin-top:28px;font-size:13px;color:#52645a">Municipal Environment and Natural Resources Office<br>Bulan, Sorsogon</p></td></tr></table></td></tr></table></body></html>`,
   };
 }
 

@@ -10,7 +10,7 @@ function validateParticipantProfile(input = {}) {
   const userType = clean(input.userType);
   const userTypeDetail = clean(input.userTypeDetail);
   const barangay = clean(input.barangay);
-  if (!USER_TYPES.includes(userType)) throw new Error("Please select your user type.");
+  if (!USER_TYPES.includes(userType)) throw new Error("Please select a sector.");
   if (["Barangay Official", "Volunteer"].includes(userType) && !barangay) {
     throw new Error("Please select your barangay.");
   }
@@ -19,7 +19,7 @@ function validateParticipantProfile(input = {}) {
     "Student / School Representative": "Please enter your school or institution name.",
     "Government Employee": "Please enter your office name.",
     "Private Sector Representative": "Please enter your company or organization name.",
-    Other: "Please specify your user type.",
+    Other: "Please specify your sector.",
   };
   if (errors[userType] && !userTypeDetail) throw new Error(errors[userType]);
   return {

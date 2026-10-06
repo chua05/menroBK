@@ -45,7 +45,7 @@ const {
 } = require(
   "../utils/geo.util"
 );
-const jubanBarangayBoundaries = require("../data/juban-barangays.json");
+const { barangayGeoJson: bulanBarangayBoundaries } = require("../config/municipality");
 
 
 const REPORT_COLLECTION =
@@ -739,15 +739,15 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       );
     }
 
-    const insideJuban = isPointInGeoJsonFeatureCollection(
+    const insideBulan = isPointInGeoJsonFeatureCollection(
       photoLatitude,
       photoLongitude,
-      jubanBarangayBoundaries
+      bulanBarangayBoundaries
     );
 
-    if (!insideJuban) {
+    if (!insideBulan) {
       throw new Error(
-        "Your photo is outside the Municipality of Juban coverage area. Please use a photo taken within Juban and try again."
+        "Your photo is outside the Municipality of Bulan coverage area. Please use a photo taken within Bulan and try again."
       );
     }
 

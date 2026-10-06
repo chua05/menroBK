@@ -65,7 +65,7 @@ const { attachEvidence } = require("../src/services/plantingEvidence.service");
 const { validatePlantingReport } = require("../src/utils/plantingVerification.util");
 const { validateImageBuffer, isClearlyScreenshot } = require("../src/utils/imageVerification.util");
 const { isPointInPolygon, isPointInGeoJsonFeatureCollection } = require("../src/utils/geo.util");
-const jubanBarangayBoundaries = require("../src/data/juban-barangays.json");
+const bulanBarangayBoundaries = require("../src/data/bulan-barangays.json");
 
 test("GPS mismatches stay truthful findings and invalid image bytes remain rejected", async () => {
   const result = validatePlantingReport({
@@ -103,14 +103,14 @@ test("photo coordinates are checked against the registered site polygon", () => 
   assert.equal(isPointInPolygon(14, 123.5, polygon), false);
 });
 
-test("municipality scope uses the Juban barangay polygons", () => {
-  assert.equal(isPointInGeoJsonFeatureCollection(12.795, 124, jubanBarangayBoundaries), true);
-  assert.equal(isPointInGeoJsonFeatureCollection(14, 123.5, jubanBarangayBoundaries), false);
+test("municipality scope uses the Bulan barangay polygons", () => {
+  assert.equal(isPointInGeoJsonFeatureCollection(12.57, 123.965, bulanBarangayBoundaries), true);
+  assert.equal(isPointInGeoJsonFeatureCollection(14, 123.5, bulanBarangayBoundaries), false);
 });
 
 test("evidence stays scoped to its contributor and missing photo GPS is blocked", async () => {
   table("events").set("event-1", { date: "2026-09-17", plantingSiteId: "site-1" });
-  table("sites").set("site-1", { latitude: 12.795, longitude: 124, coverageRadiusMeters: 20 });
+  table("sites").set("site-1", { latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 20 });
   table("plantingReports").set("event_event-1", { verificationStatus: "Draft" });
   table("plantingContributions").set("contribution-1", {
     eventId: "event-1", participantId: "guest-1", reportId: "event_event-1", quantity: 5,

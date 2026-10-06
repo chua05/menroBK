@@ -586,26 +586,25 @@ const createSeedlingRequest =
       requestData.eventProposal?.plantingSiteId
     );
 
+    const isProposedSite = requestData.workflow?.siteMode === "proposed";
     if (!plantingSiteId) {
       throw new Error("Planting site is required.");
     }
 
     // Reuse site service so utilization logic is authoritative.
-    const site = await siteService.getSiteById(
-      plantingSiteId
-    );
+    const site = isProposedSite ? null : await siteService.getSiteById(plantingSiteId);
 
-    if (normalizeBarangay(site.barangay) !==
+    if (site && normalizeBarangay(site.barangay) !==
         normalizeBarangay(requestData.eventProposal?.barangay)) {
       throw new Error("Selected planting site does not belong to the event barangay.");
     }
 
-    if (String(site.status || "").trim().toLowerCase() !== "active") {
+    if (site && String(site.status || "").trim().toLowerCase() !== "active") {
       throw new Error("Selected planting site is archived.");
     }
 
     // site.utilizationPercentage now comes from site.service
-    const utilization = Number(site.utilizationPercentage || 0);
+    const utilization = Number(site?.utilizationPercentage || 0);
 
     if (utilization >= 90) {
       throw new Error("Selected planting site is already full.");
@@ -1018,6 +1017,14 @@ const returnSeedlingRequest = async (
 // ========================================
 
 const resubmitSeedlingRequest = async (id, participantId, data) => {
+  if (
+    data?.workflow?.siteMode === "proposed" &&
+    cleanString(data.workflow.niyogan || data.workflow.niyoganStatus).toLowerCase() === "yes"
+  ) {
+    throw new Error(
+      "Planting Location Not Eligible. The proposed planting area is identified as a coconut farm (Niyogan). Please provide another planting location to continue."
+    );
+  }
   const requestRef = db.collection(COLLECTION).doc(id);
   const submittedItems = normalizeRequestItems(data);
   validateItemStructure(submittedItems);
@@ -1059,26 +1066,27 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
     }
 
     const proposal = data.eventProposal || {};
-    const siteRef = db.collection(SITES_COLLECTION).doc(
+    const isProposedSite = data.workflow?.siteMode === "proposed";
+    const siteRef = isProposedSite ? null : db.collection(SITES_COLLECTION).doc(
       cleanString(proposal.plantingSiteId)
     );
-    const siteDoc = await transaction.get(siteRef);
+    const siteDoc = siteRef ? await transaction.get(siteRef) : null;
 
-    if (!siteDoc.exists) {
+    if (siteDoc && !siteDoc.exists) {
       throw new Error("Planting site not found.");
     }
 
-    const site = siteDoc.data();
-    if (cleanString(site.status || "active").toLowerCase() !== "active") {
+    const site = siteDoc?.data() || null;
+    if (site && cleanString(site.status || "active").toLowerCase() !== "active") {
       throw new Error("Selected planting site is archived.");
     }
 
-    if (normalizeBarangay(site.barangay) !== normalizeBarangay(proposal.barangay)) {
+    if (site && normalizeBarangay(site.barangay) !== normalizeBarangay(proposal.barangay)) {
       throw new Error("Selected planting site does not belong to the event barangay.");
     }
 
-    const capacity = Number(site.maximumCapacity || 0);
-    const planted = Number(site.planted || 0);
+    const capacity = Number(site?.maximumCapacity || 0);
+    const planted = Number(site?.planted || 0);
     if (capacity > 0 && Math.round((planted / capacity) * 100) >= 90) {
       throw new Error("Selected planting site is already full.");
     }
@@ -1095,17 +1103,18 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
       purpose: cleanString(data.purpose),
       plantingLocation: cleanString(data.plantingLocation),
       preferredReleaseDate: data.preferredReleaseDate,
+      workflow: data.workflow && typeof data.workflow === "object" ? data.workflow : {},
       eventProposal: {
         eventName: cleanString(proposal.eventName),
         barangay: cleanString(proposal.barangay),
-        plantingSiteId: siteDoc.id,
-        plantingSiteName: cleanString(site.siteName || site.name),
+        plantingSiteId: siteDoc?.id || "PROPOSED",
+        plantingSiteName: site ? cleanString(site.siteName || site.name) : cleanString(data.workflow?.siteName),
         proposedDate: proposal.proposedDate,
         proposedStartTime: proposal.proposedStartTime,
         proposedEndTime: proposal.proposedEndTime,
         eventLocation: cleanString(data.plantingLocation),
-        latitude: Number(site.latitude),
-        longitude: Number(site.longitude),
+        latitude: Number(site?.latitude ?? proposal.latitude),
+        longitude: Number(site?.longitude ?? proposal.longitude),
         expectedParticipants: Number(proposal.expectedParticipants),
         description: cleanString(proposal.description),
         status: "Proposed",
@@ -1160,6 +1169,48 @@ const approveSeedlingRequest =
       db
         .collection(COLLECTION)
         .doc(id);
+
+    // A proposed location remains request-owned until final Admin approval.
+    // Register it through the existing site service immediately before the
+    // approval transaction, then link the request/event to the real site ID.
+    const approvalSnapshot = await requestRef.get();
+    if (approvalSnapshot.exists) {
+      const approvalRequest = approvalSnapshot.data();
+      const workflow = approvalRequest.workflow || {};
+      if (workflow.siteMode === "proposed" && !workflow.officialSiteId) {
+        const areaLabels = {
+          "Less than 1 hectare": 0.5,
+          "1 hectare": 1,
+          "2 hectares": 2,
+          "3 hectares": 3,
+          "4 hectares": 4,
+          "5 hectares": 5,
+          "6–10 hectares": 8,
+          "More than 10 hectares": 11,
+        };
+        const areaHectares = workflow.areaChoice === "Other / Exact Area"
+          ? Number(workflow.exactArea)
+          : Number(areaLabels[workflow.areaChoice] || 1);
+        const site = await siteService.createSite({
+          siteName: workflow.siteName,
+          barangay: workflow.siteBarangay,
+          siteType: workflow.landType || "Participant Proposed Site",
+          locationDescription: workflow.specificLocation,
+          areaHectares,
+          maximumCapacity: Math.max(1, Math.ceil(areaHectares * 1000)),
+          latitude: workflow.latitude,
+          longitude: workflow.longitude,
+          coverageRadiusMeters: 100,
+          description: workflow.siteNotes,
+        });
+        await requestRef.update({
+          "workflow.officialSiteId": site.id,
+          "workflow.officialSiteNumber": site.siteId,
+          "eventProposal.plantingSiteId": site.id,
+          updatedAt: Timestamp.now(),
+        });
+      }
+    }
 
     await db.runTransaction(
       async (transaction) => {
@@ -1263,7 +1314,7 @@ const approveSeedlingRequest =
             throw new Error(`Invalid approved sapling quantity for ${cleanString(inventoryData.species) || "a requested item"}.`);
           }
 
-          const availableQuantity = Number(inventoryData.availableQuantity || 0);
+          const availableQuantity = Number(inventoryData.currentQuantity ?? inventoryData.availableQuantity ?? 0);
           if (approvedQuantity > availableQuantity) {
             throw new Error(
               `Insufficient available sapling stock for ${cleanString(inventoryData.species) || item.species || "the requested item"}. Please review the approved quantity.`
@@ -1685,7 +1736,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       const stock = doc.data();
       const entered = releasedById.get(requested.inventoryId);
       const isLegacyReserved = request.inventoryReserved === true;
-      const available = Number(stock.availableQuantity || 0);
+      const available = Number(stock.currentQuantity ?? stock.availableQuantity ?? 0);
       const reserved = Number(stock.reservedQuantity || 0);
       if (isLegacyReserved) {
         if (reserved < Number(requested.quantity)) {
@@ -1719,7 +1770,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       ...eventDoc.data(), seedlingTotalQuantity: totalQuantityReleased,
     }, now);
     for (const { ref, stock, requested, entered, isLegacyReserved } of inventoryRows) {
-      const available = Number(stock.availableQuantity || 0);
+      const available = Number(stock.currentQuantity ?? stock.availableQuantity ?? 0);
       const reserved = Number(stock.reservedQuantity || 0);
       const released = entered.releasedQuantity;
       const remainder = Number(requested.quantity) - released;
@@ -1732,9 +1783,11 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
         : Number(stock.lowStockCycle || 0);
       transaction.update(ref, {
         availableQuantity: newAvailable,
+        currentQuantity: newAvailable,
         reservedQuantity: isLegacyReserved ? reserved - Number(requested.quantity) : reserved,
         distributedQuantity: Number(stock.distributedQuantity || 0) + released,
-        status: calculateInventoryStatus(newAvailable, lowStockThreshold),
+        status: calculateInventoryStatus(newAvailable, stock.stockStatus || stock.status),
+        stockStatus: calculateInventoryStatus(newAvailable, stock.stockStatus || stock.status),
         lowStockAlertActive: newAvailable <= lowStockThreshold,
         lowStockCycle,
         updatedBy: releasedBy,

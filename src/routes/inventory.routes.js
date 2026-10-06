@@ -4,6 +4,7 @@ const router = express.Router();
 
 const {
   addInventory,
+  getSpeciesMaster,
   getInventory,
   getAvailableInventory,
   getInventoryItem,
@@ -31,6 +32,13 @@ router.post(
   verifyToken,
   authorizeRoles("staff"),
   addInventory
+);
+
+router.get(
+  "/species",
+  verifyToken,
+  authorizeRoles("admin", "staff"),
+  getSpeciesMaster
 );
 
 // ========================================

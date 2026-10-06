@@ -283,7 +283,7 @@ const submitPlantingReport = async (
       "The selected planting event does not match the selected site and barangay.",
       "The selected planting event does not belong to the selected planting site.",
       "The selected planting event does not belong to the selected barangay.",
-      "Your photo is outside the Municipality of Juban coverage area. Please use a photo taken within Juban and try again.",
+      "Your photo is outside the Municipality of Bulan coverage area. Please use a photo taken within Bulan and try again.",
       "Photo capture timestamp is in the future and cannot be verified.",
     ];
 

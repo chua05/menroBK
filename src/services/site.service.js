@@ -1,10 +1,17 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
+const { isPointInGeoJsonFeatureCollection } = require("../utils/geo.util");
+const {
+  MUNICIPALITY,
+  PROVINCE,
+  BARANGAY_SET,
+  barangayGeoJson,
+} = require("../config/municipality");
 
 const SITE_COLLECTION = "sites";
 const COUNTER_COLLECTION = "counters";
 
-function getJubanYear(date = new Date()) {
+function getManilaYear(date = new Date()) {
   return Number(
     new Intl.DateTimeFormat("en-US", {
       timeZone: "Asia/Manila",
@@ -29,7 +36,7 @@ function getSiteCreationYear(data) {
       ? new Date(createdAt)
       : new Date();
 
-  return getJubanYear(Number.isNaN(date.getTime()) ? new Date() : date);
+  return getManilaYear(Number.isNaN(date.getTime()) ? new Date() : date);
 }
 
 async function ensureReadableSiteId(doc) {
@@ -107,7 +114,19 @@ function validateCoordinates(latitudeValue, longitudeValue) {
     throw new Error("Longitude must be between -180 and 180.");
   }
 
+  if (!isPointInGeoJsonFeatureCollection(latitude, longitude, barangayGeoJson)) {
+    throw new Error(`Planting site coordinates must be within the Municipality of ${MUNICIPALITY}.`);
+  }
+
   return { latitude, longitude };
+}
+
+function validateBarangay(value) {
+  const barangay = cleanString(value);
+  if (!BARANGAY_SET.has(barangay)) {
+    throw new Error(`Barangay must be one of the verified ${MUNICIPALITY} barangays.`);
+  }
+  return barangay;
 }
 
 function validateCoverageRadius(value) {
@@ -181,12 +200,22 @@ function formatSiteDocument(doc) {
   };
 }
 
+function isCurrentMunicipalitySite(site) {
+  return cleanString(site.municipality).toLowerCase() === MUNICIPALITY.toLowerCase() &&
+    cleanString(site.province).toLowerCase() === PROVINCE.toLowerCase() &&
+    isPointInGeoJsonFeatureCollection(
+      Number(site.latitude),
+      Number(site.longitude),
+      barangayGeoJson
+    );
+}
+
 // --------------------------------
 // CREATE SITE
 // --------------------------------
 const createSite = async (data) => {
   const siteName = cleanString(data.siteName);
-  const barangay = cleanString(data.barangay);
+  const barangay = validateBarangay(data.barangay);
   const siteType = cleanString(data.siteType);
 
   if (!siteName) {
@@ -237,7 +266,7 @@ const createSite = async (data) => {
   // Keep the auto-generated Firestore document ID as the relationship key.
   const siteRef = db.collection(SITE_COLLECTION).doc();
   const now = Timestamp.now();
-  const year = getJubanYear(now.toDate());
+  const year = getManilaYear(now.toDate());
   const counterRef = db
     .collection(COUNTER_COLLECTION)
     .doc(`plantingSites_${year}`);
@@ -246,8 +275,8 @@ const createSite = async (data) => {
     siteName,
     barangay,
 
-    municipality: "Juban",
-    province: "Sorsogon",
+    municipality: MUNICIPALITY,
+    province: PROVINCE,
 
     siteType,
 
@@ -351,7 +380,8 @@ const getAllSites = async () => {
       (site) =>
         String(site.status || "active")
           .trim()
-          .toLowerCase() !== "archived"
+          .toLowerCase() !== "archived" &&
+        isCurrentMunicipalitySite(site)
     );
 };
 
@@ -439,7 +469,9 @@ const updateSite = async (siteId, input, updatedBy) => {
   const optionalStrings = ["ownershipType", "coordinator", "coordinatorContact", "notes"];
   for (const field of requiredStrings) {
     if (Object.prototype.hasOwnProperty.call(input || {}, field)) {
-      const value = cleanString(input[field]);
+      const value = field === "barangay"
+        ? validateBarangay(input[field])
+        : cleanString(input[field]);
       if (!value) throw new Error(`${field} is required.`);
       changes[field] = value;
     }
@@ -575,6 +607,6 @@ module.exports = {
   archiveSite,
   restoreSite,
   formatSiteNumber,
-  getJubanYear,
+  getManilaYear,
   isReadableSiteId,
 };

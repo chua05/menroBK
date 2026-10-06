@@ -4,7 +4,7 @@ const { generateImageHash, validateImageBuffer, extractImageMetadata, isClearlyS
 const { validatePlantingReport } = require("../utils/plantingVerification.util");
 const { calculateDistanceMeters, isPointInPolygon, isPointInGeoJsonFeatureCollection } = require("../utils/geo.util");
 const { savePlantingPhoto, deletePlantingPhoto } = require("./fileStorage.service");
-const jubanBarangayBoundaries = require("../data/juban-barangays.json");
+const { barangayGeoJson: bulanBarangayBoundaries } = require("../config/municipality");
 
 const contributions = db.collection("plantingContributions");
 const reports = db.collection("plantingReports");
@@ -82,8 +82,8 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
       }
       const photoLatitude = Number(metadata.latitude);
       const photoLongitude = Number(metadata.longitude);
-      if (!isPointInGeoJsonFeatureCollection(photoLatitude, photoLongitude, jubanBarangayBoundaries)) {
-        throw new Error("The photo is outside the Municipality of Juban.");
+      if (!isPointInGeoJsonFeatureCollection(photoLatitude, photoLongitude, bulanBarangayBoundaries)) {
+        throw new Error("The photo is outside the Municipality of Bulan.");
       }
       const verification = validatePlantingReport({
         submittedLatitude: photoLatitude,

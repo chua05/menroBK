@@ -114,13 +114,13 @@ test("Admin approval creates a scheduled event and only needed secure invitation
       status: "Reviewed", participantId: "participant-1", participantName: "Participant One",
       items: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 10 }],
       eventProposal: {
-        eventName: "Planting", barangay: "Bacolod", plantingSiteId: "site-approval",
+        eventName: "Planting", barangay: "Bical", plantingSiteId: "site-approval",
         proposedDate: "2026-10-20", proposedStartTime: "08:00", proposedEndTime: "10:00",
         expectedParticipants,
       },
     });
     table("seedlingInventory").set("calamansi", { species: "Calamansi", availableQuantity: 100 });
-    table("sites").set("site-approval", { status: "active", siteName: "Site", barangay: "Bacolod", maximumCapacity: 100, planted: 0 });
+    table("sites").set("site-approval", { status: "active", siteName: "Site", barangay: "Bical", maximumCapacity: 100, planted: 0 });
   };
   try {
     delete process.env.GUEST_INVITATION_SECRET;
@@ -261,7 +261,7 @@ test("all authorized participants can use released event distributions with actu
     ],
   });
   Object.assign(table("events").get("EVT-2026-MULTI"), {
-    recordStatus: "scheduled", plantingSiteId: "site-multi", barangay: "Bacolod",
+    recordStatus: "scheduled", plantingSiteId: "site-multi", barangay: "Bical",
   });
   const controller = require("../src/controller/distribution.controller");
   const res = { result: {}, status(code) { this.result.code = code; return this; },
@@ -325,25 +325,25 @@ test("only the request owner or an event participant can submit planting evidenc
     items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged" }],
   });
   const event = table("events").get(eventId);
-  Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bacolod" });
+  Object.assign(event, { recordStatus: "scheduled", plantingSiteId: "site-1", barangay: "Bical" });
   table("sites").set("site-1", {
-    status: "active", siteName: "Site One", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124, coverageRadiusMeters: 50,
+    status: "active", siteName: "Site One", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50,
   });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "green" } })
     .jpeg()
     .withExif({
       IFD0: { Make: "Test Camera", Model: "Geo Test" },
       IFD3: {
-        GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
-        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1",
       },
     })
     .toBuffer();
   const payload = {
     distributionId: requestId, inventoryId: "calamansi", siteId: "site-1",
     participantId: "participant-unrelated", participantName: "Maria Santos",
-    participantType: "Volunteer", participantBarangay: "Bacolod", barangay: "Bacolod",
+    participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical",
     quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
     eventId,
   };
@@ -361,7 +361,7 @@ test("only the request owner or an event participant can submit planting evidenc
       /not authorized to submit planting reports/
     );
     await assert.rejects(
-      reportService.createPlantingReport({ ...payload, barangay: "Calmayon" },
+      reportService.createPlantingReport({ ...payload, barangay: "Calomagon" },
         [{ buffer: image, mimetype: "image/jpeg", originalname: "wrong-barangay.jpg" }]),
       /does not belong to the selected barangay/
     );
@@ -386,8 +386,8 @@ test("only the request owner or an event participant can submit planting evidenc
     assert.equal(submitted.siteCoverageRadiusMeters, 50);
     assert.equal(submitted.siteGpsToleranceMeters, 50);
     assert.equal(submitted.siteLocationStatus, "Within Assigned Site");
-    assert.equal(submitted.latitude, 12.795);
-    assert.equal(submitted.longitude, 124);
+    assert.equal(submitted.latitude, 12.57);
+    assert.equal(submitted.longitude, 123.965);
     assert.equal(submitted.municipalityScope, "inside");
     assert.equal(submitted.locationVerificationStatus, "site_match");
     const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-unrelated");
@@ -398,8 +398,8 @@ test("only the request owner or an event participant can submit planting evidenc
       .withExif({
         IFD0: { Make: "Test Camera", Model: "Geo Test 2" },
         IFD3: {
-          GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
-          GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+          GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1",
+          GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1",
         },
       })
       .toBuffer();
@@ -428,14 +428,14 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
     items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
   });
   Object.assign(table("events").get("EVT-NO-GPS"), {
-    recordStatus: "scheduled", plantingSiteId: "site-no-gps", barangay: "Bacolod",
+    recordStatus: "scheduled", plantingSiteId: "site-no-gps", barangay: "Bical",
   });
-  table("sites").set("site-no-gps", { status: "active", siteName: "Site", barangay: "Bacolod", latitude: 12, longitude: 123 });
+  table("sites").set("site-no-gps", { status: "active", siteName: "Site", barangay: "Bical", latitude: 12, longitude: 123 });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "blue" } }).png().toBuffer();
   const file = { buffer: image, mimetype: "image/png", originalname: "camera.png" };
   const body = {
     distributionId: "request-no-gps", inventoryId: "calamansi", siteId: "site-no-gps",
-    participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod", quantityPlanted: 20,
+    participantType: "requester", participantBarangay: "Bical", barangay: "Bical", quantityPlanted: 20,
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
     accuracy: "unavailable",
   };
@@ -459,14 +459,14 @@ test("client device coordinates never substitute for missing photo EXIF GPS", as
     items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
   });
   Object.assign(table("events").get("EVT-OUTSIDE"), {
-    recordStatus: "scheduled", plantingSiteId: "site-outside", barangay: "Bacolod",
+    recordStatus: "scheduled", plantingSiteId: "site-outside", barangay: "Bical",
   });
-  table("sites").set("site-outside", { status: "active", siteName: "Site", barangay: "Bacolod", latitude: 12, longitude: 123 });
+  table("sites").set("site-outside", { status: "active", siteName: "Site", barangay: "Bical", latitude: 12, longitude: 123 });
   const image = await sharp({ create: { width: 4, height: 4, channels: 3, background: "red" } }).png().toBuffer();
   await assert.rejects(
     reportService.createPlantingReport({
       distributionId: "request-outside", inventoryId: "calamansi", siteId: "site-outside",
-      participantId: "participant-1", participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod",
+      participantId: "participant-1", participantType: "requester", participantBarangay: "Bical", barangay: "Bical",
       quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site",
       latitude: 0, longitude: 0, eventId: "EVT-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]),
@@ -484,11 +484,11 @@ test("device coordinates cannot replace missing GPS in a Take Photo image", asyn
     items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
   });
   Object.assign(table("events").get("EVT-DEVICE-PHOTO"), {
-    recordStatus: "scheduled", plantingSiteId: "site-device-photo", barangay: "Bacolod",
+    recordStatus: "scheduled", plantingSiteId: "site-device-photo", barangay: "Bical",
   });
   table("sites").set("site-device-photo", {
-    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124,
+    status: "active", siteName: "Assigned Site", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965,
     polygon: [
       { lat: 12.794, lng: 123.999 }, { lat: 12.794, lng: 124.001 },
       { lat: 12.796, lng: 124.001 }, { lat: 12.796, lng: 123.999 },
@@ -501,11 +501,11 @@ test("device coordinates cannot replace missing GPS in a Take Photo image", asyn
   await assert.rejects(reportService.createPlantingReport({
       distributionId: "request-device-photo", inventoryId: "calamansi",
       siteId: "site-device-photo", participantId: "participant-1",
-      participantType: "Student / School Representative", participantBarangay: "", barangay: "Bacolod",
+      participantType: "Student / School Representative", participantBarangay: "", barangay: "Bical",
       organizationAffiliation: "Sorsogon State University", participantContactNumber: "09123456789",
       quantityPlanted: 20, plantingDate: "2026-09-24",
       plantingLocation: "Assigned Site", eventId: "EVT-DEVICE-PHOTO",
-      locationSource: "Device Location at Capture", latitude: 12.82, longitude: 124,
+      locationSource: "Device Location at Capture", latitude: 12.82, longitude: 123.965,
       accuracy: 8, photoCapturedAt: capturedAt, locationCapturedAt: capturedAt,
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]),
   /GPS location metadata was not found/);
@@ -522,11 +522,11 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
   });
   Object.assign(table("events").get("EVT-VALID-OUTSIDE"), {
-    recordStatus: "scheduled", plantingSiteId: "site-valid-outside", barangay: "Bacolod",
+    recordStatus: "scheduled", plantingSiteId: "site-valid-outside", barangay: "Bical",
   });
   table("sites").set("site-valid-outside", {
-    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124, coverageRadiusMeters: 50,
+    status: "active", siteName: "Assigned Site", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50,
     polygon: [
       { lat: 12.78, lng: 123.99 }, { lat: 12.78, lng: 124.01 },
       { lat: 12.83, lng: 124.01 }, { lat: 12.83, lng: 123.99 },
@@ -537,8 +537,8 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     .withExif({
       IFD0: { Make: "Test Camera", Model: "Outside GPS Test" },
       IFD3: {
-        GPSLatitudeRef: "N", GPSLatitude: "12/1 49/1 12/1",
-        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 36/1 0/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 0/1",
       },
     })
     .toBuffer();
@@ -547,7 +547,7 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     submitted = await reportService.createPlantingReport({
       distributionId: "request-valid-outside", inventoryId: "calamansi",
       siteId: "site-valid-outside", participantId: "participant-1",
-      participantType: "requester", participantBarangay: "Bacolod", barangay: "Bacolod",
+      participantType: "requester", participantBarangay: "Bical", barangay: "Bical",
       quantityPlanted: 20, plantingDate: "2026-09-17",
       plantingLocation: "Assigned Site", eventId: "EVT-VALID-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-original.jpg" }]);
@@ -559,8 +559,8 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     assert.equal(submitted.siteGpsValid, false);
     assert.equal(submitted.siteCoverageRadiusMeters, 50);
     assert.equal(submitted.siteLocationStatus, "Outside Assigned Site");
-    assert.equal(submitted.latitude, 12.82);
-    assert.equal(submitted.longitude, 124);
+    assert.equal(submitted.latitude, 12.6);
+    assert.equal(submitted.longitude, 123.95);
     assert.equal(submitted.municipalityScope, "inside");
     assert.equal(submitted.locationVerificationStatus, "site_mismatch");
     assert.equal(submitted.requiresStaffReview, true);
@@ -572,19 +572,19 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
   }
 });
 
-test("photo coordinates outside the Municipality of Juban are blocked", async () => {
+test("photo coordinates outside the Municipality of Bulan are blocked", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
-  seedApproved("request-outside-juban", "EVT-OUTSIDE-JUBAN");
-  await requestService.releaseSeedlingRequest("request-outside-juban", "staff-1", {
+  seedApproved("request-outside-bulan", "EVT-OUTSIDE-BULAN");
+  await requestService.releaseSeedlingRequest("request-outside-bulan", "staff-1", {
     items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "" }],
   });
-  Object.assign(table("events").get("EVT-OUTSIDE-JUBAN"), {
-    recordStatus: "scheduled", plantingSiteId: "site-outside-juban", barangay: "Bacolod",
+  Object.assign(table("events").get("EVT-OUTSIDE-BULAN"), {
+    recordStatus: "scheduled", plantingSiteId: "site-outside-bulan", barangay: "Bical",
   });
-  table("sites").set("site-outside-juban", {
-    status: "active", siteName: "Assigned Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124,
+  table("sites").set("site-outside-bulan", {
+    status: "active", siteName: "Assigned Site", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965,
   });
   const image = await sharp({ create: { width: 5, height: 5, channels: 3, background: "orange" } })
     .jpeg()
@@ -599,13 +599,13 @@ test("photo coordinates outside the Municipality of Juban are blocked", async ()
 
   await assert.rejects(
     reportService.createPlantingReport({
-      distributionId: "request-outside-juban", inventoryId: "calamansi",
-      siteId: "site-outside-juban", barangay: "Bacolod", participantId: "participant-1",
-      participantType: "Volunteer", participantBarangay: "Bacolod",
+      distributionId: "request-outside-bulan", inventoryId: "calamansi",
+      siteId: "site-outside-bulan", barangay: "Bical", participantId: "participant-1",
+      participantType: "Volunteer", participantBarangay: "Bical",
       quantityPlanted: 20, plantingDate: "2026-09-17",
-      plantingLocation: "Assigned Site", eventId: "EVT-OUTSIDE-JUBAN",
-    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-juban.jpg" }]),
-    /outside the Municipality of Juban coverage area/
+      plantingLocation: "Assigned Site", eventId: "EVT-OUTSIDE-BULAN",
+    }, [{ buffer: image, mimetype: "image/jpeg", originalname: "outside-bulan.jpg" }]),
+    /outside the Municipality of Bulan coverage area/
   );
 });
 
@@ -640,11 +640,11 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   table("events").set("EVT-GUEST-SCOPE", {
     sourceRequestId: "request-3", status: "Upcoming", name: "Planting", date: "2026-09-29",
     allocationReleasedAt: new Date(), seedlingItems: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 90 }],
-    seedlingTotalQuantity: 90, plantingSiteId: "site-guest-scope", barangay: "Bacolod",
+    seedlingTotalQuantity: 90, plantingSiteId: "site-guest-scope", barangay: "Bical",
   });
   table("sites").set("site-guest-scope", {
-    status: "active", siteName: "Guest Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124, coverageRadiusMeters: 100,
+    status: "active", siteName: "Guest Site", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 100,
   });
   await db.runTransaction(async (transaction) => {
     guestService.createInvitationInTransaction(transaction, "EVT-GUEST-SCOPE", "request-3", new Date());
@@ -704,8 +704,8 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
     .withExif({
       IFD0: { Make: "Test Camera", Model: "Guest Photo" },
       IFD3: {
-        GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
-        GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+        GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1",
+        GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1",
       },
     })
     .toBuffer();
@@ -737,13 +737,13 @@ test("concurrent guest evidence submissions cannot exceed the released allocatio
   });
   table("events").set(eventId, {
     sourceRequestId: "request-guest-concurrent", status: "Upcoming", date: "2026-09-30",
-    allocationReleasedAt: new Date(), plantingSiteId: "site-guest-concurrent", barangay: "Bacolod",
+    allocationReleasedAt: new Date(), plantingSiteId: "site-guest-concurrent", barangay: "Bical",
     seedlingItems: [{ inventoryId: "narra", species: "Narra", quantity: 10 }],
     seedlingTotalQuantity: 10,
   });
   table("sites").set("site-guest-concurrent", {
-    status: "active", siteName: "Concurrent Site", barangay: "Bacolod",
-    latitude: 12.795, longitude: 124, coverageRadiusMeters: 100,
+    status: "active", siteName: "Concurrent Site", barangay: "Bical",
+    latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 100,
   });
   for (const guestId of ["guest-concurrent-a", "guest-concurrent-b"]) {
     table("eventParticipants").set(guestId, {
@@ -759,8 +759,8 @@ test("concurrent guest evidence submissions cannot exceed the released allocatio
   }).jpeg().withExif({
     IFD0: { Make: "Test Camera", Model: model },
     IFD3: {
-      GPSLatitudeRef: "N", GPSLatitude: "12/1 47/1 42/1",
-      GPSLongitudeRef: "E", GPSLongitude: "124/1 0/1 0/1",
+      GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1",
+      GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1",
     },
   }).toBuffer();
   const [firstImage, secondImage] = await Promise.all([

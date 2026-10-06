@@ -20,29 +20,9 @@ const inventoryCollection =
 // AUTOMATIC STATUS
 // ========================================
 
-const calculateInventoryStatus = (
-  availableQuantity,
-  lowStockThreshold = 20
-) => {
-  const available =
-    Number(availableQuantity || 0);
-
-  const threshold =
-    Number.isInteger(
-      Number(lowStockThreshold)
-    )
-      ? Number(lowStockThreshold)
-      : 20;
-
-  if (available <= 0) {
-    return "Out of Stock";
-  }
-
-  if (available <= threshold) {
-    return "Low Stock";
-  }
-
-  return "Available";
+const calculateInventoryStatus = (currentQuantity, preferredStatus = "Available") => {
+  if (Number(currentQuantity || 0) <= 0) return "Out of Stock";
+  return preferredStatus === "Limited" ? "Limited" : "Available";
 };
 
 // ========================================
@@ -55,19 +35,7 @@ const createInventory = async (
   const now =
     Timestamp.now();
 
-  const quantity =
-    Number(data.quantity);
-
-  const lowStockThreshold =
-    Number.isInteger(
-      Number(
-        data.lowStockThreshold
-      )
-    )
-      ? Number(
-          data.lowStockThreshold
-        )
-      : 20;
+  const initialQuantity = Number(data.initialQuantity);
 
   const inventoryData = {
     species:
@@ -75,20 +43,24 @@ const createInventory = async (
         data.species || ""
       ).trim(),
 
-    scientificName:
-      String(
-        data.scientificName || ""
-      ).trim(),
+    scientificName: data.scientificName == null ? null : String(data.scientificName).trim(),
 
     category:
       String(
         data.category || ""
       ).trim(),
 
-    quantity,
+    categorySpecification: String(data.categorySpecification || "").trim(),
+
+    initialQuantity,
+
+    currentQuantity: initialQuantity,
+
+    // Compatibility aliases for existing request, analytics, and release code.
+    quantity: initialQuantity,
 
     availableQuantity:
-      quantity,
+      initialQuantity,
 
     // Approved requests that are
     // waiting for physical release.
@@ -97,33 +69,23 @@ const createInventory = async (
     // Seedlings already physically released.
     distributedQuantity: 0,
 
-    lowStockThreshold,
-
     dateReceived:
       String(
         data.dateReceived || ""
       ).trim(),
 
-    sourceNursery:
-      String(
-        data.sourceNursery || ""
-      ).trim(),
-
-    batchReference:
-      String(
-        data.batchReference || ""
-      ).trim(),
+    sourceType: String(data.sourceType || "").trim(),
+    sourceSpecification: String(data.sourceSpecification || "").trim(),
+    storageLocation: String(data.storageLocation || "").trim(),
+    storageLocationSpecification: String(data.storageLocationSpecification || "").trim(),
 
     description:
       String(
         data.description || ""
       ).trim(),
 
-    status:
-      calculateInventoryStatus(
-        quantity,
-        lowStockThreshold
-      ),
+    stockStatus: calculateInventoryStatus(initialQuantity, data.stockStatus),
+    status: calculateInventoryStatus(initialQuantity, data.stockStatus),
 
     isDeleted: false,
 
@@ -140,19 +102,22 @@ const createInventory = async (
 
   const docRef = inventoryCollection.doc();
   let inventoryNumber = "";
+  let batchReference = "";
   await db.runTransaction(async (transaction) => {
-    inventoryNumber = await nextRecordNumber(transaction, {
-      prefix: "INV",
-      counterKey: "seedlingInventory",
+    batchReference = await nextRecordNumber(transaction, {
+      prefix: "BAT",
+      counterKey: "inventoryBatch",
       date: now.toDate(),
       timestamp: now,
     });
-    transaction.create(docRef, { ...inventoryData, inventoryNumber });
+    inventoryNumber = batchReference.replace(/^BAT-/, "INV-");
+    transaction.create(docRef, { ...inventoryData, inventoryNumber, batchReference });
   });
 
   return {
     id: docRef.id,
     inventoryNumber,
+    batchReference,
     ...inventoryData,
   };
 };
@@ -242,8 +207,7 @@ const getAvailableInventoryItems =
         (item) =>
           item.isDeleted !== true &&
           Number(
-            item.availableQuantity ||
-              0
+            item.currentQuantity ?? item.availableQuantity ?? 0
           ) > 0
       )
       .map((item) => ({
@@ -262,9 +226,15 @@ const getAvailableInventoryItems =
 
         availableQuantity:
           Number(
-            item.availableQuantity ||
+            item.currentQuantity ??
+              item.availableQuantity ??
               0
           ),
+
+        currentQuantity:
+          Number(item.currentQuantity ?? item.availableQuantity ?? 0),
+
+        batchReference: item.batchReference || "",
 
         status:
           item.status || "",
@@ -337,6 +307,22 @@ const updateInventoryById =
           doc.data();
 
         const updates = {};
+
+        if (updateData.stockStatus !== undefined) {
+          const currentQuantity = Number(
+            currentData.currentQuantity ?? currentData.availableQuantity ?? 0
+          );
+          const status = calculateInventoryStatus(currentQuantity, updateData.stockStatus);
+          updates.stockStatus = status;
+          updates.status = status;
+        }
+
+        for (const field of [
+          "sourceType", "sourceSpecification", "storageLocation",
+          "storageLocationSpecification", "description",
+        ]) {
+          if (updateData[field] !== undefined) updates[field] = updateData[field];
+        }
 
         // ========================================
         // BASIC INFORMATION
@@ -586,27 +572,11 @@ const addInventoryStock =
         const currentData =
           doc.data();
 
-        const currentQuantity =
-          Number(
-            currentData.quantity || 0
-          );
-
         const currentAvailable =
           Number(
-            currentData
-              .availableQuantity || 0
+            currentData.currentQuantity ??
+              currentData.availableQuantity ?? 0
           );
-
-        const lowStockThreshold =
-          Number(
-            currentData
-              .lowStockThreshold ??
-              20
-          );
-
-        const newQuantity =
-          currentQuantity +
-          quantityToAdd;
 
         const newAvailableQuantity =
           currentAvailable +
@@ -615,23 +585,23 @@ const addInventoryStock =
         const newStatus =
           calculateInventoryStatus(
             newAvailableQuantity,
-            lowStockThreshold
+            currentData.stockStatus || currentData.status
           );
 
         transaction.update(
           docRef,
           {
-            quantity:
-              newQuantity,
-
             availableQuantity:
+              newAvailableQuantity,
+
+            currentQuantity:
               newAvailableQuantity,
 
             status:
               newStatus,
 
-            lowStockAlertActive:
-              newAvailableQuantity <= lowStockThreshold,
+            stockStatus:
+              newStatus,
 
             updatedBy,
 

@@ -45,7 +45,7 @@ function addCalendarMonth(value) {
   const last = new Date(Date.UTC(targetYear, targetMonth + 1, 0, 12)).getUTCDate();
   return dateOnly(new Date(Date.UTC(targetYear, targetMonth, Math.min(original.getUTCDate(), last), 12)));
 }
-function todayInJuban() {
+function todayInBulan() {
   const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
     timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
   }).formatToParts(new Date()).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
@@ -62,7 +62,7 @@ function deriveCondition(healthy, damaged, dead, total) {
   if (damaged > 0 || dead > 0) return "Damaged";
   return "Healthy";
 }
-function lifecycleStatus(record, today = todayInJuban()) {
+function lifecycleStatus(record, today = todayInBulan()) {
   if (today >= record.monitoringEndDate) return "Monitoring Completed";
   const history = Array.isArray(record.history) ? record.history : [];
   const due = history.length === 0 ? record.startMonitoringDate : record.nextMonitoringDate;
@@ -187,7 +187,7 @@ async function createMonitoringRecord(data) {
         throw new Error("Monitoring lifecycle relationship is inconsistent.");
       }
 
-      const today = todayInJuban();
+      const today = todayInBulan();
       if (today >= current.monitoringEndDate) {
         throw new Error("The two-year monitoring period for this planting record has been completed. No additional monitoring record can be submitted.");
       }
