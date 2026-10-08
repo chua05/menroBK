@@ -10,11 +10,16 @@ const withCompleteness = (profile) => ({
   profileComplete: isParticipantProfileComplete(profile),
 });
 
-async function createUserProfile(user) {
+async function createUserProfile(user, options = {}) {
   const ref = users.doc(user.uid);
-  const doc = await ref.get();
+  const hasPrefetchedProfile = Object.hasOwn(options, "existingProfile");
+  const prefetchedProfile = hasPrefetchedProfile ? options.existingProfile : undefined;
+  const doc = hasPrefetchedProfile ? null : await ref.get();
+  const existingProfile = hasPrefetchedProfile
+    ? prefetchedProfile
+    : doc.exists ? { ...doc.data(), uid: doc.id } : null;
   const now = new Date();
-  if (!doc.exists) {
+  if (!existingProfile) {
     await db.runTransaction(async (transaction) => {
       const current = await transaction.get(ref);
       if (current.exists) return;
@@ -45,10 +50,15 @@ async function createUserProfile(user) {
         lastLoginAt: now,
       });
     });
+    return withCompleteness((await ref.get()).data());
   } else {
     await ref.update({ lastLoginAt: now, updatedAt: now });
+    return withCompleteness({
+      ...existingProfile,
+      lastLoginAt: now,
+      updatedAt: now,
+    });
   }
-  return withCompleteness((await ref.get()).data());
 }
 
 async function getUserProfile(uid) {

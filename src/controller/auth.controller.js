@@ -10,9 +10,23 @@ const {
 const verifyUser = async (req, res) => {
 
   try {
-
+    const profileSyncStartedAt = process.hrtime.bigint();
     const profile = await authService.createUserProfile(
-      req.firebaseUser
+      req.firebaseUser,
+      { existingProfile: req.existingUserProfile }
+    );
+    const profileSyncMs = Number(process.hrtime.bigint() - profileSyncStartedAt) / 1e6;
+    const timings = {
+      ...(req.authTimings || {}),
+      profileSyncMs,
+    };
+    res.setHeader(
+      "Server-Timing",
+      [
+        `firebase-token;dur=${(timings.tokenVerificationMs || 0).toFixed(1)}`,
+        `profile-read;dur=${(timings.profileLookupMs || 0).toFixed(1)}`,
+        `profile-sync;dur=${profileSyncMs.toFixed(1)}`,
+      ].join(", ")
     );
 
     return sendSuccess(

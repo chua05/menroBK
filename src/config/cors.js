@@ -121,6 +121,7 @@ const createCorsOptions = (env = process.env) => ({
   credentials: true,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type"],
+  exposedHeaders: ["Server-Timing"],
   optionsSuccessStatus: 204,
 });
 
