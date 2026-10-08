@@ -104,13 +104,9 @@ const verifyTokenForBootstrap = async (req, res, next) => {
 
     const token = authHeader.split(" ")[1];
 
-    const tokenVerificationStartedAt = process.hrtime.bigint();
     const decodedToken = await auth.verifyIdToken(token, true);
-    const tokenVerificationMs = Number(process.hrtime.bigint() - tokenVerificationStartedAt) / 1e6;
 
-    const profileLookupStartedAt = process.hrtime.bigint();
     const userProfile = await getUserByUid(decodedToken.uid);
-    const profileLookupMs = Number(process.hrtime.bigint() - profileLookupStartedAt) / 1e6;
 
     if (userProfile && userProfile.status !== "active") {
       return sendError(
@@ -131,7 +127,6 @@ const verifyTokenForBootstrap = async (req, res, next) => {
       picture: decodedToken.picture || "",
     };
     req.existingUserProfile = userProfile;
-    req.authTimings = { tokenVerificationMs, profileLookupMs };
 
     next();
 
