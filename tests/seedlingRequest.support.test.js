@@ -81,6 +81,31 @@ require.cache[firebasePath] = {
 
 const service = require("../src/services/seedlingRequest.service");
 const identificationService = require("../src/services/requestIdentification.service");
+
+test("identification encryption configuration requires canonical Base64 for exactly 32 bytes", () => {
+  assert.throws(
+    () => identificationService.validateIdentificationEncryptionConfig({}),
+    (error) => error.code === "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED",
+  );
+  for (const invalidKey of [
+    "not-base64",
+    Buffer.alloc(16, 1).toString("base64"),
+    `${Buffer.alloc(32, 1).toString("base64")}ignored`,
+  ]) {
+    assert.throws(
+      () => identificationService.validateIdentificationEncryptionConfig({
+        REQUEST_IDENTIFICATION_ENCRYPTION_KEY: invalidKey,
+      }),
+      (error) => error.code === "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED",
+    );
+  }
+  assert.equal(
+    identificationService.validateIdentificationEncryptionConfig({
+      REQUEST_IDENTIFICATION_ENCRYPTION_KEY: Buffer.alloc(32, 1).toString("base64"),
+    }),
+    true,
+  );
+});
 const seedlingController = require("../src/controller/seedlingRequest.controller");
 const siteService = require("../src/services/site.service");
 const siteController = require("../src/controller/site.controller");
@@ -450,6 +475,17 @@ test("request submission rejects a real site in a different barangay", async () 
   const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bical" } });
   assert.match(next.requestNumber, /^REQ-\d{4}-\d{3,}$/);
   assert.notEqual(next.requestNumber, created.requestNumber);
+  const retryPayload = {
+    ...payload,
+    clientSubmissionId: "4b82758d-8883-4e2e-b5dd-736e647838a4",
+    eventProposal: { ...payload.eventProposal, barangay: "Bical" },
+  };
+  const beforeRetryCount = records.seedlingRequests.size;
+  const firstAttempt = await service.createSeedlingRequest(retryPayload);
+  const repeatedAttempt = await service.createSeedlingRequest(retryPayload);
+  assert.equal(repeatedAttempt.id, firstAttempt.id);
+  assert.equal(repeatedAttempt.requestNumber, firstAttempt.requestNumber);
+  assert.equal(records.seedlingRequests.size, beforeRetryCount + 1);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
     .some((request) => request.id === created.id));
   if (previousKey === undefined) delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
@@ -498,6 +534,51 @@ test("submission rejects unsupported root-level sensitive fields", async () => {
   }, res);
   assert.equal(res.result.code, 400);
   assert.match(res.result.body.message, /supported request structure/);
+});
+
+test("submission reports unavailable secure identification storage as a service error", async () => {
+  records.seedlingInventory.set("inventory-secure", { species: "Narra" });
+  const previousKey = process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
+  delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
+  const res = response();
+  await seedlingController.submitSeedlingRequest({
+    user: {
+      uid: "participant-secure",
+      fullName: "Participant Secure",
+      organization: "Resident / Individual",
+      contactNumber: "09123456789",
+    },
+    body: {
+      items: [{ inventoryId: "inventory-secure", quantity: 2 }],
+      purpose: "Personal Planting",
+      plantingLocation: "Purok 1, Bical, Bulan, Sorsogon",
+      preferredReleaseDate: "2099-01-02",
+      clientSubmissionId: "25ee06a9-6702-4236-9589-f22f8ce83dcb",
+      workflow: { siteMode: "proposed" },
+      identification: {
+        identificationType: "national_id",
+        idNumber: "1234-5678-9012",
+        confirmed: true,
+      },
+      eventProposal: {
+        eventName: "Individual planting schedule",
+        barangay: "Bical",
+        plantingSiteId: "PROPOSED",
+        proposedDate: "2099-01-03",
+        startTime: "08:00",
+        endTime: "09:00",
+        eventLocation: "Purok 1, Bical, Bulan, Sorsogon",
+        latitude: 12.65,
+        longitude: 123.91,
+        expectedParticipants: 1,
+      },
+    },
+  }, res);
+  assert.equal(res.result.code, 503);
+  assert.match(res.result.body.message, /secure identification storage is not configured/);
+  assert.equal(JSON.stringify(res.result.body).includes("1234-5678-9012"), false);
+  if (previousKey === undefined) delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
+  else process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY = previousKey;
 });
 
 test("legacy request and review IDs are migrated once without changing document IDs", async () => {

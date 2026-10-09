@@ -261,7 +261,20 @@ const submitSeedlingRequest = async (
       eventProposal,
       identification,
       workflow,
+      clientSubmissionId,
     } = req.body || {};
+
+    if (
+      clientSubmissionId !== undefined &&
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        String(clientSubmissionId),
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "The submission identifier is invalid. Please refresh the form and try again.",
+      });
+    }
 
     const validatedIdentification = validateIdentificationInput(identification);
 
@@ -530,6 +543,8 @@ const submitSeedlingRequest = async (
 
         preferredReleaseDate,
 
+        clientSubmissionId: cleanString(clientSubmissionId),
+
         workflow: workflow && typeof workflow === "object" ? workflow : {},
 
         eventProposal: {
@@ -623,12 +638,17 @@ const submitSeedlingRequest = async (
       error.code || error.message
     );
 
-    const publicMessage = error.code === "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED"
-      ? "Request submission is temporarily unavailable. Please contact MENRO."
-      : error.message || "Failed to submit seedling request.";
+    const configurationError = error.code === "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED";
+    const databaseError = ["ABORTED", "DEADLINE_EXCEEDED", "INTERNAL", "UNAVAILABLE"]
+      .includes(String(error.code || "").toUpperCase());
+    const publicMessage = configurationError
+      ? "Request submission is temporarily unavailable because secure identification storage is not configured. Please contact MENRO."
+      : databaseError
+        ? "The request database is temporarily unavailable. Please check My Requests before retrying."
+        : error.message || "Failed to submit seedling request.";
 
     return res
-      .status(400)
+      .status(configurationError || databaseError ? 503 : 400)
       .json({
         success: false,
         message: publicMessage,

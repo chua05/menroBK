@@ -82,18 +82,23 @@ function validateIdentificationInput(input) {
 
 function getEncryptionKey(env = process.env) {
   const encoded = clean(env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY);
-  let key;
-  try {
-    key = Buffer.from(encoded, "base64");
-  } catch {
-    key = Buffer.alloc(0);
-  }
-  if (key.length !== 32) {
-    const error = new Error("Request identification encryption is not configured.");
+  const key = Buffer.from(encoded, "base64");
+  const isCanonicalBase64 =
+    /^[A-Za-z0-9+/]{43}=$/.test(encoded) &&
+    key.toString("base64") === encoded;
+  if (!isCanonicalBase64 || key.length !== 32) {
+    const error = new Error(
+      "REQUEST_IDENTIFICATION_ENCRYPTION_KEY must be a Base64-encoded 32-byte key."
+    );
     error.code = "IDENTIFICATION_ENCRYPTION_NOT_CONFIGURED";
     throw error;
   }
   return key;
+}
+
+function validateIdentificationEncryptionConfig(env = process.env) {
+  getEncryptionKey(env);
+  return true;
 }
 
 function encryptIdNumber(idNumber, env = process.env, requestId = "") {
@@ -203,5 +208,6 @@ module.exports = {
   maskIdNumber,
   publicIdentification,
   revealIdentification,
+  validateIdentificationEncryptionConfig,
   validateIdentificationInput,
 };

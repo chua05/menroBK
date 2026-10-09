@@ -1,6 +1,7 @@
 const {
   db,
 } = require("../config/firebase");
+const crypto = require("crypto");
 
 const {
   Timestamp,
@@ -610,7 +611,16 @@ const createSeedlingRequest =
       throw new Error("Selected planting site is already full.");
     }
 
-    const docRef = db.collection(COLLECTION).doc();
+    const clientSubmissionId = cleanString(data.clientSubmissionId);
+    const documentId = clientSubmissionId
+      ? crypto.createHash("sha256")
+        .update(`${cleanString(data.participantId)}:${clientSubmissionId}`)
+        .digest("hex")
+        .slice(0, 40)
+      : "";
+    const docRef = documentId
+      ? db.collection(COLLECTION).doc(documentId)
+      : db.collection(COLLECTION).doc();
     const identificationRecord = identification
       ? buildIdentificationRecord(docRef.id, data.participantId, identification, now)
       : null;
@@ -625,7 +635,15 @@ const createSeedlingRequest =
     const counterRef = db.collection(COUNTERS_COLLECTION)
       .doc(`${REQUEST_COUNTER_DOCUMENT}_${requestYear}`);
 
+    let persistedRequest = null;
     await db.runTransaction(async (transaction) => {
+      if (clientSubmissionId) {
+        const existingRequest = await transaction.get(docRef);
+        if (existingRequest.exists) {
+          persistedRequest = { id: docRef.id, ...existingRequest.data() };
+          return;
+        }
+      }
       const counterDoc = await transaction.get(counterRef);
       const currentValue = Math.max(requestSequenceFloor, counterDoc.exists
         ? Number(counterDoc.data()?.lastNumber || 0)
@@ -652,14 +670,10 @@ const createSeedlingRequest =
         );
       }
       requestData.requestNumber = requestNumber;
+      persistedRequest = { id: docRef.id, ...requestData };
     });
 
-    return stripSensitiveIdentification({
-      id:
-        docRef.id,
-
-      ...requestData,
-    });
+    return stripSensitiveIdentification(persistedRequest);
   };
 
 // ========================================
