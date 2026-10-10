@@ -47,8 +47,10 @@ async function recordContribution(eventId, participantId, inventoryId, quantity,
       throw new Error("This planting report has already been finalized.");
     }
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
+    const pendingReservations = { ...(event.pendingSeedlingsByInventory || {}) };
     const existing = Number(recorded[inventoryId] || 0);
-    const remaining = Number(allocation.quantity) - existing;
+    const reserved = Number(pendingReservations[inventoryId] || 0);
+    const remaining = Number(allocation.quantity) - existing - reserved;
     if (Number(quantity) > Math.max(0, remaining)) {
       throw new Error(
         `Quantity exceeds the remaining reportable quantity. Only ${Math.max(0, remaining)} seedlings remain available for reporting.`
@@ -66,7 +68,17 @@ async function recordContribution(eventId, participantId, inventoryId, quantity,
       species: allocation.species,
       quantity: Number(quantity),
       evidencePending: true,
+      allocationReserved: true,
+      staffApprovalRequired: true,
+      requiresStaffReview: true,
+      submissionWorkflowVersion: 2,
       recordedAt: now,
+    });
+    pendingReservations[inventoryId] = reserved + Number(quantity);
+    transaction.update(eventRef, {
+      pendingSeedlingsByInventory: pendingReservations,
+      pendingSeedlingQuantity: Number(event.pendingSeedlingQuantity || 0) + Number(quantity),
+      updatedAt: now,
     });
   });
   const doc = await contributionRef.get();

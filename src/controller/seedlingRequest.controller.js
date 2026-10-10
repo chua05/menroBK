@@ -941,6 +941,13 @@ const approveRequest = async (
   req,
   res
 ) => {
+  if (!req.user?.uid) {
+    return res.status(401).json({
+      success: false,
+      message: "Authentication is required to approve this request.",
+    });
+  }
+
   try {
     // Approval does not require a reason.
     const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason);
@@ -957,11 +964,26 @@ const approveRequest = async (
       error
     );
 
-    return res.status(400).json({
+    const publicMessages = [
+      "Seedling request not found.",
+      "Only reviewed requests can be approved.",
+      "Inventory has already been reserved for this request.",
+      "A planting event has already been created for this request.",
+      "The request has no linked planting site.",
+      "The request has no event barangay.",
+      "Planting site not found.",
+      "Selected planting site is not active.",
+      "Selected planting site is already full.",
+      "Selected planting site does not belong to the event barangay.",
+    ];
+    const isPublicError = publicMessages.includes(error.message) ||
+      /^(Linked seedling inventory|Invalid approved sapling quantity|Insufficient available sapling stock)/.test(error.message || "");
+
+    return res.status(isPublicError ? 400 : 500).json({
       success: false,
-      message:
-        error.message ||
-        "Failed to approve request.",
+      message: isPublicError
+        ? error.message
+        : "Unable to approve this request right now. Please try again or contact the system administrator.",
     });
   }
 };
@@ -974,6 +996,13 @@ const rejectRequest = async (
   req,
   res
 ) => {
+  if (!req.user?.uid) {
+    return res.status(401).json({
+      success: false,
+      message: "Authentication is required to reject this request.",
+    });
+  }
+
   try {
     const reason =
       validateDecisionReason(

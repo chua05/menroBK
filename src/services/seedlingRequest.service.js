@@ -1179,6 +1179,11 @@ const approveSeedlingRequest =
     approvedBy,
     reason
   ) => {
+    const adminUid = cleanString(approvedBy);
+    if (!adminUid) {
+      throw new Error("An authenticated administrator is required to approve this request.");
+    }
+
     const requestRef =
       db
         .collection(COLLECTION)
@@ -1216,6 +1221,8 @@ const approveSeedlingRequest =
           longitude: workflow.longitude,
           coverageRadiusMeters: 100,
           description: workflow.siteNotes,
+          createdBy: adminUid,
+          sourceRequestId: id,
         });
         await requestRef.update({
           "workflow.officialSiteId": site.id,
@@ -1486,7 +1493,7 @@ const approveSeedlingRequest =
                 inventoryRecords[0]
                   .inventoryData,
 
-              approvedBy,
+              approvedBy: adminUid,
 
               approvedAt:
                 now,
@@ -1507,9 +1514,9 @@ const approveSeedlingRequest =
         // Store approvedItems on the request for later release and auditing.
         transaction.update(requestRef, {
           status: "Approved",
-          approvedBy,
+          approvedBy: adminUid,
           approvedAt: now,
-          decisionBy: approvedBy,
+          decisionBy: adminUid,
           decisionAt: now,
           eventId,
           eventCreated: true,
@@ -1576,6 +1583,11 @@ const rejectSeedlingRequest =
     rejectedBy,
     reason
   ) => {
+    const adminUid = cleanString(rejectedBy);
+    if (!adminUid) {
+      throw new Error("An authenticated administrator is required to reject this request.");
+    }
+
     const rejectionReason = cleanString(reason);
     if (!rejectionReason) {
       throw new Error("A rejection reason is required.");
@@ -1616,7 +1628,7 @@ const rejectSeedlingRequest =
       status:
         "Rejected",
 
-      rejectedBy,
+      rejectedBy: adminUid,
 
       rejectedAt:
         now,
@@ -1625,7 +1637,7 @@ const rejectSeedlingRequest =
         rejectionReason,
 
       decisionBy:
-        rejectedBy,
+        adminUid,
 
       decisionAt:
         now,

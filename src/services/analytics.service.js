@@ -156,7 +156,7 @@ async function getDashboard(rawFilters = {}) {
         staffReviewStatus: contribution.staffReviewStatus || "",
         reportingProgress: report.reportingProgress,
         accounted: contribution.staffReviewStatus === "Accepted" ||
-          (contribution.verificationStatus === "Verified" &&
+          (contribution.staffApprovalRequired !== true && contribution.verificationStatus === "Verified" &&
             ["", "Not Required", "Accepted"].includes(contribution.staffReviewStatus || "")) ||
           (!contribution.verificationStatus && !contribution.staffReviewStatus &&
             (report.verificationStatus === "Approved" || report.reportingProgress === "Completed")),
@@ -165,7 +165,8 @@ async function getDashboard(rawFilters = {}) {
       plantingActivities.push({ reportId: report.id, quantity: number(report.quantityPlanted),
         date: report.plantingDate || report.eventDate || report.submittedAt || report.createdAt,
         ...context, verificationStatus: report.verificationStatus, reportingProgress: report.reportingProgress,
-        accounted: report.verificationStatus === "Approved" || report.reportingProgress === "Completed" });
+        accounted: report.verificationStatus === "Approved" ||
+          (report.staffApprovalRequired !== true && report.reportingProgress === "Completed") });
     }
   }
   const filteredRecordedPlanting = plantingActivities.filter((item) => matches(item, filters));

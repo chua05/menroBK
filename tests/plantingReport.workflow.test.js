@@ -121,6 +121,14 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(verified.acceptedQuantity, 50);
     assert.equal(verified.remainingAvailableQuantity, 100);
 
+    const newVerifiedPending = summarizeSubmissions([
+      { quantity: 50, verificationStatus: "Verified", staffReviewStatus: "Pending Review",
+        staffApprovalRequired: true },
+    ], 150);
+    assert.equal(newVerifiedPending.acceptedQuantity, 0);
+    assert.equal(newVerifiedPending.pendingReviewQuantity, 50);
+    assert.equal(newVerifiedPending.reportingProgress, "Partial");
+
     const legacyVerified = summarizeSubmissions([
       { quantity: 50, automatedVerificationStatus: "Passed Automated Check" },
     ], 150);

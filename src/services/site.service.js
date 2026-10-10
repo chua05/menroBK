@@ -1,4 +1,5 @@
 const { db } = require("../config/firebase");
+const crypto = require("crypto");
 const { Timestamp } = require("firebase-admin/firestore");
 const { isPointInGeoJsonFeatureCollection } = require("../utils/geo.util");
 const {
@@ -214,9 +215,14 @@ function isCurrentMunicipalitySite(site) {
 // CREATE SITE
 // --------------------------------
 const createSite = async (data) => {
+  const createdBy = cleanString(data.createdBy);
   const siteName = cleanString(data.siteName);
   const barangay = validateBarangay(data.barangay);
   const siteType = cleanString(data.siteType);
+
+  if (!createdBy) {
+    throw new Error("An authenticated user is required to create a planting site.");
+  }
 
   if (!siteName) {
     throw new Error("Site name is required.");
@@ -263,8 +269,13 @@ const createSite = async (data) => {
     data.coverageRadiusMeters
   );
 
-  // Keep the auto-generated Firestore document ID as the relationship key.
-  const siteRef = db.collection(SITE_COLLECTION).doc();
+  // Proposed sites use a deterministic document ID so an approval retry or a
+  // concurrent approval cannot register the same request as multiple sites.
+  const sourceRequestId = cleanString(data.sourceRequestId);
+  const siteDocumentId = sourceRequestId
+    ? `request_${crypto.createHash("sha256").update(sourceRequestId).digest("hex").slice(0, 40)}`
+    : undefined;
+  const siteRef = db.collection(SITE_COLLECTION).doc(siteDocumentId);
   const now = Timestamp.now();
   const year = getManilaYear(now.toDate());
   const counterRef = db
@@ -320,8 +331,8 @@ const createSite = async (data) => {
 
     growthDocumentation: [],
 
-    createdBy: data.createdBy,
-    updatedBy: data.createdBy,
+    createdBy,
+    updatedBy: createdBy,
 
     status: "active",
 
@@ -332,8 +343,22 @@ const createSite = async (data) => {
   };
 
   let siteId = "";
+  let storedSite = site;
 
   await db.runTransaction(async (transaction) => {
+    if (sourceRequestId) {
+      const existingSite = await transaction.get(siteRef);
+      if (existingSite.exists) {
+        const existingData = existingSite.data();
+        if (existingData.sourceRequestId !== sourceRequestId) {
+          throw new Error("The proposed planting site identifier is already in use.");
+        }
+        siteId = existingData.siteId;
+        storedSite = existingData;
+        return;
+      }
+    }
+
     const counterDoc = await transaction.get(counterRef);
     const lastSequence = counterDoc.exists
       ? Number(counterDoc.data()?.lastSequence || 0)
@@ -353,6 +378,7 @@ const createSite = async (data) => {
     );
     transaction.create(siteRef, {
       ...site,
+      ...(sourceRequestId ? { sourceRequestId } : {}),
       siteId,
     });
   });
@@ -360,7 +386,7 @@ const createSite = async (data) => {
   return {
     id: siteRef.id,
     siteId,
-    ...site,
+    ...storedSite,
   };
 };
 

@@ -17,6 +17,20 @@ function ref(name, id) {
       const value = table(name).get(id);
       return { id, exists: value !== undefined, data: () => value };
     },
+    async update(value) {
+      const current = { ...table(name).get(id) };
+      for (const [key, nextValue] of Object.entries(value)) {
+        const path = key.split(".");
+        let target = current;
+        while (path.length > 1) {
+          const segment = path.shift();
+          target[segment] = { ...(target[segment] || {}) };
+          target = target[segment];
+        }
+        target[path[0]] = nextValue;
+      }
+      table(name).set(id, current);
+    },
   };
 }
 const db = {
@@ -171,6 +185,93 @@ test("Admin approval creates a scheduled event and only needed secure invitation
   }
 });
 
+test("Admin approval registers a proposed site with the authenticated administrator audit UID", async () => {
+  table("seedlingRequests").set("approve-proposed-site", {
+    status: "Reviewed",
+    participantId: "participant-proposed",
+    participantName: "Proposed Site Owner",
+    items: [{ inventoryId: "narra-proposed", species: "Narra", quantity: 10 }],
+    workflow: {
+      siteMode: "proposed",
+      siteName: "Participant Proposed Site",
+      siteBarangay: "Bical",
+      landType: "Private Land",
+      specificLocation: "Bical, Bulan",
+      areaChoice: "1 hectare",
+      latitude: 12.57,
+      longitude: 123.965,
+    },
+    eventProposal: {
+      eventName: "Proposed Site Planting",
+      barangay: "Bical",
+      plantingSiteId: "",
+      proposedDate: "2026-10-20",
+      proposedStartTime: "08:00",
+      proposedEndTime: "10:00",
+      expectedParticipants: 0,
+    },
+  });
+  table("seedlingInventory").set("narra-proposed", {
+    species: "Narra",
+    availableQuantity: 100,
+  });
+
+  const approved = await requestService.approveSeedlingRequest(
+    "approve-proposed-site",
+    "admin-proposed-1"
+  );
+  const site = table("sites").get(approved.workflow.officialSiteId);
+
+  assert.equal(approved.status, "Approved");
+  assert.equal(approved.approvedBy, "admin-proposed-1");
+  assert.equal(site.createdBy, "admin-proposed-1");
+  assert.equal(site.updatedBy, "admin-proposed-1");
+  assert.equal(table("events").get(approved.eventId).createdBy, "admin-proposed-1");
+  assert.equal(table("seedlingInventory").get("narra-proposed").availableQuantity, 100);
+});
+
+test("Approval and rejection reject a missing authenticated administrator UID before writing", async () => {
+  const before = table("seedlingRequests").size;
+  await assert.rejects(
+    requestService.approveSeedlingRequest("any-request", ""),
+    /authenticated administrator is required/
+  );
+  await assert.rejects(
+    requestService.rejectSeedlingRequest("any-request", undefined, "Not eligible"),
+    /authenticated administrator is required/
+  );
+  assert.equal(table("seedlingRequests").size, before);
+});
+
+test("Administrator rejection records the verified actor and notifies without changing inventory", async () => {
+  table("seedlingRequests").set("reject-reviewed", {
+    status: "Reviewed",
+    requestNumber: "REQ-2026-998",
+    participantId: "participant-rejected",
+    participantName: "Rejected Participant",
+  });
+  table("seedlingInventory").set("reject-stock", {
+    species: "Narra",
+    availableQuantity: 25,
+  });
+
+  const rejected = await requestService.rejectSeedlingRequest(
+    "reject-reviewed",
+    "admin-reject-1",
+    "The planting plan requires revision."
+  );
+
+  assert.equal(rejected.status, "Rejected");
+  assert.equal(rejected.rejectedBy, "admin-reject-1");
+  assert.equal(rejected.decisionBy, "admin-reject-1");
+  assert.ok(rejected.rejectedAt);
+  assert.equal(table("seedlingInventory").get("reject-stock").availableQuantity, 25);
+  assert.equal(
+    table("notifications").get("request_rejected_reject-reviewed_participant-rejected").recipientUserId,
+    "participant-rejected"
+  );
+});
+
 test("partial release updates real stock, distribution, event allocation, and notification once", async () => {
   seedApproved("request-1", "EVT-2026-001");
   const input = { items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged seedlings" }] };
@@ -248,7 +349,7 @@ test("historical Approved requests use a real completed Distribution as Released
   assert.equal(table("seedlingRequests").get("legacy-released").status, "Approved");
 });
 
-test("all authorized participants can use released event distributions with actual item quantities", async () => {
+test("all authenticated participants can use released event distributions with actual item quantities", async () => {
   seedApproved("request-multi", "EVT-2026-MULTI");
   table("seedlingRequests").get("request-multi").items.push({ inventoryId: "narra", species: "Narra", quantity: 50 });
   table("seedlingInventory").set("narra", {
@@ -284,7 +385,7 @@ test("all authorized participants can use released event distributions with actu
   const unrelatedRes = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
   await controller.getMyDistributions({ user: { uid: "participant-unrelated" } }, unrelatedRes);
-  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), false);
+  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), true);
 });
 
 test("planting-report event eligibility allows ongoing and completed events but blocks future and invalid events", () => {
@@ -313,7 +414,7 @@ test("planting-report event eligibility allows ongoing and completed events but 
   }, now), /archived/);
 });
 
-test("only the request owner or an event participant can submit planting evidence", async () => {
+test("any authenticated participant can submit planting evidence for an eligible activity", async () => {
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -356,18 +457,10 @@ test("only the request owner or an event participant can submit planting evidenc
   let submitted;
   try {
     await assert.rejects(
-      reportService.createPlantingReport({ ...payload, participantId: "participant-not-joined" },
-        [{ buffer: image, mimetype: "image/jpeg", originalname: "unauthorized.jpg" }]),
-      /not authorized to submit planting reports/
-    );
-    await assert.rejects(
       reportService.createPlantingReport({ ...payload, barangay: "Calomagon" },
         [{ buffer: image, mimetype: "image/jpeg", originalname: "wrong-barangay.jpg" }]),
       /does not belong to the selected barangay/
     );
-    table("eventParticipants").set("member-1", {
-      eventId, userId: "participant-unrelated",
-    });
     submitted = await reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]);
     assert.equal(submitted.verificationStatus, "Partial");
@@ -379,6 +472,10 @@ test("only the request owner or an event participant can submit planting evidenc
     assert.equal(submitted.submissions[0].participantId, "participant-unrelated");
     assert.equal(submitted.submissions[0].contributorId, "participant-unrelated");
     assert.equal(submitted.submissions[0].participantType, "participant");
+    assert.equal(submitted.submissions[0].staffReviewStatus, "Pending Review");
+    assert.equal(submitted.submissions[0].staffApprovalRequired, true);
+    assert.equal(submitted.acceptedQuantity, 0);
+    assert.equal(submitted.pendingReviewQuantity, 20);
     assert.equal(submitted.participantName, "Participant One");
     assert.equal(submitted.submittedByName, "Maria Santos");
     assert.equal(submitted.gpsValid, true);
@@ -435,6 +532,8 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
   const file = { buffer: image, mimetype: "image/png", originalname: "camera.png" };
   const body = {
     distributionId: "request-no-gps", inventoryId: "calamansi", siteId: "site-no-gps",
+    submittedByName: "Test Participant", submittedBySector: "Volunteer",
+    submittedByContactNumber: "09171234567",
     participantType: "requester", participantBarangay: "Bical", barangay: "Bical", quantityPlanted: 20,
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
     accuracy: "unavailable",
@@ -750,10 +849,14 @@ test("concurrent guest evidence submissions cannot exceed the released allocatio
       eventId, participantType: "guest", fullName: guestId,
     });
   }
-  const [first, second] = await Promise.all([
+  const reservationResults = await Promise.allSettled([
     contributionService.recordContribution(eventId, "guest-concurrent-a", "narra", 10, "concurrent_key_a"),
     contributionService.recordContribution(eventId, "guest-concurrent-b", "narra", 10, "concurrent_key_b"),
   ]);
+  assert.equal(reservationResults.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(reservationResults.filter((result) => result.status === "rejected").length, 1);
+  const first = reservationResults.find((result) => result.status === "fulfilled").value;
+  const successfulGuestId = first.participantId;
   const makeImage = (background, model) => sharp({
     create: { width: 5, height: 5, channels: 3, background },
   }).jpeg().withExif({
@@ -763,19 +866,9 @@ test("concurrent guest evidence submissions cannot exceed the released allocatio
       GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1",
     },
   }).toBuffer();
-  const [firstImage, secondImage] = await Promise.all([
-    makeImage("red", "Concurrent A"), makeImage("blue", "Concurrent B"),
-  ]);
-  const results = await Promise.allSettled([
-    attachEvidence(eventId, "guest-concurrent-a", first.id,
-      [{ buffer: firstImage, mimetype: "image/jpeg", originalname: "concurrent-a.jpg" }]),
-    attachEvidence(eventId, "guest-concurrent-b", second.id,
-      [{ buffer: secondImage, mimetype: "image/jpeg", originalname: "concurrent-b.jpg" }]),
-  ]);
-  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
-  assert.match(results.find((result) => result.status === "rejected").reason.message,
-    /remaining reportable quantity|no longer accepting evidence/);
+  const firstImage = await makeImage("red", "Concurrent A");
+  await attachEvidence(eventId, successfulGuestId, first.id,
+    [{ buffer: firstImage, mimetype: "image/jpeg", originalname: "concurrent-a.jpg" }]);
   assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 10);
   assert.equal(table("plantingReports").get(`event_${eventId}`).activeSubmittedQuantity, 10);
 });

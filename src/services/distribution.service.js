@@ -144,6 +144,12 @@ const createDistributionRecordInTransaction = (
     participantName:
       requestData.participantName,
 
+    participantType:
+      requestData.participantType || requestData.userType || "",
+
+    barangay:
+      requestData.barangay || requestData.participantBarangay || "",
+
     organization:
       requestData.organization,
 
@@ -341,11 +347,10 @@ const getDistributionsByParticipantId =
 // Planting-report eligibility is event/distribution based, not requester based.
 // The route remains participant-only, while every released distribution tied to
 // a usable planting event is available for recording actual planting activity.
-const getEligibleDistributionsForParticipant = async (participantId) => {
-  const [distributionSnapshot, eventSnapshot, participantSnapshot] = await Promise.all([
+const getEligibleDistributionsForParticipant = async () => {
+  const [distributionSnapshot, eventSnapshot] = await Promise.all([
     distributionCollection.get(),
     db.collection("events").get(),
-    db.collection("eventParticipants").get(),
   ]);
 
   const usableEvents = new Map(
@@ -366,13 +371,6 @@ const getEligibleDistributionsForParticipant = async (participantId) => {
       })
       .map((event) => [event.id, event])
   );
-  const participantEventIds = new Set(participantSnapshot.docs
-    .map((doc) => doc.data())
-    .filter((participant) => participant.userId === participantId ||
-      participant.participantId === participantId)
-    .map((participant) => participant.eventId)
-    .filter(Boolean));
-
   return distributionSnapshot.docs
     .map((doc) => ({ id: doc.id, ...doc.data() }))
     .filter((distribution) => {
@@ -381,9 +379,28 @@ const getEligibleDistributionsForParticipant = async (participantId) => {
       if (!event || !event.allocationReleasedAt || !event.plantingSiteId) return false;
       const eventRequestMatches = !event.sourceRequestId ||
         String(event.sourceRequestId) === String(distribution.requestId || distribution.id);
-      const isRequester = distribution.participantId === participantId;
-      return eventRequestMatches && (isRequester || participantEventIds.has(event.id));
-    });
+      return eventRequestMatches;
+    })
+    .map((distribution) => ({
+      id: distribution.id,
+      distributionNumber: distribution.distributionNumber || "",
+      requestId: distribution.requestId || "",
+      requestNumber: distribution.requestNumber || "",
+      status: distribution.status,
+      eventId: distribution.eventId || "",
+      plantingSiteId: distribution.plantingSiteId || "",
+      plantingLocation: distribution.plantingLocation || "",
+      participantName: distribution.participantName || "",
+      participantType: distribution.participantType || "",
+      organization: distribution.organization || "",
+      barangay: distribution.barangay || "",
+      items: distribution.items || [],
+      totalQuantityReleased: distribution.totalQuantityReleased || 0,
+      quantityReleased: distribution.quantityReleased,
+      inventoryId: distribution.inventoryId,
+      species: distribution.species,
+      releasedAt: distribution.releasedAt || null,
+    }));
 };
 
 module.exports = {

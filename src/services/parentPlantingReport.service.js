@@ -28,8 +28,12 @@ function summarizeSubmissions(entries, releasedQuantity) {
   const submissions = entries.map(normalizeSubmission);
   const quantity = (items) => items.reduce((total, entry) => total + Number(entry.quantity || 0), 0);
   const active = submissions.filter((entry) => entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid");
-  const pending = active.filter((entry) => entry.verificationStatus === "Needs Review" && entry.staffReviewStatus === "Pending Review");
-  const accepted = active.filter((entry) => entry.verificationStatus === "Verified" || entry.staffReviewStatus === "Accepted");
+  const pending = active.filter((entry) => entry.staffReviewStatus === "Pending Review");
+  // New submissions always require an explicit Staff decision. Historical
+  // Verified/Not Required records remain official without fabricating reviews.
+  const accepted = active.filter((entry) => entry.staffReviewStatus === "Accepted" ||
+    (entry.staffApprovalRequired !== true && entry.verificationStatus === "Verified" &&
+      entry.staffReviewStatus === "Not Required"));
   const rejected = submissions.filter((entry) => entry.staffReviewStatus === "Rejected");
   const activeSubmittedQuantity = quantity(active);
   const acceptedQuantity = quantity(accepted);

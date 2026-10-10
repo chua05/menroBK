@@ -205,6 +205,11 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
   };
 
   await assert.rejects(
+    siteService.createSite({ ...input, createdBy: undefined }),
+    /authenticated user is required/
+  );
+
+  await assert.rejects(
     siteService.createSite({ ...input, coverageRadiusMeters: 0 }),
     /coverage radius greater than 0 meters/
   );
@@ -246,6 +251,23 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
   assert.deepEqual(
     [third.siteId, fourth.siteId].sort(),
     [`SITE-${year}-003`, `SITE-${year}-004`]
+  );
+
+  const proposedFirst = await siteService.createSite({
+    ...input,
+    siteName: "Retry-safe Proposed Site",
+    sourceRequestId: "request-proposed-retry",
+  });
+  const proposedRetry = await siteService.createSite({
+    ...input,
+    siteName: "Retry-safe Proposed Site",
+    sourceRequestId: "request-proposed-retry",
+  });
+  assert.equal(proposedRetry.id, proposedFirst.id);
+  assert.equal(proposedRetry.siteId, proposedFirst.siteId);
+  assert.equal(
+    [...records.sites.values()].filter((site) => site.sourceRequestId === "request-proposed-retry").length,
+    1
   );
 
   records.sites.set("legacy-juban-site", {

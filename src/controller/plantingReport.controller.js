@@ -13,6 +13,12 @@ const {
 );
 const { finalizeParent } = require("../services/parentPlantingReport.service");
 
+const PARTICIPANT_SECTORS = new Set([
+  "Barangay Official", "Volunteer", "Organization Member",
+  "Student / School Representative", "Government Employee",
+  "Private Sector Representative", "Other",
+]);
+
 
 // --------------------------------
 // NORMALIZE UPLOADED PHOTOS
@@ -84,6 +90,9 @@ const submitPlantingReport = async (
       eventName,
 
       remarks,
+      submittedByName,
+      submittedBySector,
+      submittedByContactNumber,
     } = req.body || {};
 
 
@@ -115,7 +124,6 @@ const submitPlantingReport = async (
       });
     }
 
-
     // --------------------------------
     // REQUIRED FIELDS
     // --------------------------------
@@ -127,13 +135,28 @@ const submitPlantingReport = async (
       quantityPlanted ===
         undefined ||
       !plantingDate ||
-      !plantingLocation
+      !plantingLocation ||
+      !String(submittedByName || "").trim() ||
+      !String(submittedBySector || "").trim() ||
+      !String(submittedByContactNumber || "").trim()
     ) {
       return res.status(400).json({
         success: false,
         message:
           "Please complete all required planting report fields.",
       });
+    }
+
+    if (!PARTICIPANT_SECTORS.has(String(submittedBySector).trim())) {
+      return res.status(400).json({ success: false, message: "Please select a valid sector." });
+    }
+
+    if (String(submittedByName).trim().length > 120 || String(submittedByContactNumber).trim().length > 30) {
+      return res.status(400).json({ success: false, message: "Submitter information is too long." });
+    }
+
+    if (!/^(?:\+63|0)9\d{9}$/.test(String(submittedByContactNumber).replace(/[\s-]/g, ""))) {
+      return res.status(400).json({ success: false, message: "Please enter a valid Philippine mobile number." });
     }
 
 
@@ -168,6 +191,10 @@ const submitPlantingReport = async (
           siteId,
           barangay,
           participantId,
+
+          submittedByName: String(submittedByName).trim(),
+          submittedBySector: String(submittedBySector).trim(),
+          submittedByContactNumber: String(submittedByContactNumber).trim(),
 
           participantName:
             req.user.fullName || "",
@@ -211,20 +238,7 @@ const submitPlantingReport = async (
     // --------------------------------
     // INFORMATIVE SUCCESS MESSAGE
     // --------------------------------
-    let message =
-      "Planting report submitted successfully.";
-
-    const newestSubmission = (report.submissions || [])
-      .filter((submission) => (submission.contributorId || submission.participantId) === participantId)
-      .sort((left, right) => {
-        const leftTime = left.recordedAt?.toMillis?.() || 0;
-        const rightTime = right.recordedAt?.toMillis?.() || 0;
-        return rightTime - leftTime;
-      })[0];
-    if (newestSubmission?.verificationStatus === "Needs Review" ||
-      (report.reportType !== "parent" && report.verificationStatus === "Needs Review")) {
-      message = "Planting report submitted successfully and is pending MENRO Staff review.";
-    }
+    const message = "Your planting report has been submitted and is awaiting MENRO Staff verification.";
 
 
     return res.status(201).json({
@@ -471,6 +485,9 @@ const approveReport = async (
         : ["Only pending review planting reports can be approved.",
             "Only submissions pending Staff review can be accepted."].includes(error.message)
           ? 409
+          : ["New planting report submissions may only be accepted by MENRO Staff.",
+              "New planting reports may only be approved by MENRO Staff."].includes(error.message)
+            ? 403
           : 500;
     if (statusCode === 500) console.error(error);
 
@@ -530,6 +547,9 @@ const rejectReport = async (
         : ["Only pending review planting reports can be rejected.",
             "Only submissions pending Staff review can be rejected."].includes(error.message)
           ? 409
+          : ["New planting report submissions may only be rejected by MENRO Staff.",
+              "New planting reports may only be rejected by MENRO Staff."].includes(error.message)
+            ? 403
           : error.message === "Rejection reason is required."
             ? 400
             : 500;

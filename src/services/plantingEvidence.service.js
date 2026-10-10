@@ -154,25 +154,31 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
       const allocation = (currentEvent.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
       if (!allocation) throw new Error("Seedling item is not allocated to this event.");
       const currentRecorded = Number(currentEvent.recordedSeedlingsByInventory?.[inventoryId] || 0);
-      const remaining = Math.max(0, Number(allocation.quantity) - currentRecorded);
       const quantity = Number(latestContribution.data().quantity || 0);
-      if (quantity > remaining) {
+      const pendingReservations = { ...(currentEvent.pendingSeedlingsByInventory || {}) };
+      const reserved = Number(pendingReservations[inventoryId] || 0);
+      const hasReservation = latestContribution.data().allocationReserved === true;
+      const remaining = Math.max(0, Number(allocation.quantity) - currentRecorded - reserved);
+      if ((!hasReservation && quantity > remaining) || (hasReservation && reserved < quantity)) {
         throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
       }
       const hasNeedsReview = photos.some((photo) => photo.automatedStatus === "Flagged");
       const verificationStatus = hasNeedsReview ? "Needs Review" : "Verified";
-      const staffReviewStatus = hasNeedsReview ? "Pending Review" : "Not Required";
+      const staffReviewStatus = "Pending Review";
       const report = latestReport.data();
       const released = Number(report.quantityReleased || currentEvent.seedlingTotalQuantity || 0);
       const active = Number(report.activeSubmittedQuantity || 0) + quantity;
-      const accepted = Number(report.acceptedQuantity || 0) + (verificationStatus === "Verified" ? quantity : 0);
-      const pending = Number(report.pendingReviewQuantity || 0) + (staffReviewStatus === "Pending Review" ? quantity : 0);
+      const accepted = Number(report.acceptedQuantity || 0);
+      const pending = Number(report.pendingReviewQuantity || 0) + quantity;
       const reportingProgress = released > 0 && accepted >= released && pending === 0
         ? "Completed"
         : released > 0 && active >= released && pending > 0
           ? "Fully Reported — Awaiting Review"
           : active > 0 ? "Partial" : "Awaiting Submission";
       const recorded = { ...(currentEvent.recordedSeedlingsByInventory || {}), [inventoryId]: currentRecorded + quantity };
+      if (hasReservation) {
+        pendingReservations[inventoryId] = Math.max(0, reserved - quantity);
+      }
       for (const photo of photos) {
         transaction.create(evidenceHashes.doc(photo.imageHash), {
           reportId: reportRef.id, contributionId, eventId, createdAt: now,
@@ -188,14 +194,21 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
         photoCapturedAt: photos[0].metadata.capturedAt || null,
         verificationStatus,
         staffReviewStatus,
+        staffApprovalRequired: true,
+        requiresStaffReview: true,
+        submissionWorkflowVersion: 2,
         automatedVerificationStatus: hasNeedsReview ? "Flagged" : "Passed Automated Check",
         verificationDetails: [...new Set(photos.flatMap((photo) => photo.suspiciousFlags))],
         evidencePending: false,
+        allocationReserved: false,
         suspiciousFlags: [...new Set(photos.flatMap((photo) => photo.suspiciousFlags))],
         updatedAt: now,
       });
       transaction.update(eventRef, {
         recordedSeedlingsByInventory: recorded,
+        pendingSeedlingsByInventory: pendingReservations,
+        pendingSeedlingQuantity: Math.max(0,
+          Number(currentEvent.pendingSeedlingQuantity || 0) - (hasReservation ? quantity : 0)),
         recordedSeedlingQuantity: Number(currentEvent.recordedSeedlingQuantity || 0) + quantity,
         remainingSeedlingQuantity: Math.max(0, Number(currentEvent.seedlingTotalQuantity || 0) -
           Number(currentEvent.recordedSeedlingQuantity || 0) - quantity),

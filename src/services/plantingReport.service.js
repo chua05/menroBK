@@ -188,9 +188,12 @@ const participantSafeReport = (report, participantId) => {
       participantContactNumber: submission.contributorId === participantId
         ? submission.participantContactNumber || ""
         : "",
+      submittedByContactNumber: submission.contributorId === participantId
+        ? submission.submittedByContactNumber || ""
+        : "",
     })),
-    submittedByName: ownLatest?.contributorName || "",
-    submittedByType: ownLatest?.participantUserType || "",
+    submittedByName: ownLatest?.submittedByName || ownLatest?.contributorName || "",
+    submittedByType: ownLatest?.submittedBySector || ownLatest?.participantUserType || "",
     participantContactNumber: report.participantId === participantId
       ? report.participantContactNumber || ""
       : "",
@@ -912,8 +915,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
   const automatedStatus = automatedVerificationStatus(suspiciousFlags);
   const submissionVerificationStatus = automatedStatus === "Passed Automated Check"
     ? "Verified" : "Needs Review";
-  const submissionStaffReviewStatus = submissionVerificationStatus === "Verified"
-    ? "Not Required" : "Pending Review";
+  const submissionStaffReviewStatus = "Pending Review";
 
 
   // --------------------------------
@@ -1185,6 +1187,18 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       participantId:
         data.participantId,
 
+      authenticatedSubmitterUid:
+        data.participantId,
+
+      submittedByName:
+        data.submittedByName,
+
+      submittedBySector:
+        data.submittedBySector,
+
+      submittedByContactNumber:
+        data.submittedByContactNumber,
+
       participantName:
         data.participantName ||
         distribution.participantName ||
@@ -1395,8 +1409,13 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         automatedStatus,
 
       verificationStatus:
+        "Pending Review",
+      technicalVerificationStatus:
         submissionVerificationStatus,
       staffReviewStatus: submissionStaffReviewStatus,
+      staffApprovalRequired: true,
+      requiresStaffReview: true,
+      submissionWorkflowVersion: 2,
 
 
       reviewedBy: "",
@@ -1444,25 +1463,13 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
             normalizeBarangay(event.barangay) !== normalizeBarangay(site.barangay)) {
           throw new Error("The selected planting event does not match the selected site and barangay.");
         }
-        const requestDoc = event.sourceRequestId
-          ? await transaction.get(db.collection("seedlingRequests").doc(event.sourceRequestId))
-          : null;
-        const membershipSnapshot = await transaction.get(db.collection("eventParticipants")
-          .where("eventId", "==", submittedEventId));
-        const isRequester = requestDoc?.exists && requestDoc.data().participantId === data.participantId;
-        const isEventParticipant = membershipSnapshot.docs.some((doc) => {
-          const participant = doc.data();
-          return participant.userId === data.participantId || participant.participantId === data.participantId;
-        });
-        if (!isRequester && !isEventParticipant) {
-          throw new Error("You are not authorized to submit planting reports for this event.");
-        }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
           throw new Error("Sapling tree item has not been released for this event.");
         }
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
-        const remaining = Math.max(0, Number(currentAllocation.quantity) - current);
+        const reserved = Number(event.pendingSeedlingsByInventory?.[inventoryId] || 0);
+        const remaining = Math.max(0, Number(currentAllocation.quantity) - current - reserved);
         if (quantityPlanted > remaining) {
           throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
         }
@@ -1480,8 +1487,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         const parent = await parentForEventInTransaction(
           transaction, submittedEventId, event, now, quantityPlanted, initialProgress, {
             activeSubmittedQuantity: quantityPlanted,
-            acceptedQuantity: submissionVerificationStatus === "Verified" ? quantityPlanted : 0,
-            pendingReviewQuantity: submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0,
+            acceptedQuantity: 0,
+            pendingReviewQuantity: quantityPlanted,
             reportingProgress: initialProgress,
           }
         );
@@ -1500,10 +1507,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         });
         if (!parent.created) {
           const nextActive = Number(parent.data.activeSubmittedQuantity ?? parent.data.quantityPlanted ?? 0) + quantityPlanted;
-          const nextAccepted = Number(parent.data.acceptedQuantity || 0) +
-            (submissionVerificationStatus === "Verified" ? quantityPlanted : 0);
-          const nextPending = Number(parent.data.pendingReviewQuantity || 0) +
-            (submissionStaffReviewStatus === "Pending Review" ? quantityPlanted : 0);
+          const nextAccepted = Number(parent.data.acceptedQuantity || 0);
+          const nextPending = Number(parent.data.pendingReviewQuantity || 0) + quantityPlanted;
           const totalReleased = Number(event.seedlingTotalQuantity || parent.data.quantityReleased || 0);
           const nextProgress = nextActive >= totalReleased && nextPending > 0
             ? "Fully Reported — Awaiting Review"
@@ -1529,6 +1534,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           participantId: data.participantId,
           contributorId: data.participantId,
           contributorName: data.participantName || distribution.participantName || "",
+          authenticatedSubmitterUid: data.participantId,
+          submittedByName: data.submittedByName,
+          submittedBySector: data.submittedBySector,
+          submittedByContactNumber: data.submittedByContactNumber,
           participantType: isOriginalRequester ? "requester" : "participant",
           participantUserType: data.participantType || "",
           participantBarangay: data.participantBarangay || "",
@@ -1545,6 +1554,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           automatedVerificationStatus: automatedStatus,
           verificationStatus: submissionVerificationStatus,
           staffReviewStatus: submissionStaffReviewStatus,
+          staffApprovalRequired: true,
+          submissionWorkflowVersion: 2,
           verificationDetails: suspiciousFlags,
           reviewedBy: "",
           reviewedByName: "",
@@ -1572,7 +1583,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           municipalityScope: "inside",
           siteMatch: siteGpsValid,
           locationVerificationStatus: siteGpsValid ? "site_match" : "site_mismatch",
-          requiresStaffReview: !siteGpsValid,
+          requiresStaffReview: true,
           verifiedAt: now,
         });
         for (const photo of uploadedPhotos) {
@@ -1824,8 +1835,11 @@ const approvePlantingReport =
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
         const current = currentDoc.data();
-        if (current.verificationStatus !== "Needs Review" || current.staffReviewStatus !== "Pending Review") {
+        if (current.staffReviewStatus !== "Pending Review") {
           throw new Error("Only submissions pending Staff review can be accepted.");
+        }
+        if (current.staffApprovalRequired === true && reviewerRole !== "staff") {
+          throw new Error("New planting report submissions may only be accepted by MENRO Staff.");
         }
         parentId = current.reportId;
         const parentRef = reportRefFor(parentId);
@@ -1889,6 +1903,10 @@ const approvePlantingReport =
 
         const currentReport =
           reportDoc.data();
+
+        if (currentReport.staffApprovalRequired === true && reviewerRole !== "staff") {
+          throw new Error("New planting reports may only be approved by MENRO Staff.");
+        }
 
         if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
           throw new Error(
@@ -2003,8 +2021,11 @@ const rejectPlantingReport =
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
         const current = currentDoc.data();
-        if (current.verificationStatus !== "Needs Review" || current.staffReviewStatus !== "Pending Review") {
+        if (current.staffReviewStatus !== "Pending Review") {
           throw new Error("Only submissions pending Staff review can be rejected.");
+        }
+        if (current.staffApprovalRequired === true && reviewerRole !== "staff") {
+          throw new Error("New planting report submissions may only be rejected by MENRO Staff.");
         }
         parentId = current.reportId;
         const parentRef = reportRefFor(parentId);
@@ -2086,6 +2107,10 @@ const rejectPlantingReport =
 
         const currentReport =
           reportDoc.data();
+
+        if (currentReport.staffApprovalRequired === true && reviewerRole !== "staff") {
+          throw new Error("New planting reports may only be rejected by MENRO Staff.");
+        }
 
         if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
           throw new Error(
