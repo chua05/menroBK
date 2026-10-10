@@ -27,6 +27,16 @@ const RECORD_STATUSES = [
   "completed",
 ];
 
+const GROUP_REQUEST_SECTORS = new Set([
+  "Barangay Official", "School / Student", "Private Sector / Business",
+  "Civic Organization / NGO", "Government Agency",
+]);
+
+function isGroupRequestWorkflow(workflow = {}) {
+  return GROUP_REQUEST_SECTORS.has(cleanString(workflow.sector)) ||
+    (workflow.sector === "Other (please specify)" && workflow.requestingAs === "group");
+}
+
 // ========================================
 // BASIC HELPERS
 // ========================================
@@ -70,7 +80,8 @@ function validateRecordStatus(
 function validateSchedule(
   date,
   startTime,
-  endTime
+  endTime,
+  { allowMissingEndTime = false } = {}
 ) {
   if (!date) {
     throw new Error(
@@ -84,13 +95,13 @@ function validateSchedule(
     );
   }
 
-  if (!endTime) {
+  if (!endTime && !allowMissingEndTime) {
     throw new Error(
       "End time is required."
     );
   }
 
-  if (endTime <= startTime) {
+  if (endTime && endTime <= startTime) {
     throw new Error(
       "End time must be later than start time."
     );
@@ -741,7 +752,11 @@ const createTreePlantingEventInTransaction =
     validateSchedule(
       date,
       startTime,
-      endTime
+      endTime,
+      {
+        allowMissingEndTime:
+          !isGroupRequestWorkflow(requestData.workflow),
+      }
     );
 
     const expectedParticipants =

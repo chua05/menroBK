@@ -17,7 +17,7 @@ const {
 } = require("../services/requestIdentification.service");
 const {
   validatePreferredReleaseDate,
-  validateProposedEventDate,
+  validatePlantingSchedule,
 } = require("../utils/requestDate.util");
 
 // ========================================
@@ -26,6 +26,22 @@ const {
 
 const cleanString = (value) =>
   String(value || "").trim();
+
+const isGroupWorkflow = (workflow = {}) => {
+  const sector = cleanString(workflow.sector);
+  return ["Barangay Official", "School / Student", "Private Sector / Business",
+    "Civic Organization / NGO", "Government Agency"].includes(sector) ||
+    (sector === "Other (please specify)" && workflow.requestingAs === "group");
+};
+
+const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
+  validatePlantingSchedule({
+    proposedDate: eventProposal.proposedDate,
+    startTime: eventProposal.proposedStartTime ?? eventProposal.startTime,
+    endTime: eventProposal.proposedEndTime ?? eventProposal.endTime,
+    isGroup: isGroupWorkflow(workflow),
+    expectedParticipants: eventProposal.expectedParticipants,
+  });
 
 // ========================================
 // HELPER — VALIDATE DECISION REASON
@@ -141,6 +157,7 @@ const validateResubmissionPayload = (body = {}) => {
     plantingLocation,
     preferredReleaseDate,
     eventProposal,
+    workflow,
   } = body;
 
   if (
@@ -162,14 +179,12 @@ const validateResubmissionPayload = (body = {}) => {
   const expectedParticipants = Number(eventProposal.expectedParticipants ?? 0);
   const latitude = Number(eventProposal.latitude);
   const longitude = Number(eventProposal.longitude);
+  const groupRequest = isGroupWorkflow(workflow);
 
   if (
     !cleanString(eventProposal.eventName) ||
     !cleanString(eventProposal.barangay) ||
     !cleanString(eventProposal.plantingSiteId) ||
-    !eventProposal.proposedDate ||
-    !proposedStartTime ||
-    !proposedEndTime ||
     !cleanString(eventProposal.eventLocation) ||
     !Number.isFinite(latitude) ||
     !Number.isFinite(longitude)
@@ -185,23 +200,14 @@ const validateResubmissionPayload = (body = {}) => {
     throw new Error("Event longitude must be between -180 and 180.");
   }
 
-  if (!Number.isInteger(expectedParticipants) || expectedParticipants < 0) {
-    throw new Error("Expected participants must be a nonnegative integer.");
-  }
-
   const preferredDateError = validatePreferredReleaseDate(preferredReleaseDate);
   if (preferredDateError) throw new Error(preferredDateError);
 
-  const proposedDateError = validateProposedEventDate(eventProposal.proposedDate);
-  if (proposedDateError) throw new Error(proposedDateError);
-
-  const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
-  if (!timePattern.test(proposedStartTime) || !timePattern.test(proposedEndTime)) {
-    throw new Error("Event time must use HH:MM format.");
-  }
-
-  if (proposedStartTime >= proposedEndTime) {
-    throw new Error("Event end time must be later than the start time.");
+  const scheduleError = scheduleValidationError(eventProposal, workflow);
+  if (scheduleError) {
+    const error = new Error(scheduleError.message);
+    error.fieldErrors = { [scheduleError.field]: scheduleError.message };
+    throw error;
   }
 
   return {
@@ -209,13 +215,14 @@ const validateResubmissionPayload = (body = {}) => {
     purpose: cleanString(purpose),
     plantingLocation: cleanString(plantingLocation),
     preferredReleaseDate,
+    workflow: workflow && typeof workflow === "object" ? workflow : {},
     eventProposal: {
       eventName: cleanString(eventProposal.eventName),
       barangay: cleanString(eventProposal.barangay),
       plantingSiteId: cleanString(eventProposal.plantingSiteId),
       proposedDate: eventProposal.proposedDate,
       proposedStartTime,
-      proposedEndTime,
+      proposedEndTime: groupRequest ? proposedEndTime : "",
       eventLocation: cleanString(eventProposal.eventLocation),
       latitude,
       longitude,
@@ -368,6 +375,7 @@ const submitSeedlingRequest = async (
     const proposedStartTime = submittedProposedStartTime ?? eventProposal.startTime;
     const proposedEndTime = submittedProposedEndTime ?? eventProposal.endTime;
     const description = submittedDescription ?? eventProposal.eventDescription;
+    const groupRequest = isGroupWorkflow(workflow);
 
     if (
       !cleanString(eventName) ||
@@ -375,9 +383,6 @@ const submitSeedlingRequest = async (
       !cleanString(
         plantingSiteId
       ) ||
-      !proposedDate ||
-      !proposedStartTime ||
-      !proposedEndTime ||
       !cleanString(
         eventLocation
       ) ||
@@ -438,20 +443,6 @@ const submitSeedlingRequest = async (
     // EXPECTED PARTICIPANTS
     // ========================================
 
-    if (
-      !Number.isInteger(
-        parsedExpectedParticipants
-      ) ||
-      parsedExpectedParticipants <
-        0
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Expected participants must be a nonnegative integer.",
-      });
-    }
-
     // ========================================
     // DATE VALIDATION
     // ========================================
@@ -464,44 +455,12 @@ const submitSeedlingRequest = async (
       });
     }
 
-    const proposedDateError = validateProposedEventDate(proposedDate);
-    if (proposedDateError) {
+    const scheduleError = scheduleValidationError(eventProposal, workflow);
+    if (scheduleError) {
       return res.status(400).json({
         success: false,
-        message: proposedDateError,
-      });
-    }
-
-    // ========================================
-    // TIME VALIDATION
-    // ========================================
-
-    const timePattern =
-      /^([01]\d|2[0-3]):([0-5]\d)$/;
-
-    if (
-      !timePattern.test(
-        proposedStartTime
-      ) ||
-      !timePattern.test(
-        proposedEndTime
-      )
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Event time must use HH:MM format.",
-      });
-    }
-
-    if (
-      proposedStartTime >=
-      proposedEndTime
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Event end time must be later than the start time.",
+        message: scheduleError.message,
+        fieldErrors: { [scheduleError.field]: scheduleError.message },
       });
     }
 
@@ -567,7 +526,7 @@ const submitSeedlingRequest = async (
 
           proposedStartTime,
 
-          proposedEndTime,
+          proposedEndTime: groupRequest ? proposedEndTime : "",
 
           eventLocation:
             cleanString(
@@ -923,6 +882,7 @@ const resubmitRequest = async (req, res) => {
     return res.status(statusCode).json({
       success: false,
       message: error.message || "Unable to resubmit the request. Please try again.",
+      fieldErrors: error.fieldErrors || undefined,
     });
   }
 };
