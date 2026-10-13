@@ -26,6 +26,12 @@ test("CORS allows the configured production origin and normalizes trailing slash
     isOriginAllowed("http://localhost:5173/", productionEnv),
     true
   );
+  for (const origin of [
+    "https://menrofrontend-xxtt-dome3xwbf-chuas-projects-310db6fd.vercel.app",
+    "https://menrofrontend-xxtt-git-test-pwa-chuas-projects-310db6fd.vercel.app",
+  ]) {
+    assert.equal(isOriginAllowed(origin, { NODE_ENV: "production" }), true);
+  }
 });
 
 test("CORS permits only an explicitly enabled project preview pattern", () => {
@@ -131,6 +137,48 @@ test("authorized OPTIONS preflight covers verify, profile, and a protected API",
       assert.match(
         response.headers.get("access-control-allow-methods") || "",
         new RegExp(method, "i")
+      );
+    }
+  } finally {
+    await new Promise((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
+});
+
+test("authorized Vercel preview origins pass auth verification preflight", async () => {
+  const app = express();
+  app.use(cors(createCorsOptions({ NODE_ENV: "production" })));
+  app.post("/api/auth/verify", (_req, res) => res.sendStatus(204));
+
+  const server = await new Promise((resolve) => {
+    const listeningServer = app.listen(0, () => resolve(listeningServer));
+  });
+  try {
+    const { port } = server.address();
+    for (const origin of [
+      "https://menrofrontend-xxtt-dome3xwbf-chuas-projects-310db6fd.vercel.app",
+      "https://menrofrontend-xxtt-git-test-pwa-chuas-projects-310db6fd.vercel.app",
+    ]) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/auth/verify`, {
+        method: "OPTIONS",
+        headers: {
+          Origin: origin,
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "authorization,content-type",
+        },
+      });
+
+      assert.equal(response.status, 204);
+      assert.equal(response.headers.get("access-control-allow-origin"), origin);
+      assert.equal(response.headers.get("access-control-allow-credentials"), "true");
+      assert.match(
+        response.headers.get("access-control-allow-headers") || "",
+        /Authorization/i
+      );
+      assert.match(
+        response.headers.get("access-control-allow-methods") || "",
+        /POST/i
       );
     }
   } finally {

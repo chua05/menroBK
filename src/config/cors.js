@@ -31,6 +31,8 @@ const splitOrigins = (value) =>
 // values; arbitrary Vercel deployments are never trusted.
 const DEFAULT_PRODUCTION_ORIGINS = [
   "https://menro-xxtt-five.vercel.app",
+  "https://menrofrontend-xxtt-dome3xwbf-chuas-projects-310db6fd.vercel.app",
+  "https://menrofrontend-xxtt-git-test-pwa-chuas-projects-310db6fd.vercel.app",
 ];
 
 const getConfiguredOrigins = (env = process.env) =>
