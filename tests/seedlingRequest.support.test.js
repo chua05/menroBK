@@ -20,7 +20,10 @@ const db = {
   collection(name) {
     return {
       doc(id) {
-        const resolvedId = id || `new-${++generatedDocumentId}`;
+        if (arguments.length > 0 && (typeof id !== "string" || !id.trim())) {
+          throw new Error("Value for argument \"documentPath\" is not a valid resource path. Path must be a non-empty string.");
+        }
+        const resolvedId = arguments.length === 0 ? `new-${++generatedDocumentId}` : id;
         return {
           id: resolvedId,
           name,

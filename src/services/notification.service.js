@@ -56,8 +56,8 @@ async function createLowStockNotificationsInTransaction(transaction, data) {
   return createRoleNotificationsInTransaction(transaction, ["admin", "staff"], {
     notificationId: `low_stock_${data.inventoryId}_${data.cycle || 1}`,
     type: "inventory_low_stock",
-    title: "Low Sapling Stock",
-    message: `${data.species} has reached the low-stock level. Current available stock: ${data.availableQuantity} saplings.`,
+    title: "Low Seedling Stock",
+    message: `${data.species} has reached the low-stock level. Current available stock: ${data.availableQuantity} seedlings.`,
     relatedRecordType: "inventory",
     relatedRecordId: data.inventoryId,
     createdAt: data.createdAt,

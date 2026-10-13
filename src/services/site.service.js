@@ -275,7 +275,10 @@ const createSite = async (data) => {
   const siteDocumentId = sourceRequestId
     ? `request_${crypto.createHash("sha256").update(sourceRequestId).digest("hex").slice(0, 40)}`
     : undefined;
-  const siteRef = db.collection(SITE_COLLECTION).doc(siteDocumentId);
+  const sitesCollection = db.collection(SITE_COLLECTION);
+  const siteRef = siteDocumentId
+    ? sitesCollection.doc(siteDocumentId)
+    : sitesCollection.doc();
   const now = Timestamp.now();
   const year = getManilaYear(now.toDate());
   const counterRef = db

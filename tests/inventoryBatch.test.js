@@ -70,7 +70,7 @@ function validPayload(overrides = {}) {
     species: "Kalamansi", category: "Fruit Tree", initialQuantity: 100,
     stockStatus: "Available", sourceType: "MENRO Propagation",
     dateReceived: "2020-01-01", storageLocation: "MENRO Nursery",
-    description: "Healthy saplings", ...overrides,
+    description: "Healthy seedlings", ...overrides,
   };
 }
 

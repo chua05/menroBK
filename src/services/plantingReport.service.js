@@ -424,7 +424,7 @@ const createPlantingReport = async (
     : null;
 
   if (distributionItems.length > 0 && !selectedDistributionItem) {
-    throw new Error("Select a released sapling tree item for this submission.");
+    throw new Error("Select a released seedling tree item for this submission.");
   }
 
   const plantingDate = data.plantingDate;
@@ -464,7 +464,7 @@ const createPlantingReport = async (
     quantityPlanted <= 0
   ) {
     throw new Error(
-      "Please enter a valid quantity of planted saplings."
+      "Please enter a valid quantity of planted seedlings."
     );
   }
 
@@ -1446,10 +1446,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       const allocatedItems = linkedEvent.seedlingItems || [];
       const inventoryId = selectedDistributionItem?.inventoryId || data.inventoryId ||
         (allocatedItems.length === 1 ? allocatedItems[0].inventoryId : "");
-      if (!inventoryId) throw new Error("Select a released sapling tree item for this submission.");
+      if (!inventoryId) throw new Error("Select a released seedling tree item for this submission.");
       const allocation = allocatedItems.find((item) => item.inventoryId === inventoryId);
       if (!allocation || !linkedEvent.allocationReleasedAt) {
-        throw new Error("Sapling tree item has not been released for this event.");
+        throw new Error("Seedling tree item has not been released for this event.");
       }
       const contributionRef = contributionCollection.doc();
       let parentId;
@@ -1465,7 +1465,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
-          throw new Error("Sapling tree item has not been released for this event.");
+          throw new Error("Seedling tree item has not been released for this event.");
         }
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
         const reserved = Number(event.pendingSeedlingsByInventory?.[inventoryId] || 0);

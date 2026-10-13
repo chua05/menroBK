@@ -57,12 +57,15 @@ const createSite = async (
       site
     );
   } catch (error) {
-    console.error(error);
+    const status = getErrorStatus(error);
+    console.error("createSite error:", error);
 
     return sendError(
       res,
-      getErrorStatus(error),
-      error.message
+      status,
+      status === 500
+        ? "Unable to add planting site. Please try again."
+        : error.message
     );
   }
 };

@@ -134,7 +134,7 @@ async function publicEvent(eventId, event) {
       const recordedQuantity = Math.max(0, Number(recorded[item.inventoryId] || 0));
       return {
         inventoryId: item.inventoryId,
-        species: item.species || item.commonName || "Tree / Sapling",
+        species: item.species || item.commonName || "Tree / Seedling",
         allocated,
         recorded: Math.min(allocated, recordedQuantity),
         remaining: Math.max(0, allocated - recordedQuantity),

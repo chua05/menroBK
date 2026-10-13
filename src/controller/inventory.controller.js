@@ -88,7 +88,7 @@ const addInventory = async (req, res) => {
       storageLocation, storageLocationSpecification, description,
       createdBy: req.user.uid, updatedBy: req.user.uid,
     });
-    return res.status(201).json({ success: true, message: "Sapling batch added successfully.", data: inventory });
+    return res.status(201).json({ success: true, message: "Seedling batch added successfully.", data: inventory });
   } catch (error) {
     const expected = /required|invalid|must|cannot|match|automatically|too long|positive inventory/i.test(error.message);
     if (!expected) console.error("addInventory error:", error);

@@ -878,7 +878,7 @@ const reviewSeedlingRequest =
       await createRoleNotificationsInTransaction(transaction, ["admin"], {
         notificationId: `request_reviewed_${id}_${reviewCycle}`,
         type: "request_reviewed",
-        title: "Sapling Request Reviewed",
+        title: "Seedling Request Reviewed",
         message: `${currentRequest.requestNumber || id} has been reviewed by MENRO Staff and is ready for your final decision.`,
         relatedRecordType: "seedlingRequest",
         relatedRecordId: id,
@@ -1332,13 +1332,13 @@ const approveSeedlingRequest =
           const approvedQuantity = requestedQty;
 
           if (!Number.isInteger(approvedQuantity) || approvedQuantity <= 0) {
-            throw new Error(`Invalid approved sapling quantity for ${cleanString(inventoryData.species) || "a requested item"}.`);
+            throw new Error(`Invalid approved seedling quantity for ${cleanString(inventoryData.species) || "a requested item"}.`);
           }
 
           const availableQuantity = Number(inventoryData.currentQuantity ?? inventoryData.availableQuantity ?? 0);
           if (approvedQuantity > availableQuantity) {
             throw new Error(
-              `Insufficient available sapling stock for ${cleanString(inventoryData.species) || item.species || "the requested item"}. Please review the approved quantity.`
+              `Insufficient available seedling stock for ${cleanString(inventoryData.species) || item.species || "the requested item"}. Please review the approved quantity.`
             );
           }
 
@@ -1531,8 +1531,8 @@ const approveSeedlingRequest =
           notificationId: `request_approved_${id}_${currentRequest.participantId}`,
           recipientUserId: currentRequest.participantId,
           type: "request_approved",
-          title: "Sapling Request Approved",
-          message: `Your sapling request ${currentRequest.requestNumber || id} has been approved. Please wait for release updates.`,
+          title: "Seedling Request Approved",
+          message: `Your seedling request ${currentRequest.requestNumber || id} has been approved. Please wait for release updates.`,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
           requestNumber: currentRequest.requestNumber || "",
@@ -1545,8 +1545,8 @@ const approveSeedlingRequest =
           notificationId: `request_approved_staff_${id}_${recipient.id}`,
           recipientUserId: recipient.id,
           type: "request_approved_staff",
-          title: "Sapling Request Approved",
-          message: `${currentRequest.requestNumber || id} has been approved by the MENRO Administrator and is ready for sapling release.`,
+          title: "Seedling Request Approved",
+          message: `${currentRequest.requestNumber || id} has been approved by the MENRO Administrator and is ready for seedling release.`,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
           requestNumber: currentRequest.requestNumber || "",
@@ -1649,8 +1649,8 @@ const rejectSeedlingRequest =
       notificationId: `request_rejected_${id}_${currentRequest.participantId}`,
       recipientUserId: currentRequest.participantId,
       type: "request_rejected",
-      title: "Sapling Request Rejected",
-      message: `Your sapling request ${currentRequest.requestNumber || id} was rejected by the MENRO Administrator.`,
+      title: "Seedling Request Rejected",
+      message: `Your seedling request ${currentRequest.requestNumber || id} was rejected by the MENRO Administrator.`,
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
       requestNumber: currentRequest.requestNumber || "",
@@ -1663,8 +1663,8 @@ const rejectSeedlingRequest =
       notificationId: `request_rejected_staff_${id}_${recipient.id}`,
       recipientUserId: recipient.id,
       type: "request_rejected_staff",
-      title: "Sapling Request Rejected",
-      message: `${currentRequest.requestNumber || id} was rejected by the MENRO Administrator and must not proceed to sapling release.`,
+      title: "Seedling Request Rejected",
+      message: `${currentRequest.requestNumber || id} was rejected by the MENRO Administrator and must not proceed to seedling release.`,
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
       requestNumber: currentRequest.requestNumber || "",
@@ -1709,7 +1709,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     if (!requestDoc.exists) throw new Error("Seedling request not found.");
     const request = requestDoc.data();
     if (request.inventoryReleased === true || request.status === "Released") {
-      throw new Error("Saplings have already been released for this request.");
+      throw new Error("Seedlings have already been released for this request.");
     }
     if (request.status !== "Approved") {
       throw new Error("Only approved requests can be released.");
@@ -1824,8 +1824,8 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
           notificationId: `low_stock_${ref.id}_${lowStockCycle}_${recipient.id}`,
           recipientUserId: recipient.id,
           type: "inventory_low_stock",
-          title: "Low Sapling Stock",
-          message: `${stock.species || requested.species} has reached the low-stock level. Current available stock: ${newAvailable} saplings.`,
+          title: "Low Seedling Stock",
+          message: `${stock.species || requested.species} has reached the low-stock level. Current available stock: ${newAvailable} seedlings.`,
           relatedRecordType: "inventory",
           relatedRecordId: ref.id,
           createdAt: now,
@@ -1871,8 +1871,8 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       notificationId: `request_released_${id}`,
       recipientUserId: request.participantId,
       type: "request_released",
-      title: "Saplings Released",
-      message: "The saplings for your request have been successfully released by MENRO Staff. Below are the actual saplings released for your planting activity.",
+      title: "Seedlings Released",
+      message: "The seedlings for your request have been successfully released by MENRO Staff. Below are the actual seedlings released for your planting activity.",
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
       requestNumber: request.requestNumber || "",

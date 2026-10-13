@@ -937,7 +937,7 @@ const approveRequest = async (
       "Selected planting site does not belong to the event barangay.",
     ];
     const isPublicError = publicMessages.includes(error.message) ||
-      /^(Linked seedling inventory|Invalid approved sapling quantity|Insufficient available sapling stock)/.test(error.message || "");
+      /^(Linked seedling inventory|Invalid approved seedling quantity|Insufficient available seedling stock)/.test(error.message || "");
 
     return res.status(isPublicError ? 400 : 500).json({
       success: false,

@@ -491,7 +491,7 @@ const updateInventoryById =
             updates.lowStockCycle = lowStockCycle;
             await createLowStockNotificationsInTransaction(transaction, {
               inventoryId: id,
-              species: updates.species || currentData.species || "Sapling",
+              species: updates.species || currentData.species || "Seedling",
               availableQuantity: newAvailableQuantity,
               lowStockThreshold: effectiveThreshold,
               cycle: lowStockCycle,

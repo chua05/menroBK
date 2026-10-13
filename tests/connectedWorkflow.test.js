@@ -176,7 +176,7 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     table("seedlingInventory").get("calamansi").availableQuantity = 9;
     await assert.rejects(
       requestService.approveSeedlingRequest("approve-insufficient", "admin-1"),
-      /Insufficient available sapling stock for Calamansi/
+      /Insufficient available seedling stock for Calamansi/
     );
     assert.equal(table("seedlingRequests").get("approve-insufficient").status, "Reviewed");
     assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 9);

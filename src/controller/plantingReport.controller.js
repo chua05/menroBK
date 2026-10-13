@@ -175,7 +175,7 @@ const submitPlantingReport = async (
       return res.status(400).json({
         success: false,
         message:
-          "Please enter a valid quantity of planted saplings.",
+          "Please enter a valid quantity of planted seedlings.",
       });
     }
 
@@ -259,8 +259,8 @@ const submitPlantingReport = async (
 
     const validationErrors = [
       "Only released distributions can have planting reports.",
-      "Please enter a valid quantity of planted saplings.",
-      "The quantity planted cannot exceed the remaining released sapling quantity.",
+      "Please enter a valid quantity of planted seedlings.",
+      "The quantity planted cannot exceed the remaining released seedling quantity.",
       "You are not authorized to submit planting reports for this event.",
       "The linked distribution has an invalid released quantity.",
       "A planting report already exists for this distribution.",
@@ -279,8 +279,8 @@ const submitPlantingReport = async (
       "Selected planting site does not match the released distribution.",
       "The selected planting site does not belong to the selected barangay.",
       "A valid planting date is required.",
-      "Select a released sapling tree item for this submission.",
-      "Sapling tree item has not been released for this event.",
+      "Select a released seedling tree item for this submission.",
+      "Seedling tree item has not been released for this event.",
       "Quantity planted exceeds the remaining event allocation.",
       "This planting report has already been finalized.",
       "Latitude must be between -90 and 90.",
