@@ -22,6 +22,12 @@ const {
   approveRequest,
   rejectRequest,
   releaseRequest,
+  savePreApprovalSchedule,
+  confirmPreApproval,
+  createLateReleaseConflict,
+  submitLateReleaseProposal,
+  returnLateReleaseProposal,
+  approveLateReleaseProposal,
 } = require("../controller/seedlingRequest.controller");
 
 // ========================================
@@ -75,6 +81,9 @@ router.patch(
   authorizeRoles("staff"),
   markRequestReviewed
 );
+
+router.patch("/:id/pre-approval-schedule", verifyToken, authorizeRoles("staff"), savePreApprovalSchedule);
+router.patch("/:id/pre-approval-schedule/confirm", verifyToken, authorizeRoles("participant"), confirmPreApproval);
 
 // Staff may return only a currently pending request for participant revision.
 router.patch(
@@ -152,6 +161,11 @@ router.patch(
   authorizeRoles("staff"),
   releaseRequest
 );
+
+router.patch("/:id/late-release-conflict", verifyToken, authorizeRoles("staff"), createLateReleaseConflict);
+router.patch("/:id/late-release-rescheduling/proposal", verifyToken, authorizeRoles("participant"), submitLateReleaseProposal);
+router.patch("/:id/late-release-rescheduling/return", verifyToken, authorizeRoles("staff"), returnLateReleaseProposal);
+router.patch("/:id/late-release-rescheduling/approve", verifyToken, authorizeRoles("staff"), approveLateReleaseProposal);
 
 // ========================================
 // ADMIN / STAFF — VIEW ONE REQUEST

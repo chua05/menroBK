@@ -1,6 +1,10 @@
 const { db } = require("../config/firebase");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
-const { createNotificationInTransaction } = require("./notification.service");
+const {
+  createNotificationInTransaction,
+  getRoleRecipientsInTransaction,
+} = require("./notification.service");
+const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
 
 const {
@@ -1437,6 +1441,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       updatedAt:
         now,
     };
+    if (activationState().enabled) reportData.earlyMonitoringOriginalSubmittedAt = now;
 
 
     // --------------------------------
@@ -1454,6 +1459,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       const contributionRef = contributionCollection.doc();
       let parentId;
       await db.runTransaction(async (transaction) => {
+        const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
         const eventRef = db.collection(EVENT_COLLECTION).doc(submittedEventId);
         const eventDoc = await transaction.get(eventRef);
         if (!eventDoc.exists) throw new Error("Selected planting event was not found.");
@@ -1525,6 +1531,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
             verificationStatus: nextProgress,
             submittedAt: now,
             updatedAt: now,
+            ...(!parent.data.earlyMonitoringOriginalSubmittedAt && activationState().enabled
+              ? { earlyMonitoringOriginalSubmittedAt: now } : {}),
           });
         }
         transaction.create(contributionRef, {
@@ -1594,6 +1602,45 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
             createdAt: now,
           });
         }
+        const submitterName = data.submittedByName || data.participantName ||
+          distribution.participantName || "a participant";
+        staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `planting_report_submitted_staff_${parentId}_${contributionRef.id}_${recipient.id}`,
+          recipientUserId: recipient.id,
+          type: "planting_report_submitted_staff",
+          title: "New Planting Report Submitted",
+          message: `${submitterName} submitted planting evidence for ${linkedEvent?.name || site.siteName || parentId}.`,
+          relatedRecordType: "plantingReport",
+          relatedRecordId: parentId,
+          relatedSubrecordId: contributionRef.id,
+          createdAt: now,
+          details: { submitterName, eventName: linkedEvent?.name || "", siteName: site.siteName || "", submittedAt: now },
+        }));
+        createNotificationInTransaction(transaction, {
+          notificationId: `planting_report_submitted_${parentId}_${contributionRef.id}_${data.participantId}`,
+          recipientUserId: data.participantId,
+          type: "planting_report_submitted",
+          title: "Planting Report Submitted",
+          message: "Your planting report was submitted and is pending MENRO Staff verification.",
+          relatedRecordType: "plantingReport",
+          relatedRecordId: parentId,
+          relatedSubrecordId: contributionRef.id,
+          createdAt: now,
+        });
+        if (suspiciousFlags.length > 0 || automatedStatus === "Flagged") {
+          staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+            notificationId: `planting_evidence_flagged_${parentId}_${contributionRef.id}_${recipient.id}`,
+            recipientUserId: recipient.id,
+            type: "planting_evidence_flagged",
+            title: "Planting Evidence Requires Review",
+            message: `Evidence submitted by ${submitterName} has verification findings requiring Staff review.`,
+            relatedRecordType: "plantingReport",
+            relatedRecordId: parentId,
+            relatedSubrecordId: contributionRef.id,
+            createdAt: now,
+            details: { suspiciousFlags },
+          }));
+        }
       });
       persisted = true;
       const doc = await reportCollection.doc(parentId).get();
@@ -1604,6 +1651,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
     const hashRefs = uploadedPhotos.map((photo) => evidenceHashCollection.doc(photo.imageHash));
     let reportNumber = "";
     await db.runTransaction(async (transaction) => {
+      const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const hashDocs = await Promise.all(hashRefs.map((hashRef) => transaction.get(hashRef)));
       if (hashDocs.some((hashDoc) => hashDoc.exists)) {
         throw new Error("Duplicate planting image detected.");
@@ -1619,6 +1667,42 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         reportId: docRef.id,
         createdAt: now,
       }));
+      const submitterName = data.submittedByName || data.participantName ||
+        distribution.participantName || "a participant";
+      staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `planting_report_submitted_staff_${docRef.id}_${recipient.id}`,
+        recipientUserId: recipient.id,
+        type: "planting_report_submitted_staff",
+        title: "New Planting Report Submitted",
+        message: `${submitterName} submitted planting evidence for ${site.siteName || docRef.id}.`,
+        relatedRecordType: "plantingReport",
+        relatedRecordId: docRef.id,
+        createdAt: now,
+        details: { reportNumber, submitterName, eventName: linkedEvent?.name || "", siteName: site.siteName || "", submittedAt: now },
+      }));
+      createNotificationInTransaction(transaction, {
+        notificationId: `planting_report_submitted_${docRef.id}_${data.participantId}`,
+        recipientUserId: data.participantId,
+        type: "planting_report_submitted",
+        title: "Planting Report Submitted",
+        message: `${reportNumber} was submitted and is pending MENRO Staff verification.`,
+        relatedRecordType: "plantingReport",
+        relatedRecordId: docRef.id,
+        createdAt: now,
+      });
+      if (suspiciousFlags.length > 0 || automatedStatus === "Flagged") {
+        staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `planting_evidence_flagged_${docRef.id}_${recipient.id}`,
+          recipientUserId: recipient.id,
+          type: "planting_evidence_flagged",
+          title: "Planting Evidence Requires Review",
+          message: `Evidence for ${reportNumber} has verification findings requiring Staff review.`,
+          relatedRecordType: "plantingReport",
+          relatedRecordId: docRef.id,
+          createdAt: now,
+          details: { reportNumber, suspiciousFlags },
+        }));
+      }
     });
     persisted = true;
     return { id: docRef.id, ...reportData, reportNumber };
@@ -1857,6 +1941,13 @@ const approvePlantingReport =
             ? "Fully Reported — Awaiting Review"
             : active > 0 ? "Partial" : "Awaiting Submission";
         const now = Timestamp.now();
+        const earlyMonitoring = reportingProgress === "Completed" && !parent.earlyMonitoring
+          ? buildEarlyMonitoringPolicy({
+            originalSubmittedAt: parent.earlyMonitoringOriginalSubmittedAt ||
+              (activationState().enabled ? now : parent.createdAt),
+            verifiedAt: now,
+            officialOpeningDate: shiftCalendarDate(String(parent.plantingDate || parent.eventDate || ""), 14),
+          }) : null;
         transaction.update(contributionRef, {
           staffReviewStatus: "Accepted", reviewedBy: approvedBy,
           reviewedByName: reviewedByName || "", reviewedAt: now,
@@ -1867,6 +1958,15 @@ const approvePlantingReport =
           reportingProgress,
           verificationStatus: reportingProgress,
           updatedAt: now,
+          ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
+        });
+        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${parentId}`,
+          recipientUserId: parent.participantId,
+          type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
+          message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
+          relatedRecordType: "monitoring", relatedRecordId: parentId, createdAt: now,
+          details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
         });
         createVerificationLogInTransaction(transaction, {
           plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
@@ -1876,9 +1976,11 @@ const approvePlantingReport =
         });
         createNotificationInTransaction(transaction, {
           recipientUserId: current.contributorId || current.participantId,
+          notificationId: `planting_report_accepted_${parentId}_${id}_${current.contributorId || current.participantId}`,
           type: "planting_report_accepted", title: "Planting report submission accepted",
           message: "Your planting report submission was accepted.",
-          relatedRecordType: "plantingReport", relatedRecordId: parentId, createdAt: now,
+          relatedRecordType: "plantingReport", relatedRecordId: parentId,
+          relatedSubrecordId: id, createdAt: now,
         });
       });
       return getPlantingReportById(parentId);
@@ -1917,6 +2019,12 @@ const approvePlantingReport =
         const now =
           Timestamp.now();
 
+        const earlyMonitoring = buildEarlyMonitoringPolicy({
+          originalSubmittedAt: currentReport.earlyMonitoringOriginalSubmittedAt || currentReport.createdAt,
+          verifiedAt: now,
+          officialOpeningDate: shiftCalendarDate(String(currentReport.plantingDate || ""), 14),
+        });
+
         transaction.update(
           reportRef,
           {
@@ -1947,6 +2055,7 @@ const approvePlantingReport =
 
             updatedAt:
               now,
+            ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
           }
         );
 
@@ -1981,12 +2090,21 @@ const approvePlantingReport =
         );
         createNotificationInTransaction(transaction, {
           recipientUserId: currentReport.participantId,
+          notificationId: `planting_report_approved_${id}_${currentReport.participantId}`,
           type: "planting_report_approved",
           title: "Planting report approved",
           message: "Your planting report has been approved.",
           relatedRecordType: "plantingReport",
           relatedRecordId: id,
           createdAt: now,
+        });
+        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${id}`,
+          recipientUserId: currentReport.participantId,
+          type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
+          message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
+          relatedRecordType: "monitoring", relatedRecordId: id, createdAt: now,
+          details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
         });
       }
     );
@@ -2080,9 +2198,11 @@ const rejectPlantingReport =
         });
         createNotificationInTransaction(transaction, {
           recipientUserId: current.contributorId || current.participantId,
+          notificationId: `planting_report_rejected_${parentId}_${id}_${current.contributorId || current.participantId}`,
           type: "planting_report_rejected", title: "Planting report submission rejected",
           message: `Your planting report submission was rejected. Reason: ${remarks.trim()}`,
-          relatedRecordType: "plantingReport", relatedRecordId: parentId, createdAt: now,
+          relatedRecordType: "plantingReport", relatedRecordId: parentId,
+          relatedSubrecordId: id, createdAt: now,
         });
       });
       return getPlantingReportById(parentId);
@@ -2183,6 +2303,7 @@ const rejectPlantingReport =
         );
         createNotificationInTransaction(transaction, {
           recipientUserId: currentReport.participantId,
+          notificationId: `planting_report_rejected_${id}_${currentReport.participantId}`,
           type: "planting_report_rejected",
           title: "Planting report rejected",
           message: `Your planting report was rejected. Reason: ${remarks.trim()}`,

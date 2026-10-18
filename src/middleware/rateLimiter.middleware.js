@@ -1,4 +1,8 @@
 const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
+const { enabled, validateIntegrationEnvironment } = require("../config/integrationEnvironment");
+
+const integrationMode = enabled() && validateIntegrationEnvironment().integration;
+const skipIntegration = () => integrationMode;
 
 const actorKey = (req) => req.user?.uid
   ? `user:${req.user.uid}`
@@ -9,6 +13,7 @@ const actorKey = (req) => req.user?.uid
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10,
+  skip: skipIntegration,
   message: {
     success: false,
     message: "Too many attempts. Please try again after 15 minutes.",
@@ -22,7 +27,7 @@ const generalLimiter = rateLimit({
   // A signed-in dashboard can make many read requests while navigating.
   // Keep a bounded per-IP ceiling without throttling ordinary page loads.
   max: 300,
-  skip: (req) => req.method === "OPTIONS",
+  skip: (req) => integrationMode || req.method === "OPTIONS",
   message: {
     success: false,
     message: "Too many requests. Please slow down.",
@@ -32,6 +37,7 @@ const generalLimiter = rateLimit({
 const uploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  skip: skipIntegration,
   keyGenerator: actorKey,
   standardHeaders: true,
   legacyHeaders: false,
@@ -41,6 +47,7 @@ const uploadLimiter = rateLimit({
 const guestContributionLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
+  skip: skipIntegration,
   keyGenerator: actorKey,
   standardHeaders: true,
   legacyHeaders: false,
@@ -50,6 +57,7 @@ const guestContributionLimiter = rateLimit({
 const reportLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 20,
+  skip: skipIntegration,
   keyGenerator: actorKey,
   standardHeaders: true,
   legacyHeaders: false,
@@ -59,6 +67,7 @@ const reportLimiter = rateLimit({
 const searchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 60,
+  skip: skipIntegration,
   keyGenerator: actorKey,
   standardHeaders: true,
   legacyHeaders: false,

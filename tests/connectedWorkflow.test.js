@@ -126,6 +126,7 @@ test("Admin approval creates a scheduled event and only needed secure invitation
   const seedReviewed = (id, expectedParticipants) => {
     table("seedlingRequests").set(id, {
       status: "Reviewed", participantId: "participant-1", participantName: "Participant One",
+      preferredReleaseDate: "2026-10-19",
       items: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 10 }],
       eventProposal: {
         eventName: "Planting", barangay: "Bical", plantingSiteId: "site-approval",
@@ -149,6 +150,12 @@ test("Admin approval creates a scheduled event and only needed secure invitation
     assert.equal(table("seedlingInventory").get("calamansi").reservedQuantity || 0, 0);
     assert.equal(withoutGuests.inventoryDeducted, false);
     assert.equal(withoutGuests.inventoryReserved, false);
+    const approvalNotifications = [...table("notifications").values()];
+    assert.ok(approvalNotifications.some((item) => item.type === "event_scheduled" &&
+      item.recipientUserId === "admin-1" && item.relatedEventId === withoutGuests.eventId));
+    assert.ok(approvalNotifications.some((item) => item.type === "request_approved" &&
+      item.recipientUserId === "participant-1" && item.relatedEventId === withoutGuests.eventId &&
+      item.message.includes("is scheduled for 2026-10-20 08:00-10:00")));
 
     seedReviewed("approve-guests-unconfigured", 4);
     const approvedWithoutInvitation = await requestService.approveSeedlingRequest(
@@ -185,9 +192,26 @@ test("Admin approval creates a scheduled event and only needed secure invitation
   }
 });
 
+test("Admin approval rejects an expired effective schedule without creating an event", async () => {
+  table("seedlingRequests").set("approve-expired", {
+    status: "Reviewed", requestVersion: 0, participantId: "participant-1", participantName: "Participant One",
+    preferredReleaseDate: "2020-10-11",
+    items: [{ inventoryId: "expired-tree", species: "Narra", quantity: 10 }],
+    eventProposal: { eventName: "Expired Planting", barangay: "Bical", plantingSiteId: "site-expired", proposedDate: "2020-10-12", proposedStartTime: "06:00", proposedEndTime: "", expectedParticipants: 0 },
+  });
+  table("seedlingInventory").set("expired-tree", { species: "Narra", availableQuantity: 100 });
+  table("sites").set("site-expired", { status: "active", siteName: "Site", barangay: "Bical", maximumCapacity: 100, planted: 0 });
+  const eventCount = table("events").size;
+  await assert.rejects(requestService.approveSeedlingRequest("approve-expired", "admin-1", "", 0),
+    (error) => error.code === "SCHEDULE_STALE" && /release date is in the past/.test(error.message));
+  assert.equal(table("events").size, eventCount);
+  assert.equal(table("seedlingRequests").get("approve-expired").status, "Reviewed");
+});
+
 test("Admin approval registers a proposed site with the authenticated administrator audit UID", async () => {
   table("seedlingRequests").set("approve-proposed-site", {
     status: "Reviewed",
+    preferredReleaseDate: "2026-10-19",
     participantId: "participant-proposed",
     participantName: "Proposed Site Owner",
     items: [{ inventoryId: "narra-proposed", species: "Narra", quantity: 10 }],
@@ -299,6 +323,25 @@ test("partial release updates real stock, distribution, event allocation, and no
   assert.equal([...table("plantingReports")].filter(([, report]) => report.eventId === "EVT-2026-001").length, 1);
 });
 
+test("unresolved late-release conflict blocks seedling release", async () => {
+  seedApproved("release-conflict", "event-release-conflict", 100);
+  table("seedlingRequests").set("release-conflict", {
+    ...table("seedlingRequests").get("release-conflict"),
+    requestVersion: 2,
+    lateReleaseRescheduling: { status: "AwaitingRequester", version: 1 },
+  });
+  await assert.rejects(
+    requestService.releaseSeedlingRequest("release-conflict", "staff-1", {
+      expectedVersion: 2,
+      availableReleaseDate: "2026-10-20",
+      items: [{ inventoryId: "calamansi", releasedQuantity: 100 }],
+    }),
+    (error) => error.code === "UNRESOLVED_LATE_RELEASE_CONFLICT",
+  );
+  assert.equal(table("seedlingRequests").get("release-conflict").status, "Approved");
+  assert.equal(table("distributions").has("release-conflict"), false);
+});
+
 test("invalid release leaves inventory, event, and distribution unchanged", async () => {
   seedApproved("request-2", "EVT-2026-002", 80);
   for (const input of [
@@ -329,6 +372,33 @@ test("release crossing the stock threshold alerts active Admin and Staff users o
   assert.equal(table("notifications").has("low_stock_calamansi_1_low-admin"), true);
   assert.equal(table("notifications").has("low_stock_calamansi_1_low-staff"), true);
   assert.equal(table("notifications").has("low_stock_calamansi_1_inactive-staff"), false);
+  assert.equal(table("notifications").has("distribution_completed_request-low-stock_low-admin"), true);
+  assert.equal(table("notifications").has("distribution_completed_request-low-stock_low-staff"), true);
+  assert.equal(table("notifications").has("distribution_completed_request-low-stock_inactive-staff"), false);
+  assert.equal([...table("notifications")].filter(([, item]) =>
+    item.type === "request_released" && item.recipientUserId === "participant-1" &&
+    item.relatedRecordId === "request-low-stock").length, 1);
+});
+
+test("release to zero creates one out-of-stock alert cycle and rolls back duplicate release", async () => {
+  table("users").set("stock-admin", { role: "admin", status: "active" });
+  table("users").set("stock-staff", { role: "staff", status: "active" });
+  seedApproved("request-out-stock", "EVT-OUT-STOCK", 10);
+  table("seedlingRequests").get("request-out-stock").items[0].quantity = 10;
+  const input = { items: [{ inventoryId: "calamansi", releasedQuantity: 10, shortReleaseReason: "" }] };
+
+  await requestService.releaseSeedlingRequest("request-out-stock", "stock-staff", input);
+  assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 0);
+  assert.equal(table("seedlingInventory").get("calamansi").outOfStockCycle, 1);
+  assert.equal(table("notifications").has("out_of_stock_calamansi_1_stock-admin"), true);
+  assert.equal(table("notifications").has("out_of_stock_calamansi_1_stock-staff"), true);
+  const count = table("notifications").size;
+  await assert.rejects(
+    requestService.releaseSeedlingRequest("request-out-stock", "stock-staff", input),
+    /already been released/
+  );
+  assert.equal(table("notifications").size, count);
+  assert.equal(table("seedlingInventory").get("calamansi").availableQuantity, 0);
 });
 
 test("historical Approved requests use a real completed Distribution as Released read compatibility", async () => {
@@ -421,6 +491,7 @@ test("any authenticated participant can submit planting evidence for an eligible
   const eventId = "EVT-AUTH-SCOPE";
   const requestId = "request-auth-scope";
   const reportId = `event_${eventId}`;
+  table("users").set("planting-staff", { role: "staff", status: "active" });
   seedApproved(requestId, eventId);
   await requestService.releaseSeedlingRequest(requestId, "staff-1", {
     items: [{ inventoryId: "calamansi", releasedQuantity: 90, shortReleaseReason: "Ten damaged" }],
@@ -487,6 +558,13 @@ test("any authenticated participant can submit planting evidence for an eligible
     assert.equal(submitted.longitude, 123.965);
     assert.equal(submitted.municipalityScope, "inside");
     assert.equal(submitted.locationVerificationStatus, "site_match");
+    const contributionId = submitted.submissions[0].id;
+    assert.equal(table("notifications").get(
+      `planting_report_submitted_${reportId}_${contributionId}_participant-unrelated`,
+    ).recipientUserId, "participant-unrelated");
+    assert.equal(table("notifications").get(
+      `planting_report_submitted_staff_${reportId}_${contributionId}_planting-staff`,
+    ).relatedSubrecordId, contributionId);
     const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-unrelated");
     assert.equal(mariaReports.some((report) => report.id === reportId), true);
     assert.equal(table("plantingReports").get(reportId).verificationStatus, "Partial");
@@ -505,9 +583,11 @@ test("any authenticated participant can submit planting evidence for an eligible
         [{ buffer: secondImage, mimetype: "image/jpeg", originalname: "too-many.jpg" }]),
       /Only 70 trees remain available for reporting/
     );
+    const notificationCount = table("notifications").size;
     await assert.rejects(reportService.createPlantingReport(payload,
       [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]));
     assert.equal(table("plantingContributions").size, 1);
+    assert.equal(table("notifications").size, notificationCount);
   } finally {
     for (const item of submitted?.submissions || []) {
       for (const photo of item.photos || []) await deletePlantingPhoto(photo.photoPath);
@@ -643,6 +723,7 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     .toBuffer();
   let submitted;
   try {
+    table("users").set("flag-review-staff", { role: "staff", status: "active" });
     submitted = await reportService.createPlantingReport({
       distributionId: "request-valid-outside", inventoryId: "calamansi",
       siteId: "site-valid-outside", participantId: "participant-1",
@@ -666,6 +747,12 @@ test("valid EXIF GPS outside the assigned site is preserved, flagged, and submit
     assert.ok(submitted.suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
     assert.equal(table("events").get("EVT-VALID-OUTSIDE").plantingSiteId, "site-valid-outside");
     assert.equal(submitted.photos[0].siteLocationStatus, "Outside Assigned Site");
+    const contributionId = submitted.submissions[0].id;
+    const flaggedNotification = table("notifications").get(
+      `planting_evidence_flagged_event_EVT-VALID-OUTSIDE_${contributionId}_flag-review-staff`,
+    );
+    assert.equal(flaggedNotification.recipientUserId, "flag-review-staff");
+    assert.ok(flaggedNotification.details.suspiciousFlags.includes("OUTSIDE_REGISTERED_SITE"));
   } finally {
     for (const photo of submitted?.photos || []) await deletePlantingPhoto(photo.photoPath);
   }
@@ -708,7 +795,7 @@ test("photo coordinates outside the Municipality of Bulan are blocked", async ()
   );
 });
 
-test("participant monitoring returns only own records and accepts an empty history", async () => {
+test("participant monitoring returns owned and reported records and accepts an empty history", async () => {
   const controller = require("../src/controller/monitoring.controller");
   const routes = require("../src/routes/monitoring.routes");
   const ownRoute = routes.stack.find((layer) => layer.route?.path === "/my-records" && layer.route.methods.get);
@@ -724,11 +811,15 @@ test("participant monitoring returns only own records and accepts an empty histo
   assert.deepEqual(empty.result.body.data, []);
   table("monitoringRecords").set("own-1", { participantId: "participant-1", healthyCount: 8 });
   table("monitoringRecords").set("other-1", { participantId: "participant-2", healthyCount: 5 });
+  table("monitoringRecords").set("reported-1", {
+    participantId: "participant-2", plantingReportId: "shared-report",
+    history: [{ id: "OBS-SHARED", originalReporterId: "participant-1", monitoredBy: "participant-1" }],
+  });
   const own = response();
   await controller.getMyMonitoringRecords({ user: { uid: "participant-1" } }, own);
   assert.equal(own.result.code, 200);
-  assert.deepEqual(own.result.body.data.map((item) => item.id), ["legacy-own-1"]);
-  assert.deepEqual(own.result.body.data[0].history.map((item) => item.id), ["own-1"]);
+  assert.deepEqual(new Set(own.result.body.data.map((item) => item.id)), new Set(["legacy-own-1", "reported-1"]));
+  assert.equal(own.result.body.data.some((item) => item.history.some((entry) => entry.id === "OBS-SHARED")), true);
 });
 
 test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {

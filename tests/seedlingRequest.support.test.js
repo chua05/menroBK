@@ -149,7 +149,7 @@ test("profile reads the authenticated UID and real Firestore name", async () => 
 });
 
 test("Staff review advances Pending once and retains server-owned inventory details", async () => {
-  records.seedlingRequests.set("request-1", { status: "Pending", participantId: "participant-1" });
+  records.seedlingRequests.set("request-1", { status: "Pending", participantId: "participant-1", preferredReleaseDate: validPreferredReleaseDate, eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" } });
   records.seedlingInventory.set("inventory-1", {
     species: "Narra", scientificName: "Pterocarpus indicus", category: "Native",
   });
@@ -175,7 +175,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
 });
 
 test("Staff review confirmation requires no findings or observation", async () => {
-  records.seedlingRequests.set("request-frontend", { status: "Pending" });
+  records.seedlingRequests.set("request-frontend", { status: "Pending", preferredReleaseDate: validPreferredReleaseDate, eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" } });
   records.seedlingInventory.set("inventory-1", { species: "Narra" });
   const res = response();
   await seedlingController.markRequestReviewed({
@@ -185,12 +185,31 @@ test("Staff review confirmation requires no findings or observation", async () =
       items: [{ inventoryId: "inventory-1", quantity: 2 }],
       purpose: "Planting", plantingLocation: "Bulan",
       preferredReleaseDate: validPreferredReleaseDate,
+      expectedVersion: 0,
     },
   }, res);
   assert.equal(res.result.code, 200);
   assert.equal(res.result.body.data.reviewRemarks, "");
   assert.match(res.result.body.data.reviewId, /^REV-\d{4}-\d{3,}$/);
   assert.equal(res.result.body.data.reviewedByName, "Staff Name");
+});
+
+test("Staff cannot complete review with unchanged expired legacy schedule", async () => {
+  records.seedlingRequests.set("request-expired", {
+    status: "Pending", participantId: "participant-1", requestVersion: 0,
+    preferredReleaseDate: "2020-10-11",
+    eventProposal: { proposedDate: "2020-10-12", proposedStartTime: "06:00", proposedEndTime: "" },
+  });
+  records.seedlingInventory.set("inventory-expired", { species: "Narra", scientificName: "Pterocarpus indicus", category: "Native" });
+  await assert.rejects(
+    service.reviewSeedlingRequest("request-expired", {
+      reviewedBy: "staff-1", reviewedByName: "Staff Name", expectedVersion: 0,
+      items: [{ inventoryId: "inventory-expired", quantity: 2 }], purpose: "Planting",
+      plantingLocation: "Bulan", preferredReleaseDate: "2020-10-11",
+    }),
+    (error) => error.code === "SCHEDULE_STALE" && /release date is in the past/.test(error.message),
+  );
+  assert.equal(records.seedlingRequests.get("request-expired").status, "Pending");
 });
 
 test("site creation assigns unique year-scoped readable IDs while retaining internal document IDs", async () => {
@@ -229,6 +248,18 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
     /verified Bulan barangays/
   );
   await assert.rejects(
+    siteService.createSite({ ...input, siteType: "Other", customSiteType: "   " }),
+    /Custom site type is required/
+  );
+  await assert.rejects(
+    siteService.createSite({
+      ...input,
+      siteType: "Other",
+      customSiteType: "x".repeat(121),
+    }),
+    /120 characters or fewer/
+  );
+  await assert.rejects(
     siteService.createSite({ ...input, latitude: 12.82, longitude: 124 }),
     /within the Municipality of Bulan/
   );
@@ -249,6 +280,7 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
   assert.equal(first.coverageRadiusMeters, 50);
   assert.equal(first.municipality, "Bulan");
   assert.equal(first.province, "Sorsogon");
+  assert.equal(first.customSiteType, "");
   assert.equal(Object.hasOwn(first, "polygon"), false);
   assert.notEqual(third.siteId, fourth.siteId);
   assert.deepEqual(
@@ -272,6 +304,15 @@ test("site creation assigns unique year-scoped readable IDs while retaining inte
     [...records.sites.values()].filter((site) => site.sourceRequestId === "request-proposed-retry").length,
     1
   );
+
+  const customSite = await siteService.createSite({
+    ...input,
+    siteName: "Custom Site Type",
+    siteType: "Other",
+    customSiteType: "  Private Backyard Planting Site  ",
+  });
+  assert.equal(customSite.siteType, "Other");
+  assert.equal(customSite.customSiteType, "Private Backyard Planting Site");
 
   records.sites.set("legacy-juban-site", {
     siteId: "SITE-2026-999",
@@ -330,6 +371,8 @@ test("Staff return and participant resubmission preserve the same request and re
   assert.equal(returned.returnedBy, "staff-1");
   assert.equal(returned.reviewHistory.at(-1).action, "returned");
   assert.equal(records.notifications.size, 1);
+  records.users.set("staff-notify", { role: "staff", status: "active" });
+  records.users.set("staff-inactive", { role: "staff", status: "inactive" });
   await assert.rejects(
     service.returnSeedlingRequest("request-returned", "staff-1", "MENRO Staff", "Again"),
     /Only pending requests/
@@ -366,6 +409,11 @@ test("Staff return and participant resubmission preserve the same request and re
   assert.equal(resubmitted.requestNumber, "REQ-2026-001");
   assert.equal(resubmitted.returnReason, "");
   assert.equal(resubmitted.reviewHistory.at(-1).action, "resubmitted");
+  assert.equal(
+    records.notifications.get("request_resubmitted_staff_request-returned_2_staff-notify").recipientUserId,
+    "staff-notify",
+  );
+  assert.equal(records.notifications.has("request_resubmitted_staff_request-returned_2_staff-inactive"), false);
   assert.deepEqual(records.seedlingInventory.get("inventory-returned"), inventoryBefore);
   await assert.rejects(
     service.resubmitSeedlingRequest("request-returned", "participant-1", data),
@@ -390,6 +438,7 @@ test("Staff return and participant resubmission preserve the same request and re
   );
   assert.equal(resubmittedAgain.status, "Pending");
   assert.equal(resubmittedAgain.requestNumber, "REQ-2026-001");
+  assert.equal(records.notifications.has("request_resubmitted_staff_request-returned_4_staff-notify"), true);
   assert.deepEqual(records.seedlingInventory.get("inventory-returned"), inventoryBefore);
 });
 
@@ -441,6 +490,16 @@ test("site edit updates only permitted fields and keeps the same record for list
   assert.equal(updated.targetTrees, 80);
   assert.equal(updated.coverageRadiusMeters, 75);
   assert.equal(updated.polygon.length, 3);
+  const updatedCustomType = await siteService.updateSite("site-1", {
+    siteType: "Other",
+    customSiteType: "Community Food Forest",
+  }, "staff-1");
+  assert.equal(updatedCustomType.customSiteType, "Community Food Forest");
+  const updatedPredefinedType = await siteService.updateSite("site-1", {
+    siteType: "Reforestation Site",
+    customSiteType: "stale value",
+  }, "staff-1");
+  assert.equal(updatedPredefinedType.customSiteType, "");
   const readableLegacySite = await siteService.getSiteById("site-1");
   assert.match(readableLegacySite.siteId, /^SITE-\d{4}-\d{3,}$/);
   assert.equal(readableLegacySite.id, "site-1");
@@ -460,6 +519,7 @@ test("site edit updates only permitted fields and keeps the same record for list
 });
 
 test("request submission rejects a real site in a different barangay", async () => {
+  records.users.set("submission-staff", { role: "staff", status: "active" });
   records.sites.set("site-2", {
     status: "active", barangay: "Bical", maximumCapacity: 100, planted: 0,
   });
@@ -484,6 +544,10 @@ test("request submission rejects a real site in a different barangay", async () 
   assert.equal(created.eventProposal.plantingSiteId, "site-2");
   assert.match(created.requestNumber, /^REQ-\d{4}-\d{3,}$/);
   assert.equal(created.identification, undefined);
+  assert.equal(
+    records.notifications.get(`request_submitted_staff_${created.id}_submission-staff`).recipientUserId,
+    "submission-staff",
+  );
   const storedIdentification = records.requestIdentifications.get(created.id);
   assert.equal(storedIdentification.identificationType, "drivers_license");
   assert.equal(storedIdentification.idNumber, undefined);
@@ -511,6 +575,8 @@ test("request submission rejects a real site in a different barangay", async () 
   assert.equal(repeatedAttempt.id, firstAttempt.id);
   assert.equal(repeatedAttempt.requestNumber, firstAttempt.requestNumber);
   assert.equal(records.seedlingRequests.size, beforeRetryCount + 1);
+  assert.equal([...records.notifications.keys()].filter((id) =>
+    id === `request_submitted_staff_${firstAttempt.id}_submission-staff`).length, 1);
   assert.ok((await service.getSeedlingRequestsByParticipantId("participant-1"))
     .some((request) => request.id === created.id));
   if (previousKey === undefined) delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;

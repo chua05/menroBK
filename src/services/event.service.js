@@ -1,6 +1,12 @@
 const {
   db,
 } = require("../config/firebase");
+const { presentEventStatus, assertEventUpdateAllowed, hasLinkedEventRecords } = require("../utils/eventStatus.util");
+const { getRoleRecipientsInTransaction } = require("./notification.service");
+const {
+  activeRegisteredRecipients,
+  writeNotifications,
+} = require("./eventNotification.service");
 
 const EVENTS_COLLECTION =
   "events";
@@ -526,6 +532,7 @@ const createEvent = async (
   const event =
     await db.runTransaction(
       async (transaction) => {
+        const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
         const eventId =
           await generateEventId(
             transaction
@@ -650,11 +657,18 @@ const createEvent = async (
           eventData
         );
 
+        writeNotifications(transaction, {
+          eventId,
+          event: eventData,
+          recipientIds: [data.createdBy, ...staffRecipients.map((recipient) => recipient.id)],
+          kind: "scheduled",
+        });
+
         return eventData;
       }
     );
 
-  return event;
+  return presentEventStatus(event);
 };
 
 // ========================================
@@ -1010,14 +1024,14 @@ const getAllEvents =
       .map(
         (doc) => {
           const event = doc.data();
-          return {
+          return presentEventStatus({
             id: doc.id,
             ...event,
             actualParticipants: participantCounts.get(doc.id) || 0,
             sourceRequestNumber: event.sourceRequestNumber || requestNumbers.get(event.sourceRequestId) || "",
             isMyEvent: viewer.role === "participant" &&
               (ownedRequestIds.has(event.sourceRequestId) || participantEventIds.has(doc.id)),
-          };
+          });
         }
       )
       .filter(
@@ -1041,9 +1055,7 @@ const getArchivedEvents =
         .get();
 
     return snapshot.docs
-      .map(
-        (doc) => ({ id: doc.id, ...doc.data() })
-      )
+      .map((doc) => presentEventStatus({ id: doc.id, ...doc.data() }))
       .filter(
         (event) =>
           event.archived ===
@@ -1081,12 +1093,12 @@ const getEventById =
         ? db.collection("seedlingRequests").doc(event.sourceRequestId).get()
         : Promise.resolve(null),
     ]);
-    return {
+    return presentEventStatus({
       id: eventDoc.id,
       ...event,
       actualParticipants: participants.size,
       sourceRequestNumber: event.sourceRequestNumber || (requestDoc?.exists ? requestDoc.data().requestNumber || "" : ""),
-    };
+    });
   };
 
 // ========================================
@@ -1120,6 +1132,18 @@ const updateEvent = async (
 
   const existing =
     existingDoc.data();
+
+  const scheduleFieldsChanged = ["date", "startTime", "endTime"].some(
+    (field) => data[field] !== undefined && cleanString(data[field]) !== cleanString(existing[field])
+  );
+  if (existing.source === "seedling_request" && existing.sourceRequestId && scheduleFieldsChanged) {
+    const error = new Error(
+      "Request-backed event schedules must be changed through the Seedling Request rescheduling workflow."
+    );
+    error.code = "REQUEST_EVENT_SCHEDULE_REQUIRES_WORKFLOW";
+    throw error;
+  }
+  assertEventUpdateAllowed(existing, data);
 
   const name =
     data.name !== undefined
@@ -1270,14 +1294,45 @@ const updateEvent = async (
       new Date(),
   };
 
-  await eventRef.update(
-    updates
-  );
+  await db.runTransaction(async (transaction) => {
+    const currentDoc = await transaction.get(eventRef);
+    if (!currentDoc.exists) throw new Error("Event not found.");
+    const current = currentDoc.data();
+    const changedSinceRead = ["name", "type", "barangay", "plantingSiteId", "location", "date",
+      "startTime", "endTime", "expectedParticipants", "organizer", "description"]
+      .some((field) => String(current[field] ?? "") !== String(existing[field] ?? ""));
+    if (changedSinceRead) {
+      const error = new Error("This event changed while it was being updated. Refresh and try again.");
+      error.code = "STALE_EVENT_UPDATE";
+      throw error;
+    }
+    assertEventUpdateAllowed(current, data);
+    if (current.source === "seedling_request" && current.sourceRequestId && scheduleFieldsChanged) {
+      const error = new Error(
+        "Request-backed event schedules must be changed through the Seedling Request rescheduling workflow."
+      );
+      error.code = "REQUEST_EVENT_SCHEDULE_REQUIRES_WORKFLOW";
+      throw error;
+    }
+    const recipientIds = scheduleFieldsChanged
+      ? await activeRegisteredRecipients(transaction, eventRef.id, current)
+      : [];
+    transaction.update(eventRef, updates);
+    if (scheduleFieldsChanged) {
+      writeNotifications(transaction, {
+        eventId: eventRef.id,
+        event: { ...current, ...updates },
+        previousSchedule: current,
+        recipientIds,
+        kind: "rescheduled",
+      });
+    }
+  });
 
   const updatedDoc =
     await eventRef.get();
 
-  return updatedDoc.data();
+  return presentEventStatus(updatedDoc.data());
 };
 
 // ========================================
@@ -1344,7 +1399,7 @@ const updateRecordStatus =
     const updatedDoc =
       await eventRef.get();
 
-    return updatedDoc.data();
+    return presentEventStatus(updatedDoc.data());
   };
 
 // ========================================
@@ -1392,7 +1447,7 @@ const markEventCompleted =
     const updatedDoc =
       await eventRef.get();
 
-    return updatedDoc.data();
+    return presentEventStatus(updatedDoc.data());
   };
 
 // ========================================
@@ -1439,7 +1494,7 @@ const archiveEvent = async (
   const updatedDoc =
     await eventRef.get();
 
-  return updatedDoc.data();
+  return presentEventStatus(updatedDoc.data());
 };
 
 // ========================================
@@ -1486,7 +1541,7 @@ const restoreEvent = async (
   const updatedDoc =
     await eventRef.get();
 
-  return updatedDoc.data();
+  return presentEventStatus(updatedDoc.data());
 };
 
 // ========================================
@@ -1507,16 +1562,21 @@ const deleteEvent =
         )
         .doc(cleanEventId);
 
-    const eventDoc =
-      await eventRef.get();
-
-    if (!eventDoc.exists) {
-      throw new Error(
-        "Event not found."
-      );
-    }
-
-    await eventRef.delete();
+    await db.runTransaction(async (transaction) => {
+      const eventDoc = await transaction.get(eventRef);
+      if (!eventDoc.exists) throw new Error("Event not found.");
+      const event = eventDoc.data();
+      const collections = ["seedlingRequests", "distributions", "plantingReports",
+        "plantingContributions", "monitoringRecords", "eventParticipants"];
+      const linkedSnapshots = await Promise.all(collections.map((name) =>
+        transaction.get(db.collection(name).where("eventId", "==", cleanEventId))));
+      if (hasLinkedEventRecords(event, linkedSnapshots)) {
+        const error = new Error("This event cannot be permanently deleted because it has linked workflow records. Archive it instead.");
+        error.code = "EVENT_HAS_LINKED_RECORDS";
+        throw error;
+      }
+      transaction.delete(eventRef);
+    });
 
     return {
       id:

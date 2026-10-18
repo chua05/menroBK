@@ -20,6 +20,7 @@ Module._load = function mockLoad(request, parent, isMain) {
     if (request === "./monitoring.service") {
       return {
         getMonitoringRecordById: async () => monitoringRecord,
+        getRawMonitoringRecordById: async () => monitoringRecord,
         getAllMonitoringRecords: async () => [],
       };
     }
@@ -88,7 +89,8 @@ test("authorizes planting owner, contributor, staff, and admin but denies unrela
 test("authorizes monitoring owner, staff, and admin but denies unrelated participants", async () => {
   monitoringRecord = {
     participantId: "owner",
-    history: [{ photoUrl: "/uploads/monitoring/security-test/evidence.png" }],
+    history: [{ photoUrl: "/uploads/monitoring/security-test/evidence.png",
+      originalReporterId: "field-reporter" }],
   };
 
   await assert.rejects(
@@ -98,10 +100,40 @@ test("authorizes monitoring owner, staff, and admin but denies unrelated partici
 
   for (const user of [
     { uid: "owner", role: "participant" },
+    { uid: "field-reporter", role: "participant" },
     { uid: "staff-user", role: "staff" },
     { uid: "admin-user", role: "admin" },
   ]) {
     const result = await evidence.monitoringEvidenceForUser("record", "0", user);
+    assert.equal(result.absolutePath, monitoringFixturePath);
+  }
+});
+
+test("authorizes revision evidence for its reporter, staff, and admin only", async () => {
+  monitoringRecord = {
+    participantId: "legacy-owner",
+    history: [{
+      id: "observation-1", originalReporterId: "reporter",
+      revisionHistory: [{ revisionNumber: 2, evidenceRef: {
+        photoUrl: "/uploads/monitoring/security-test/evidence.png",
+      } }],
+    }],
+  };
+
+  await assert.rejects(
+    evidence.monitoringRevisionEvidenceForUser("record", "observation-1", "2",
+      { uid: "other", role: "participant" }),
+    { code: "EVIDENCE_FORBIDDEN" }
+  );
+
+  for (const user of [
+    { uid: "reporter", role: "participant" },
+    { uid: "staff-user", role: "staff" },
+    { uid: "admin-user", role: "admin" },
+  ]) {
+    const result = await evidence.monitoringRevisionEvidenceForUser(
+      "record", "observation-1", "2", user
+    );
     assert.equal(result.absolutePath, monitoringFixturePath);
   }
 });

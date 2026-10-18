@@ -8,7 +8,11 @@ const {
   "firebase-admin/firestore"
 );
 const { nextRecordNumber } = require("../utils/recordNumber.util");
-const { createLowStockNotificationsInTransaction } = require("./notification.service");
+const {
+  createLowStockNotificationsInTransaction,
+  createOutOfStockNotificationsInTransaction,
+  createReplenishmentNotificationsInTransaction,
+} = require("./notification.service");
 
 const COLLECTION =
   "seedlingInventory";
@@ -400,6 +404,11 @@ const updateInventoryById =
                   20
               );
 
+        const currentAvailableQuantity = Number(
+          currentData.currentQuantity ?? currentData.availableQuantity ?? 0
+        );
+        const previousThreshold = Number(currentData.lowStockThreshold ?? 20);
+
         if (
           updateData.lowStockThreshold !==
           undefined
@@ -477,6 +486,9 @@ const updateInventoryById =
           updates.availableQuantity =
             newAvailableQuantity;
 
+          updates.currentQuantity =
+            newAvailableQuantity;
+
           updates.status =
             calculateInventoryStatus(
               newAvailableQuantity,
@@ -484,8 +496,7 @@ const updateInventoryById =
             );
           updates.lowStockAlertActive = newAvailableQuantity <= effectiveThreshold;
 
-          const currentAvailableQuantity = Number(currentData.availableQuantity || 0);
-          if (currentAvailableQuantity > effectiveThreshold &&
+          if (currentAvailableQuantity > previousThreshold &&
               newAvailableQuantity <= effectiveThreshold) {
             const lowStockCycle = Number(currentData.lowStockCycle || 0) + 1;
             updates.lowStockCycle = lowStockCycle;
@@ -498,6 +509,17 @@ const updateInventoryById =
               createdAt: Timestamp.now(),
             });
           }
+          if (currentAvailableQuantity > 0 && newAvailableQuantity === 0) {
+            const outOfStockCycle = Number(currentData.outOfStockCycle || 0) + 1;
+            updates.outOfStockCycle = outOfStockCycle;
+            await createOutOfStockNotificationsInTransaction(transaction, {
+              inventoryId: id,
+              inventoryReference: currentData.inventoryNumber || currentData.batchReference || id,
+              species: updates.species || currentData.species || "Seedling",
+              cycle: outOfStockCycle,
+              createdAt: Timestamp.now(),
+            });
+          }
         } else if (
           updateData.lowStockThreshold !==
           undefined
@@ -507,13 +529,24 @@ const updateInventoryById =
           // current available stock.
           updates.status =
             calculateInventoryStatus(
-              Number(
-                currentData
-                  .availableQuantity ||
-                  0
-              ),
+              currentAvailableQuantity,
               effectiveThreshold
             );
+          const newlyLow = currentAvailableQuantity > previousThreshold &&
+            currentAvailableQuantity <= effectiveThreshold;
+          updates.lowStockAlertActive = currentAvailableQuantity <= effectiveThreshold;
+          if (newlyLow) {
+            const lowStockCycle = Number(currentData.lowStockCycle || 0) + 1;
+            updates.lowStockCycle = lowStockCycle;
+            await createLowStockNotificationsInTransaction(transaction, {
+              inventoryId: id,
+              species: currentData.species || "Seedling",
+              availableQuantity: currentAvailableQuantity,
+              lowStockThreshold: effectiveThreshold,
+              cycle: lowStockCycle,
+              createdAt: Timestamp.now(),
+            });
+          }
         }
 
         transaction.update(
@@ -588,6 +621,18 @@ const addInventoryStock =
             currentData.stockStatus || currentData.status
           );
 
+        const replenishmentCycle = Number(currentData.replenishmentCycle || 0) + 1;
+        const now = Timestamp.now();
+        await createReplenishmentNotificationsInTransaction(transaction, {
+          inventoryId: id,
+          inventoryReference: currentData.inventoryNumber || currentData.batchReference || id,
+          species: currentData.species || "Seedling",
+          quantityAdded: quantityToAdd,
+          availableQuantity: newAvailableQuantity,
+          cycle: replenishmentCycle,
+          createdAt: now,
+        });
+
         transaction.update(
           docRef,
           {
@@ -603,10 +648,14 @@ const addInventoryStock =
             stockStatus:
               newStatus,
 
+            replenishmentCycle,
+
+            lowStockAlertActive: newAvailableQuantity <= Number(currentData.lowStockThreshold ?? 20),
+
             updatedBy,
 
             updatedAt:
-              Timestamp.now(),
+              now,
           }
         );
       }

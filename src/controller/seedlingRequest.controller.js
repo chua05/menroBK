@@ -10,6 +10,11 @@ const {
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
+  proposePreApprovalSchedule,
+  confirmPreApprovalSchedule,
+  recordLateReleaseConflict,
+  proposeLateReleaseSchedule,
+  decideLateReleaseSchedule,
   revealIdentification,
 } = require("../services/seedlingRequest.service");
 const {
@@ -19,6 +24,7 @@ const {
   validatePreferredReleaseDate,
   validatePlantingSchedule,
 } = require("../utils/requestDate.util");
+const { validateReleasePlantingOrder } = require("../utils/seedlingRequestSchedule.util");
 
 // ========================================
 // HELPER — CLEAN STRING
@@ -26,6 +32,16 @@ const {
 
 const cleanString = (value) =>
   String(value || "").trim();
+
+const requireExpectedVersion = (body = {}) => {
+  const value = Number(body.expectedVersion);
+  if (body.expectedVersion === undefined || !Number.isSafeInteger(value) || value < 0) {
+    const error = new Error("The current request version is required. Refresh and try again.");
+    error.code = "STALE_REQUEST_VERSION";
+    throw error;
+  }
+  return value;
+};
 
 const isGroupWorkflow = (workflow = {}) => {
   const sector = cleanString(workflow.sector);
@@ -463,6 +479,14 @@ const submitSeedlingRequest = async (
         fieldErrors: { [scheduleError.field]: scheduleError.message },
       });
     }
+    try {
+      validateReleasePlantingOrder({
+        preferredReleaseDate,
+        plantingDate: eventProposal.proposedDate,
+      });
+    } catch (error) {
+      return res.status(400).json({ success: false, message: error.message, fieldErrors: { proposedDate: error.message } });
+    }
 
     // ========================================
     // CREATE REQUEST
@@ -766,14 +790,6 @@ const markRequestReviewed =
         });
       }
 
-      const preferredDateError = validatePreferredReleaseDate(preferredReleaseDate);
-      if (preferredDateError) {
-        return res.status(400).json({
-          success: false,
-          message: preferredDateError,
-        });
-      }
-
       const validatedItems =
         validateRequestItems(
           items
@@ -789,6 +805,7 @@ const markRequestReviewed =
             purpose: cleanString(purpose),
             plantingLocation: cleanString(plantingLocation),
             preferredReleaseDate,
+            expectedVersion: requireExpectedVersion(req.body),
           }
         );
 
@@ -808,7 +825,7 @@ const markRequestReviewed =
         "The same seedling inventory cannot be selected more than once.",
         "One of the linked seedling inventory records was not found.",
       ].includes(error.message) || /^Seedling item \d+ (has no selected inventory|must have a positive whole-number quantity)\.$/.test(error.message);
-      const statusCode = notFound ? 404 : conflict ? 409 : invalid ? 400 : 500;
+      const statusCode = notFound ? 404 : conflict || ["STALE_REQUEST_VERSION", "SCHEDULE_CONFIRMATION_REQUIRED", "SCHEDULE_STALE"].includes(error.code) ? 409 : invalid ? 400 : 500;
       if (statusCode === 500) console.error("markRequestReviewed error:", error);
 
       return res.status(statusCode).json({
@@ -840,7 +857,8 @@ const returnRequestForRevision = async (req, res) => {
       req.params.id,
       req.user.uid,
       req.user.fullName || req.user.name || "",
-      reason
+      reason,
+      requireExpectedVersion(req.body)
     );
 
     return res.status(200).json({
@@ -851,7 +869,7 @@ const returnRequestForRevision = async (req, res) => {
   } catch (error) {
     const notFound = error.message === "Seedling request not found.";
     const conflict = error.message === "Only pending requests can be returned for revision.";
-    const statusCode = notFound ? 404 : conflict ? 409 : 400;
+    const statusCode = notFound ? 404 : conflict || error.code === "STALE_REQUEST_VERSION" ? 409 : 400;
     return res.status(statusCode).json({
       success: false,
       message: error.message || "Unable to return the request for revision.",
@@ -861,6 +879,7 @@ const returnRequestForRevision = async (req, res) => {
 
 const resubmitRequest = async (req, res) => {
   try {
+    requireExpectedVersion(req.body);
     const requestData = validateResubmissionPayload(req.body);
     const request = await resubmitSeedlingRequest(
       req.params.id,
@@ -910,7 +929,7 @@ const approveRequest = async (
 
   try {
     // Approval does not require a reason.
-    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason);
+    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason, requireExpectedVersion(req.body));
 
     return res.status(200).json({
       success: true,
@@ -939,10 +958,12 @@ const approveRequest = async (
     const isPublicError = publicMessages.includes(error.message) ||
       /^(Linked seedling inventory|Invalid approved seedling quantity|Insufficient available seedling stock)/.test(error.message || "");
 
-    return res.status(isPublicError ? 400 : 500).json({
+    const conflict = ["STALE_REQUEST_VERSION", "SCHEDULE_STALE"].includes(error.code);
+    return res.status(conflict ? 409 : isPublicError ? 400 : 500).json({
       success: false,
       message: isPublicError
         ? error.message
+        : conflict ? error.message
         : "Unable to approve this request right now. Please try again or contact the system administrator.",
     });
   }
@@ -973,7 +994,8 @@ const rejectRequest = async (
       await rejectSeedlingRequest(
         req.params.id,
         req.user.uid,
-        reason
+        reason,
+        requireExpectedVersion(req.body)
       );
 
     return res.status(200).json({
@@ -988,7 +1010,7 @@ const rejectRequest = async (
       error
     );
 
-    return res.status(400).json({
+    return res.status(error.code === "STALE_REQUEST_VERSION" ? 409 : 400).json({
       success: false,
       message:
         error.message ||
@@ -1006,6 +1028,10 @@ const releaseRequest = async (
   res
 ) => {
   try {
+    requireExpectedVersion(req.body);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(cleanString(req.body?.availableReleaseDate))) {
+      return res.status(400).json({ success: false, message: "A valid available release date is required." });
+    }
     const request =
       await releaseSeedlingRequest(
         req.params.id,
@@ -1025,7 +1051,7 @@ const releaseRequest = async (
       error
     );
 
-    return res.status(400).json({
+    return res.status(["STALE_REQUEST_VERSION", "UNRESOLVED_LATE_RELEASE_CONFLICT"].includes(error.code) ? 409 : 400).json({
       success: false,
       message:
         error.message ||
@@ -1033,6 +1059,46 @@ const releaseRequest = async (
     });
   }
 };
+
+const scheduleActionResponse = (handler, successMessage) => async (req, res) => {
+  try {
+    requireExpectedVersion(req.body);
+    const data = await handler(req);
+    return res.status(200).json({ success: true, message: successMessage, data });
+  } catch (error) {
+    const conflictCodes = ["STALE_REQUEST_VERSION", "SCHEDULE_CONFIRMATION_REQUIRED", "SCHEDULE_STALE", "NO_LATE_RELEASE_CONFLICT", "UNRESOLVED_LATE_RELEASE_CONFLICT", "EVENT_ALREADY_HAS_PLANTING_ACTIVITY"];
+    const forbidden = /only (confirm|update) your own/i.test(error.message || "");
+    const notFound = /not found/i.test(error.message || "");
+    const status = forbidden ? 403 : notFound ? 404 : conflictCodes.includes(error.code) || /no longer|only pending|only approved|awaiting/i.test(error.message || "") ? 409 : 400;
+    if (status >= 500) console.error("seedling schedule action error:", error);
+    return res.status(status).json({ success: false, code: error.code || undefined, message: error.message || "Unable to update the request schedule." });
+  }
+};
+
+const savePreApprovalSchedule = scheduleActionResponse(
+  (req) => proposePreApprovalSchedule(req.params.id, { uid: req.user.uid, name: req.user.fullName || req.user.name || "" }, req.body),
+  "Coordinated schedule saved."
+);
+const confirmPreApproval = scheduleActionResponse(
+  (req) => confirmPreApprovalSchedule(req.params.id, req.user.uid, req.body),
+  "Planting schedule confirmed."
+);
+const createLateReleaseConflict = scheduleActionResponse(
+  (req) => recordLateReleaseConflict(req.params.id, { uid: req.user.uid, name: req.user.fullName || req.user.name || "" }, req.body),
+  "Late-release conflict recorded and the requester was notified."
+);
+const submitLateReleaseProposal = scheduleActionResponse(
+  (req) => proposeLateReleaseSchedule(req.params.id, req.user.uid, req.body),
+  "Replacement planting schedule submitted."
+);
+const returnLateReleaseProposal = scheduleActionResponse(
+  (req) => decideLateReleaseSchedule(req.params.id, { uid: req.user.uid, name: req.user.fullName || req.user.name || "" }, req.body, false),
+  "Replacement schedule returned for revision."
+);
+const approveLateReleaseProposal = scheduleActionResponse(
+  (req) => decideLateReleaseSchedule(req.params.id, { uid: req.user.uid, name: req.user.fullName || req.user.name || "" }, req.body, true),
+  "Replacement schedule approved and the linked event was updated."
+);
 
 module.exports = {
   submitSeedlingRequest,
@@ -1046,4 +1112,10 @@ module.exports = {
   approveRequest,
   rejectRequest,
   releaseRequest,
+  savePreApprovalSchedule,
+  confirmPreApproval,
+  createLateReleaseConflict,
+  submitLateReleaseProposal,
+  returnLateReleaseProposal,
+  approveLateReleaseProposal,
 };

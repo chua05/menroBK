@@ -11,6 +11,7 @@ const {
 
 const SITE_COLLECTION = "sites";
 const COUNTER_COLLECTION = "counters";
+const CUSTOM_SITE_TYPE_MAX_LENGTH = 120;
 
 function getManilaYear(date = new Date()) {
   return Number(
@@ -87,6 +88,21 @@ async function ensureReadableSiteId(doc) {
 
 function cleanString(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function validateCustomSiteType(siteType, value) {
+  if (siteType !== "Other") return "";
+
+  const customSiteType = cleanString(value);
+  if (!customSiteType) {
+    throw new Error("Custom site type is required when site type is Other.");
+  }
+  if (customSiteType.length > CUSTOM_SITE_TYPE_MAX_LENGTH) {
+    throw new Error(
+      `Custom site type must be ${CUSTOM_SITE_TYPE_MAX_LENGTH} characters or fewer.`
+    );
+  }
+  return customSiteType;
 }
 
 function validateCoordinates(latitudeValue, longitudeValue) {
@@ -236,6 +252,8 @@ const createSite = async (data) => {
     throw new Error("Site type is required.");
   }
 
+  const customSiteType = validateCustomSiteType(siteType, data.customSiteType);
+
   const locationDescription = cleanString(
     data.locationDescription
   );
@@ -293,6 +311,7 @@ const createSite = async (data) => {
     province: PROVINCE,
 
     siteType,
+    customSiteType,
 
     areaHectares,
     maximumCapacity,
@@ -461,6 +480,7 @@ const participantSafeSite = (site) => {
     "municipality",
     "province",
     "siteType",
+    "customSiteType",
     "areaHectares",
     "maximumCapacity",
     "targetTrees",
@@ -509,6 +529,20 @@ const updateSite = async (siteId, input, updatedBy) => {
     if (Object.prototype.hasOwnProperty.call(input || {}, field)) {
       changes[field] = cleanString(input[field]);
     }
+  }
+  const effectiveSiteType = Object.prototype.hasOwnProperty.call(input || {}, "siteType")
+    ? cleanString(input.siteType)
+    : cleanString(existingData.siteType);
+  const hasSiteTypeInput = Object.prototype.hasOwnProperty.call(input || {}, "siteType");
+  const hasCustomSiteTypeInput = Object.prototype.hasOwnProperty.call(
+    input || {},
+    "customSiteType"
+  );
+  if (hasSiteTypeInput || hasCustomSiteTypeInput) {
+    const customValue = hasCustomSiteTypeInput
+      ? input.customSiteType
+      : existingData.customSiteType;
+    changes.customSiteType = validateCustomSiteType(effectiveSiteType, customValue);
   }
   if (Object.prototype.hasOwnProperty.call(input || {}, "areaHectares")) {
     const area = Number(input.areaHectares);

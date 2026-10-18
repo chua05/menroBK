@@ -9,10 +9,15 @@ const router =
 const {
   addMonitoringRecord,
   getMonitoringRecords,
+  addEarlyMonitoringRecord,
   getMonitoringRecord,
   getMyMonitoringRecords,
   updateMonitoring,
   reviewMonitoring,
+  returnMonitoring,
+  resubmitMonitoring,
+  approveMonitoring,
+  rejectMonitoring,
   archiveMonitoring,
 } = require(
   "../controller/monitoring.controller"
@@ -79,6 +84,16 @@ const upload =
 // PARTICIPANT CREATE MONITORING RECORD
 // ========================================
 router.post(
+  "/early",
+  verifyToken,
+  authorizeRoles("participant"),
+  uploadLimiter,
+  uploadConcurrencyGuard,
+  upload.single("photo"),
+  addEarlyMonitoringRecord
+);
+
+router.post(
   "/",
   verifyToken,
   authorizeRoles(
@@ -122,13 +137,41 @@ router.get(
 // ADMIN / STAFF REVIEW RECORD
 // ========================================
 router.patch(
-  "/:id/review",
+  "/:monitoringId/observations/:observationId/review",
   verifyToken,
-  authorizeRoles(
-    "admin",
-    "staff"
-  ),
+  authorizeRoles("staff"),
   reviewMonitoring
+);
+
+router.patch(
+  "/:monitoringId/observations/:observationId/return",
+  verifyToken,
+  authorizeRoles("staff"),
+  returnMonitoring
+);
+
+router.patch(
+  "/:monitoringId/observations/:observationId/resubmit",
+  verifyToken,
+  authorizeRoles("participant"),
+  uploadLimiter,
+  uploadConcurrencyGuard,
+  upload.single("photo"),
+  resubmitMonitoring
+);
+
+router.patch(
+  "/:monitoringId/observations/:observationId/approve",
+  verifyToken,
+  authorizeRoles("admin"),
+  approveMonitoring
+);
+
+router.patch(
+  "/:monitoringId/observations/:observationId/reject",
+  verifyToken,
+  authorizeRoles("admin"),
+  rejectMonitoring
 );
 
 // ========================================

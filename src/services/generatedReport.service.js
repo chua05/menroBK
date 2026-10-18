@@ -2,6 +2,12 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { pdfFromLines } = require("../utils/simplePdf.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
+const {
+  validatedMonitoringHistory,
+  monitoringObservationTotal,
+  monitoringCoverageClassification,
+  monitoringApprovalBasis,
+} = require("../utils/monitoringObservation.util");
 
 const history = db.collection("generatedReports");
 const REPORT_DATA_UNAVAILABLE = "Report data is unavailable for the selected report type or filters.";
@@ -52,6 +58,42 @@ async function snapshotRows(collection) {
   return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 }
 
+function observationSubmissionMillis(observation) {
+  const value = observation.monitoredAt || observation.createdAt;
+  if (!value) return 0;
+  if (typeof value.toDate === "function") return value.toDate().getTime();
+  if (value.seconds !== undefined || value._seconds !== undefined) {
+    return Number(value.seconds ?? value._seconds) * 1000;
+  }
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function validatedMonitoringRows(records) {
+  return records.flatMap((record) => {
+    const observations = validatedMonitoringHistory(record)
+      .map((observation, index) => ({ observation, index }))
+      .sort((a, b) => isoDate(a.observation.monitoredDate || a.observation.monitoringDate ||
+        a.observation.monitoredAt || a.observation.createdAt).localeCompare(
+        isoDate(b.observation.monitoredDate || b.observation.monitoringDate ||
+          b.observation.monitoredAt || b.observation.createdAt)) ||
+        observationSubmissionMillis(a.observation) - observationSubmissionMillis(b.observation) ||
+        a.index - b.index);
+    return observations.map(({ observation }) => ({
+      ...observation,
+      monitoringId: record.monitoringNumber || record.id,
+      observationId: observation.id || "",
+      plantingReportNumber: record.plantingReportNumber || "",
+      plantingReportId: record.plantingReportId || "",
+      monitoringDate: observation.monitoredDate || observation.monitoringDate ||
+        observation.monitoredAt || observation.createdAt || "",
+      totalMonitored: monitoringObservationTotal(observation),
+      coverageClassification: monitoringCoverageClassification(observation, record),
+      approvalBasis: monitoringApprovalBasis(observation, record),
+    }));
+  });
+}
+
 async function buildRows(filters) {
   const { type } = filters;
   if (type === "participant" || type === "event-participation") {
@@ -96,7 +138,10 @@ async function buildRows(filters) {
     "tree-monitoring": "monitoringRecords",
   }[type];
   if (collection) {
-    const records = await snapshotRows(collection);
+    const sourceRecords = await snapshotRows(collection);
+    const records = type === "tree-monitoring"
+      ? validatedMonitoringRows(sourceRecords)
+      : sourceRecords;
     return records.filter((record) => within(isoDate(
       type === "tree-monitoring" ? record.monitoringDate || record.createdAt
         : record.releasedAt || record.submittedAt || record.createdAt
@@ -115,23 +160,37 @@ async function buildRows(filters) {
         quantityPlanted: Number(record.quantityPlanted || 0), status: record.verificationStatus || "",
       };
       return {
-        monitoringId: record.monitoringNumber || record.id,
+        monitoringId: record.monitoringNumber || record.monitoringId || record.id,
+        observationId: record.observationId || "",
         reportId: record.plantingReportNumber || record.plantingReportId || "",
         date: isoDate(record.monitoringDate || record.createdAt),
         healthyCount: record.healthyCount ?? null,
         damagedCount: record.damagedCount ?? null,
         deadCount: record.deadCount ?? null,
+        totalMonitored: record.totalMonitored ?? null,
         survivingCount: record.survivingCount ?? null,
         survivalRate: record.survivalRate ?? null,
+        mortalityRate: record.mortalityRate ?? null,
+        coverage: record.coverageClassification === "full" ? "Full cohort"
+          : record.coverageClassification === "partial" ? "Partial observation"
+            : "Coverage Unavailable / Legacy",
+        monitoredBy: record.monitoredBy || "",
+        workflowStatus: record.reviewStatus || "",
+        revisionNumber: record.revisionNumber ?? null,
+        staffReviewedBy: record.staffReviewedBy || "",
+        adminDecidedBy: record.adminDecidedBy || "",
+        adminDecision: record.adminDecision || "",
+        approvalBasis: record.approvalBasis || "",
       };
     });
   }
 
-  const [requests, distributions, reports, monitoring, participants] = await Promise.all([
+  const [requests, distributions, reports, monitoringRecords, participants] = await Promise.all([
     snapshotRows("seedlingRequests"), snapshotRows("distributions"),
     snapshotRows("plantingReports"), snapshotRows("monitoringRecords"),
     snapshotRows("eventParticipants"),
   ]);
+  const monitoring = validatedMonitoringRows(monitoringRecords);
   if (!filters.dateFrom) throw new Error("A date range is required for monthly and annual reports.");
   const periodLength = type === "monthly" ? 7 : 4;
   const sources = [

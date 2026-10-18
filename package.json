@@ -6,7 +6,16 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "test:integration:safety": "node --test --test-isolation=none tests/integrationEnvironment.test.js",
+    "integration:seed": "node tests/integration/seedEmulator.js",
+    "integration:cleanup": "node tests/integration/seedEmulator.js --cleanup",
+    "integration:fixtures": "node tests/integration/generateEvidenceFixtures.js",
+    "test:integration:emulator": "node --test --test-isolation=none tests/integration/monitoringEmulator.test.js",
+    "test:integration:worker-reliability": "node --test --test-isolation=none tests/integration/workerReliabilityEmulator.test.js",
+    "worker:early-monitoring-notifications": "node src/workers/earlyMonitoringNotifications.worker.js",
+    "worker:event-calendar-notifications": "node src/workers/eventCalendarNotifications.worker.js",
+    "worker:official-monitoring-notifications": "node src/workers/officialMonitoringNotifications.worker.js"
   },
   "keywords": [],
   "author": "",

@@ -32,9 +32,26 @@ const {
   createNotificationInTransaction,
   getRoleRecipientsInTransaction,
   createRoleNotificationsInTransaction,
+  createOutOfStockNotificationsInTransaction,
+  createDistributionNotificationsInTransaction,
 } = require("./notification.service");
+const {
+  activeRegisteredRecipients,
+  writeNotifications,
+} = require("./eventNotification.service");
 const { createInvitationInTransaction } = require("./guestEvent.service");
 const { parentForEventInTransaction } = require("./parentPlantingReport.service");
+const {
+  buildProcessingEstimate,
+  manilaDateOnly,
+  scheduleFromRequest,
+  normalizeSchedule,
+  validateReleasePlantingOrder,
+  validateFuturePlantingSchedule,
+  samePlantingSchedule,
+  requestVersion,
+  assertExpectedVersion,
+} = require("../utils/seedlingRequestSchedule.util");
 const {
   IDENTIFICATION_COLLECTION,
   buildIdentificationRecord,
@@ -44,6 +61,14 @@ const {
 
 const COLLECTION =
   "seedlingRequests";
+
+// Legacy internal callers predate optimistic versions. HTTP controllers require
+// a version; retaining this compatibility here avoids breaking server-side jobs
+// and historical tests that call the service directly.
+const assertMutationVersion = (request, expectedVersion) => {
+  if (expectedVersion === undefined || expectedVersion === null || expectedVersion === "") return;
+  assertExpectedVersion(request, expectedVersion);
+};
 
 const INVENTORY_COLLECTION =
   "seedlingInventory";
@@ -569,6 +594,10 @@ const createSeedlingRequest =
           at: now,
         },
       ],
+      requestVersion: 0,
+      originalSchedule: scheduleFromRequest(data),
+      processingEstimate: buildProcessingEstimate(now.toDate()),
+      scheduleHistory: [],
     };
 
     // Remove legacy client values if supplied.
@@ -645,6 +674,7 @@ const createSeedlingRequest =
         }
       }
       const counterDoc = await transaction.get(counterRef);
+      const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const currentValue = Math.max(requestSequenceFloor, counterDoc.exists
         ? Number(counterDoc.data()?.lastNumber || 0)
         : 0);
@@ -663,6 +693,48 @@ const createSeedlingRequest =
         ...requestData,
         requestNumber,
       });
+      createNotificationInTransaction(transaction, {
+        notificationId: `request_submitted_${docRef.id}`,
+        recipientUserId: cleanString(data.participantId),
+        type: "request_submitted",
+        title: "Seedling Request Submitted",
+        message: `${requestNumber} was submitted. MENRO normally processes requests within an estimated 3–7 working days; availability and release schedules may change.`,
+        relatedRecordType: "seedlingRequest",
+        relatedRecordId: docRef.id,
+        requestNumber,
+        createdAt: now,
+        details: { processingEstimate: requestData.processingEstimate },
+      });
+      staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `request_submitted_staff_${docRef.id}_${recipient.id}`,
+        recipientUserId: recipient.id,
+        type: "request_submitted_staff",
+        title: "New Seedling Request Submitted",
+        message: `${requestNumber} from ${cleanString(data.participantName) || "a participant"} requires Staff review.`,
+        relatedRecordType: "seedlingRequest",
+        relatedRecordId: docRef.id,
+        requestNumber,
+        createdAt: now,
+        details: {
+          requesterName: cleanString(data.participantName),
+          requestType: cleanString(data.requestType || data.requestingAs || data.participantType),
+          submittedAt: now,
+        },
+      }));
+      if (cleanString(data.preferredReleaseDate) < requestData.processingEstimate.earliestDate) {
+        createNotificationInTransaction(transaction, {
+          notificationId: `request_early_release_advisory_${docRef.id}`,
+          recipientUserId: cleanString(data.participantId),
+          type: "request_early_release_advisory",
+          title: "Preferred Release Date Advisory",
+          message: `Your preferred release date is earlier than the estimated processing window for ${requestNumber}. This is an advisory only and does not reject your request.`,
+          relatedRecordType: "seedlingRequest",
+          relatedRecordId: docRef.id,
+          requestNumber,
+          createdAt: now,
+          details: { processingEstimate: requestData.processingEstimate },
+        });
+      }
       if (identificationRecord) {
         transaction.create(
           db.collection(IDENTIFICATION_COLLECTION).doc(docRef.id),
@@ -827,9 +899,23 @@ const reviewSeedlingRequest =
 
       const currentRequest = doc.data();
 
+      assertMutationVersion(currentRequest, reviewData.expectedVersion);
+
       if (currentRequest.status !== "Pending") {
         throw new Error("Only pending requests can be reviewed.");
       }
+
+      const originalSchedule = currentRequest.originalSchedule || scheduleFromRequest(currentRequest);
+      const coordinated = currentRequest.preApprovalSchedule;
+      if (coordinated?.status === "AwaitingRequesterConfirmation") {
+        const error = new Error("The requester must confirm the coordinated planting schedule before review can be completed.");
+        error.code = "SCHEDULE_CONFIRMATION_REQUIRED";
+        throw error;
+      }
+      const effectiveSchedule = coordinated?.status === "Confirmed"
+        ? normalizeSchedule(coordinated, originalSchedule)
+        : scheduleFromRequest(currentRequest);
+      validateFuturePlantingSchedule(effectiveSchedule);
 
       const canonicalItems = [];
 
@@ -902,7 +988,13 @@ const reviewSeedlingRequest =
         totalQuantity,
         purpose: cleanString(reviewData.purpose),
         plantingLocation: cleanString(reviewData.plantingLocation),
-        preferredReleaseDate: reviewData.preferredReleaseDate,
+        preferredReleaseDate: effectiveSchedule.preferredReleaseDate,
+        eventProposal: {
+          ...(currentRequest.eventProposal || {}),
+          proposedDate: effectiveSchedule.plantingDate,
+          proposedStartTime: effectiveSchedule.startTime,
+          proposedEndTime: effectiveSchedule.endTime,
+        },
         reviewedBy: reviewData.reviewedBy,
         reviewedByUid: reviewData.reviewedBy,
         reviewedByName,
@@ -911,6 +1003,7 @@ const reviewSeedlingRequest =
         reviewRemarks: "",
         reviewedAt: now,
         status: "Reviewed",
+        requestVersion: requestVersion(currentRequest) + 1,
         updatedAt: now,
         reviewHistory: [
           ...(Array.isArray(currentRequest.reviewHistory)
@@ -950,7 +1043,8 @@ const returnSeedlingRequest = async (
   id,
   returnedBy,
   returnedByName,
-  reason
+  reason,
+  expectedVersion
 ) => {
   const requestRef = db.collection(COLLECTION).doc(id);
   const returnReason = cleanString(reason);
@@ -967,7 +1061,7 @@ const returnSeedlingRequest = async (
     }
 
     const request = requestDoc.data();
-
+    assertMutationVersion(request, expectedVersion);
     if (request.status !== "Pending") {
       throw new Error("Only pending requests can be returned for revision.");
     }
@@ -987,6 +1081,7 @@ const returnSeedlingRequest = async (
       returnedByName: cleanString(returnedByName),
       returnedAt: now,
       updatedAt: now,
+      requestVersion: requestVersion(request) + 1,
       reviewHistory: [
         ...existingHistory,
         {
@@ -1051,6 +1146,7 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
     }
 
     const request = requestDoc.data();
+    assertMutationVersion(request, data.expectedVersion);
 
     if (request.participantId !== participantId) {
       throw new Error("You can only edit your own returned request.");
@@ -1110,6 +1206,8 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
       (total, item) => total + item.quantity,
       0
     );
+    const nextVersion = requestVersion(request) + 1;
+    const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
 
     transaction.update(requestRef, {
       items: canonicalItems,
@@ -1134,6 +1232,8 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
         status: "Proposed",
       },
       status: "Pending",
+      requestVersion: nextVersion,
+      resubmissionProcessingEstimate: buildProcessingEstimate(now.toDate()),
       returnReason: "",
       returnedBy: "",
       returnedByName: "",
@@ -1158,10 +1258,126 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
         },
       ],
     });
+    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+      notificationId: `request_resubmitted_staff_${id}_${nextVersion}_${recipient.id}`,
+      recipientUserId: recipient.id,
+      type: "request_resubmitted_staff",
+      title: "Seedling Request Resubmitted",
+      message: `${request.requestNumber || id} was corrected and resubmitted for Staff review.`,
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      requestNumber: request.requestNumber || "",
+      createdAt: now,
+      details: { status: "Pending", requestVersion: nextVersion, resubmittedAt: now },
+    }));
   });
 
   const updatedDoc = await requestRef.get();
   return { id: updatedDoc.id, ...updatedDoc.data() };
+};
+
+const proposePreApprovalSchedule = async (id, staff, data = {}) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(requestRef);
+    if (!doc.exists) throw new Error("Seedling request not found.");
+    const request = doc.data();
+    assertMutationVersion(request, data.expectedVersion);
+    if (request.status !== "Pending") throw new Error("Only pending requests can have a coordinated schedule.");
+
+    const original = request.originalSchedule || scheduleFromRequest(request);
+    const schedule = validateFuturePlantingSchedule(normalizeSchedule(data, original));
+    if (schedule.preferredReleaseDate < manilaDateOnly()) {
+      throw new Error("Replacement release and planting dates must not be in the past.");
+    }
+    const changed = JSON.stringify(schedule) !== JSON.stringify(original);
+    const plantingChanged = !samePlantingSchedule(schedule, original);
+    const reason = cleanString(data.adjustmentReason);
+    if (changed && !reason) throw new Error("An adjustment reason is required when the schedule changes.");
+
+    const now = Timestamp.now();
+    const proposalVersion = Number(request.preApprovalSchedule?.proposalVersion || 0) + 1;
+    const nextVersion = requestVersion(request) + 1;
+    const status = plantingChanged ? "AwaitingRequesterConfirmation" : "Confirmed";
+    transaction.update(requestRef, {
+      originalSchedule: original,
+      preApprovalSchedule: {
+        ...schedule,
+        status,
+        proposalVersion,
+        adjustmentReason: reason,
+        proposedBy: staff.uid,
+        proposedByName: cleanString(staff.name),
+        proposedAt: now,
+        confirmedBy: plantingChanged ? "" : request.participantId,
+        confirmedAt: plantingChanged ? null : now,
+      },
+      requestVersion: nextVersion,
+      updatedAt: now,
+      scheduleHistory: [
+        ...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []),
+        { action: "pre_approval_schedule_proposed", actorId: staff.uid, actorRole: "staff", fromSchedule: original, toSchedule: schedule, reason, requestVersion: nextVersion, at: now },
+      ],
+    });
+    if (plantingChanged) createNotificationInTransaction(transaction, {
+      notificationId: `request_schedule_confirmation_${id}_${proposalVersion}`,
+      recipientUserId: request.participantId,
+      type: "request_schedule_confirmation_required",
+      title: "Planting Schedule Confirmation Required",
+      message: `${request.requestNumber || id} has a coordinated planting schedule that requires your confirmation before Staff review can be completed.`,
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      requestNumber: request.requestNumber || "",
+      details: { proposalVersion, schedule },
+      createdAt: now,
+    });
+  });
+  const updated = await requestRef.get();
+  return { id: updated.id, ...updated.data() };
+};
+
+const confirmPreApprovalSchedule = async (id, participantId, data = {}) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(requestRef);
+    if (!doc.exists) throw new Error("Seedling request not found.");
+    const request = doc.data();
+    assertMutationVersion(request, data.expectedVersion);
+    if (request.participantId !== participantId) throw new Error("You can only confirm your own request schedule.");
+    if (request.status !== "Pending" || request.preApprovalSchedule?.status !== "AwaitingRequesterConfirmation") {
+      throw new Error("This schedule is no longer awaiting confirmation.");
+    }
+    if (Number(data.proposalVersion) !== Number(request.preApprovalSchedule.proposalVersion)) {
+      const error = new Error("The coordinated schedule changed. Refresh and review the latest proposal.");
+      error.code = "STALE_REQUEST_VERSION";
+      throw error;
+    }
+    const proposed = normalizeSchedule(request.preApprovalSchedule);
+    const schedule = validateFuturePlantingSchedule(normalizeSchedule(data, proposed));
+    if (schedule.preferredReleaseDate < manilaDateOnly()) {
+      throw new Error("The confirmed schedule must not be in the past.");
+    }
+    const now = Timestamp.now();
+    const nextVersion = requestVersion(request) + 1;
+    const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    transaction.update(requestRef, {
+      preApprovalSchedule: { ...request.preApprovalSchedule, ...schedule, status: "Confirmed", confirmedBy: participantId, confirmedAt: now },
+      requestVersion: nextVersion,
+      updatedAt: now,
+      scheduleHistory: [
+        ...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []),
+        { action: "pre_approval_schedule_confirmed", actorId: participantId, actorRole: "participant", toSchedule: schedule, requestVersion: nextVersion, at: now },
+      ],
+    });
+    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+      notificationId: `request_schedule_confirmed_${id}_${request.preApprovalSchedule.proposalVersion}_${recipient.id}`,
+      recipientUserId: recipient.id, type: "request_schedule_confirmed", title: "Planting Schedule Confirmed",
+      message: `${request.requestNumber || id} has a requester-confirmed planting schedule and is ready for Staff review.`,
+      relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", createdAt: now,
+    }));
+  });
+  const updated = await requestRef.get();
+  return { id: updated.id, ...updated.data() };
 };
 
 // ========================================
@@ -1177,7 +1393,8 @@ const approveSeedlingRequest =
   async (
     id,
     approvedBy,
-    reason
+    reason,
+    expectedVersion
   ) => {
     const adminUid = cleanString(approvedBy);
     if (!adminUid) {
@@ -1195,6 +1412,11 @@ const approveSeedlingRequest =
     const approvalSnapshot = await requestRef.get();
     if (approvalSnapshot.exists) {
       const approvalRequest = approvalSnapshot.data();
+      assertMutationVersion(approvalRequest, expectedVersion);
+      const alreadyApproved = approvalRequest.status === "Approved" && approvalRequest.eventId && approvalRequest.eventCreated === true;
+      if (approvalRequest.status !== "Reviewed" && !alreadyApproved) {
+        throw new Error("Only reviewed requests can be approved.");
+      }
       const workflow = approvalRequest.workflow || {};
       if (workflow.siteMode === "proposed" && !workflow.officialSiteId) {
         const areaLabels = {
@@ -1255,6 +1477,8 @@ const approveSeedlingRequest =
         const currentRequest =
           requestDoc.data();
 
+        assertMutationVersion(currentRequest, expectedVersion);
+
         if (
           currentRequest.status === "Approved" &&
           currentRequest.eventId &&
@@ -1262,6 +1486,10 @@ const approveSeedlingRequest =
         ) {
           return;
         }
+        const approvalSchedule = currentRequest.preApprovalSchedule?.status === "Confirmed"
+          ? normalizeSchedule(currentRequest.preApprovalSchedule)
+          : scheduleFromRequest(currentRequest);
+        validateFuturePlantingSchedule(approvalSchedule);
 
         if (
           currentRequest.status !==
@@ -1475,6 +1703,7 @@ const approveSeedlingRequest =
 
         const {
           eventId,
+          eventData,
         } =
           await createTreePlantingEventInTransaction(
             transaction,
@@ -1524,6 +1753,8 @@ const approveSeedlingRequest =
           inventoryDeducted: false,
           inventoryReserved: false,
           approvedItems,
+          approvedSchedule: { ...approvalSchedule, confirmedByAdmin: adminUid, confirmedAt: now },
+          requestVersion: requestVersion(currentRequest) + 1,
           updatedAt: now,
         });
 
@@ -1532,13 +1763,20 @@ const approveSeedlingRequest =
           recipientUserId: currentRequest.participantId,
           type: "request_approved",
           title: "Seedling Request Approved",
-          message: `Your seedling request ${currentRequest.requestNumber || id} has been approved. Please wait for release updates.`,
+          message: `Your seedling request ${currentRequest.requestNumber || id} has been approved. ${eventData.name} is scheduled for ${eventData.date} ${eventData.startTime}${eventData.endTime ? `-${eventData.endTime}` : ""} at ${eventData.plantingSiteName || eventData.location || eventData.barangay}. Please wait for release updates.`,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
           requestNumber: currentRequest.requestNumber || "",
           relatedEventId: eventId,
           createdAt: now,
-          details: { approvedAt: now },
+          details: {
+            approvedAt: now,
+            schedule: {
+              date: eventData.date,
+              startTime: eventData.startTime,
+              endTime: eventData.endTime,
+            },
+          },
         });
 
         staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
@@ -1546,7 +1784,7 @@ const approveSeedlingRequest =
           recipientUserId: recipient.id,
           type: "request_approved_staff",
           title: "Seedling Request Approved",
-          message: `${currentRequest.requestNumber || id} has been approved by the MENRO Administrator and is ready for seedling release.`,
+          message: `${currentRequest.requestNumber || id} has been approved by the MENRO Administrator. ${eventData.name} is scheduled for ${eventData.date} ${eventData.startTime}${eventData.endTime ? `-${eventData.endTime}` : ""} at ${eventData.plantingSiteName || eventData.location || eventData.barangay}, and the request is ready for seedling release.`,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: id,
           requestNumber: currentRequest.requestNumber || "",
@@ -1555,8 +1793,22 @@ const approveSeedlingRequest =
           details: {
             requesterName: currentRequest.participantName || "",
             approvedAt: now,
+            schedule: {
+              date: eventData.date,
+              startTime: eventData.startTime,
+              endTime: eventData.endTime,
+            },
           },
         }));
+
+        // The requester and Staff already receive the equivalent approval notification
+        // above. Only the Admin creator needs the separate Event Calendar notice.
+        writeNotifications(transaction, {
+          eventId,
+          event: eventData,
+          recipientIds: [adminUid],
+          kind: "scheduled",
+        });
       }
     );
 
@@ -1581,7 +1833,8 @@ const rejectSeedlingRequest =
   async (
     id,
     rejectedBy,
-    reason
+    reason,
+    expectedVersion
   ) => {
     const adminUid = cleanString(rejectedBy);
     if (!adminUid) {
@@ -1609,6 +1862,8 @@ const rejectSeedlingRequest =
 
     const currentRequest =
       doc.data();
+
+    assertMutationVersion(currentRequest, expectedVersion);
 
     if (
       currentRequest.status !==
@@ -1641,6 +1896,8 @@ const rejectSeedlingRequest =
 
       decisionAt:
         now,
+
+      requestVersion: requestVersion(currentRequest) + 1,
 
       updatedAt:
         now,
@@ -1688,6 +1945,156 @@ const rejectSeedlingRequest =
     };
   };
 
+const assertEventHasNoPlantingActivity = async (transaction, eventRef, event, requestId) => {
+  const status = cleanString(event.status).toLowerCase();
+  const recordStatus = cleanString(event.recordStatus).toLowerCase();
+  const counters = [event.recordedSeedlingQuantity, event.actualTreesPlanted, event.treesPlanted]
+    .some((value) => Number(value || 0) > 0);
+  if (["completed", "ongoing", "in progress", "in-progress"].includes(status) ||
+      ["completed", "active", "in_progress"].includes(recordStatus) || counters) {
+    const error = new Error("The linked event already has planting activity and can no longer be rescheduled.");
+    error.code = "EVENT_ALREADY_HAS_PLANTING_ACTIVITY";
+    throw error;
+  }
+  const reportQuery = db.collection("plantingReports").where("eventId", "==", eventRef.id);
+  const contributionQuery = db.collection("plantingContributions").where("eventId", "==", eventRef.id).limit(1);
+  const parentRef = db.collection("plantingReports").doc(`event_${eventRef.id}`);
+  const [reports, contributions, parent] = await Promise.all([
+    transaction.get(reportQuery), transaction.get(contributionQuery), transaction.get(parentRef),
+  ]);
+  const parentData = parent.exists ? parent.data() : {};
+  const hasSubmittedReport = reports.docs.some((doc) => {
+    const report = doc.data();
+    return report.reportType !== "parent" || Boolean(report.submittedAt || report.verifiedAt) ||
+      Number(report.activeSubmittedQuantity || report.quantityPlanted || 0) > 0;
+  });
+  if (hasSubmittedReport || !contributions.empty || Number(parentData.activeSubmittedQuantity || parentData.quantityPlanted || 0) > 0) {
+    const error = new Error("The linked event already has planting activity and can no longer be rescheduled.");
+    error.code = "EVENT_ALREADY_HAS_PLANTING_ACTIVITY";
+    throw error;
+  }
+  if (event.sourceRequestId !== requestId) throw new Error("Linked planting event does not belong to this request.");
+};
+
+const recordLateReleaseConflict = async (id, staff, data = {}) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(requestRef);
+    if (!doc.exists) throw new Error("Seedling request not found.");
+    const request = doc.data();
+    assertMutationVersion(request, data.expectedVersion);
+    if (request.status !== "Approved" || request.inventoryReleased === true) throw new Error("Only approved, unreleased requests can enter late-release rescheduling.");
+    if (["AwaitingRequester", "PendingStaffReview", "ReturnedForRevision"].includes(request.lateReleaseRescheduling?.status)) {
+      throw new Error("Resolve the existing late-release rescheduling request before starting another one.");
+    }
+    if (!request.eventId) throw new Error("Approved request has no linked event.");
+    const eventRef = db.collection("events").doc(request.eventId);
+    const eventDoc = await transaction.get(eventRef);
+    if (!eventDoc.exists || eventDoc.data().sourceRequestId !== id) throw new Error("Linked planting event not found.");
+    const availableReleaseDate = cleanString(data.availableReleaseDate);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(availableReleaseDate) || availableReleaseDate < manilaDateOnly()) {
+      throw new Error("Available release date must be a valid date that is not in the past.");
+    }
+    if (availableReleaseDate <= eventDoc.data().date) {
+      const error = new Error("The available release date does not create a late-release conflict.");
+      error.code = "NO_LATE_RELEASE_CONFLICT";
+      throw error;
+    }
+    const reason = cleanString(data.reason);
+    if (!reason) throw new Error("A delay reason is required.");
+    const now = Timestamp.now();
+    const version = Number(request.lateReleaseRescheduling?.version || 0) + 1;
+    const nextVersion = requestVersion(request) + 1;
+    transaction.update(requestRef, {
+      lateReleaseRescheduling: {
+        status: "AwaitingRequester",
+        version,
+        availableReleaseDate,
+        conflictReason: reason,
+        initiatedBy: staff.uid,
+        initiatedByName: cleanString(staff.name),
+        initiatedAt: now,
+        linkedEventId: eventRef.id,
+        originalEventSchedule: { date: eventDoc.data().date, startTime: eventDoc.data().startTime || "", endTime: eventDoc.data().endTime || "" },
+      },
+      requestVersion: nextVersion,
+      updatedAt: now,
+      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []),
+        { action: "late_release_conflict_recorded", actorId: staff.uid, actorRole: "staff", availableReleaseDate, reason, requestVersion: nextVersion, at: now }],
+    });
+    createNotificationInTransaction(transaction, {
+      notificationId: `late_release_conflict_${id}_${version}`,
+      recipientUserId: request.participantId,
+      type: "late_release_conflict",
+      title: "New Planting Date Required",
+      message: `${request.requestNumber || id} cannot follow its approved planting schedule because seedlings will be available later. Please submit a replacement planting date.`,
+      relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "",
+      details: { availableReleaseDate, conflictReason: reason, reschedulingVersion: version }, createdAt: now,
+    });
+  });
+  const updated = await requestRef.get(); return { id: updated.id, ...updated.data() };
+};
+
+const proposeLateReleaseSchedule = async (id, participantId, data = {}) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(requestRef); if (!doc.exists) throw new Error("Seedling request not found.");
+    const request = doc.data(); assertMutationVersion(request, data.expectedVersion);
+    if (request.participantId !== participantId) throw new Error("You can only update your own request.");
+    const state = request.lateReleaseRescheduling || {};
+    if (request.status !== "Approved" || !["AwaitingRequester", "ReturnedForRevision"].includes(state.status)) throw new Error("This request is not awaiting a replacement planting schedule.");
+    if (Number(data.reschedulingVersion) !== Number(state.version)) { const error = new Error("The rescheduling request changed. Refresh and try again."); error.code = "STALE_REQUEST_VERSION"; throw error; }
+    const proposal = normalizeSchedule(data, { preferredReleaseDate: state.availableReleaseDate });
+    proposal.preferredReleaseDate = state.availableReleaseDate;
+    validateFuturePlantingSchedule(proposal);
+    const now = Timestamp.now(); const proposalVersion = Number(state.requesterProposal?.proposalVersion || 0) + 1; const nextVersion = requestVersion(request) + 1;
+    const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    transaction.update(requestRef, {
+      lateReleaseRescheduling: { ...state, status: "PendingStaffReview", requesterProposal: { plantingDate: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, remarks: cleanString(data.remarks), submittedBy: participantId, submittedAt: now, proposalVersion } },
+      requestVersion: nextVersion, updatedAt: now,
+      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_proposed", actorId: participantId, actorRole: "participant", toSchedule: proposal, requestVersion: nextVersion, at: now }],
+    });
+    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, { notificationId: `late_release_proposal_${id}_${proposalVersion}_${recipient.id}`, recipientUserId: recipient.id, type: "late_release_proposal_submitted", title: "Replacement Planting Schedule Submitted", message: `${request.requestNumber || id} has a replacement planting schedule ready for Staff review.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", createdAt: now }));
+  });
+  const updated = await requestRef.get(); return { id: updated.id, ...updated.data() };
+};
+
+const decideLateReleaseSchedule = async (id, staff, data = {}, approve = false) => {
+  const requestRef = db.collection(COLLECTION).doc(id);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(requestRef); if (!doc.exists) throw new Error("Seedling request not found.");
+    const request = doc.data(); assertMutationVersion(request, data.expectedVersion);
+    const state = request.lateReleaseRescheduling || {};
+    if (request.status !== "Approved" || request.inventoryReleased === true || state.status !== "PendingStaffReview") throw new Error("This replacement schedule is no longer awaiting Staff review.");
+    if (Number(data.reschedulingVersion) !== Number(state.version) || Number(data.proposalVersion) !== Number(state.requesterProposal?.proposalVersion)) { const error = new Error("The replacement schedule changed. Refresh and try again."); error.code = "STALE_REQUEST_VERSION"; throw error; }
+    const now = Timestamp.now(); const nextVersion = requestVersion(request) + 1;
+    if (!approve) {
+      const reason = cleanString(data.reason); if (!reason) throw new Error("A return reason is required.");
+      transaction.update(requestRef, { lateReleaseRescheduling: { ...state, status: "ReturnedForRevision", staffDecision: { decision: "Returned", reason, decidedBy: staff.uid, decidedAt: now } }, requestVersion: nextVersion, updatedAt: now, scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_returned", actorId: staff.uid, actorRole: "staff", reason, requestVersion: nextVersion, at: now }] });
+      createNotificationInTransaction(transaction, { notificationId: `late_release_returned_${id}_${state.requesterProposal.proposalVersion}`, recipientUserId: request.participantId, type: "late_release_schedule_returned", title: "Replacement Schedule Returned", message: `Your replacement planting schedule for ${request.requestNumber || id} needs revision.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", reason, createdAt: now });
+      return;
+    }
+    const eventRef = db.collection("events").doc(request.eventId); const eventDoc = await transaction.get(eventRef);
+    if (!eventDoc.exists) throw new Error("Linked planting event not found.");
+    const event = eventDoc.data(); await assertEventHasNoPlantingActivity(transaction, eventRef, event, id);
+    const proposal = state.requesterProposal;
+    validateFuturePlantingSchedule({ preferredReleaseDate: state.availableReleaseDate, plantingDate: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime });
+    const eventRecipients = await activeRegisteredRecipients(transaction, eventRef.id, event);
+    transaction.update(eventRef, { date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, updatedAt: now });
+    transaction.update(requestRef, { lateReleaseRescheduling: { ...state, status: "Approved", staffDecision: { decision: "Approved", reason: "", decidedBy: staff.uid, decidedAt: now }, updatedEventSchedule: { date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime } }, requestVersion: nextVersion, updatedAt: now, scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_approved", actorId: staff.uid, actorRole: "staff", fromSchedule: state.originalEventSchedule, toSchedule: proposal, requestVersion: nextVersion, at: now }] });
+    createNotificationInTransaction(transaction, { notificationId: `late_release_approved_${id}_${proposal.proposalVersion}`, recipientUserId: request.participantId, type: "late_release_schedule_approved", title: "Replacement Planting Schedule Approved", message: `The replacement planting schedule for ${request.requestNumber || id} was approved and its Event Calendar schedule was updated.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", relatedEventId: eventRef.id, createdAt: now });
+    writeNotifications(transaction, {
+      eventId: eventRef.id,
+      event: { ...event, date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime },
+      previousSchedule: event,
+      recipientIds: eventRecipients,
+      exclude: [request.participantId],
+      kind: "rescheduled",
+    });
+  });
+  const updated = await requestRef.get(); return { id: updated.id, ...updated.data() };
+};
+
 // ========================================
 // RELEASE REQUEST
 //
@@ -1708,6 +2115,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     const requestDoc = await transaction.get(requestRef);
     if (!requestDoc.exists) throw new Error("Seedling request not found.");
     const request = requestDoc.data();
+    assertMutationVersion(request, releaseData?.expectedVersion);
     if (request.inventoryReleased === true || request.status === "Released") {
       throw new Error("Seedlings have already been released for this request.");
     }
@@ -1715,6 +2123,11 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       throw new Error("Only approved requests can be released.");
     }
     if (!request.eventId) throw new Error("Approved request has no linked event.");
+    if (["AwaitingRequester", "PendingStaffReview", "ReturnedForRevision"].includes(request.lateReleaseRescheduling?.status)) {
+      const error = new Error("Resolve the late-release planting schedule conflict before releasing seedlings.");
+      error.code = "UNRESOLVED_LATE_RELEASE_CONFLICT";
+      throw error;
+    }
 
     const requestedItems = normalizeRequestItems(request);
     validateItemStructure(requestedItems);
@@ -1749,6 +2162,15 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     const distributionDoc = await transaction.get(distributionRef);
     if (!eventDoc.exists || eventDoc.data().sourceRequestId !== id) {
       throw new Error("Linked planting event not found.");
+    }
+    const availableReleaseDate = cleanString(releaseData?.availableReleaseDate);
+    if (availableReleaseDate && (!/^\d{4}-\d{2}-\d{2}$/.test(availableReleaseDate) || availableReleaseDate < manilaDateOnly())) {
+      throw new Error("A valid available release date is required.");
+    }
+    if (availableReleaseDate && availableReleaseDate > cleanString(eventDoc.data().date) && request.lateReleaseRescheduling?.status !== "Approved") {
+      const error = new Error("The available release date is later than the approved planting date. Complete late-release rescheduling first.");
+      error.code = "UNRESOLVED_LATE_RELEASE_CONFLICT";
+      throw error;
     }
     if (distributionDoc.exists) throw new Error("Seedlings have already been released for this request.");
 
@@ -1807,6 +2229,10 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       const lowStockCycle = crossedLowStockThreshold
         ? Number(stock.lowStockCycle || 0) + 1
         : Number(stock.lowStockCycle || 0);
+      const becameOutOfStock = available > 0 && newAvailable === 0;
+      const outOfStockCycle = becameOutOfStock
+        ? Number(stock.outOfStockCycle || 0) + 1
+        : Number(stock.outOfStockCycle || 0);
       transaction.update(ref, {
         availableQuantity: newAvailable,
         currentQuantity: newAvailable,
@@ -1816,6 +2242,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
         stockStatus: calculateInventoryStatus(newAvailable, stock.stockStatus || stock.status),
         lowStockAlertActive: newAvailable <= lowStockThreshold,
         lowStockCycle,
+        outOfStockCycle,
         updatedBy: releasedBy,
         updatedAt: now,
       });
@@ -1835,6 +2262,15 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
             lowStockThreshold,
           },
         }));
+      }
+      if (becameOutOfStock) {
+        createOutOfStockNotificationsInTransaction(transaction, {
+          inventoryId: ref.id,
+          inventoryReference: stock.inventoryNumber || stock.batchReference || ref.id,
+          species: stock.species || requested.species || "Seedling",
+          cycle: outOfStockCycle,
+          createdAt: now,
+        }, lowStockRecipients);
       }
     }
 
@@ -1865,6 +2301,8 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       releasedBy,
       releasedAt: now,
       distributionId: id,
+      availableReleaseDate,
+      requestVersion: requestVersion(request) + 1,
       updatedAt: now,
     });
     createNotificationInTransaction(transaction, {
@@ -1891,6 +2329,19 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       },
       createdAt: now,
     });
+    createDistributionNotificationsInTransaction(transaction, lowStockRecipients, {
+      distributionId: id,
+      requestId: id,
+      requestNumber: request.requestNumber || "",
+      totalQuantityReleased,
+      speciesSummary: releaseItems.map((item) => item.species).filter(Boolean).join(", "),
+      releasedItems: releaseItems.map((item) => ({
+        inventoryId: item.inventoryId,
+        species: item.species,
+        releasedQuantity: item.releasedQuantity,
+      })),
+      createdAt: now,
+    });
   });
   const updatedDoc = await requestRef.get();
   return { id: updatedDoc.id, ...updatedDoc.data() };
@@ -1905,9 +2356,14 @@ module.exports = {
   reviewSeedlingRequest,
   returnSeedlingRequest,
   resubmitSeedlingRequest,
+  proposePreApprovalSchedule,
+  confirmPreApprovalSchedule,
   approveSeedlingRequest,
   rejectSeedlingRequest,
   releaseSeedlingRequest,
+  recordLateReleaseConflict,
+  proposeLateReleaseSchedule,
+  decideLateReleaseSchedule,
   revealIdentification,
 
   // Useful for other modules that need

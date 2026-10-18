@@ -207,6 +207,48 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(report.reportingProgress, "Completed");
     assert.equal(report.acceptedQuantity, 150);
     assert.equal(report.pendingReviewQuantity, 0);
+    const notification = table("notifications").get(
+      "planting_report_accepted_event_event-accept_submission-accept_participant-1",
+    );
+    assert.equal(notification.recipientUserId, "participant-1");
+    assert.equal(notification.relatedRecordId, "event_event-accept");
+    assert.equal(notification.relatedSubrecordId, "submission-accept");
+  });
+
+  test("multiple contributors to one report receive distinct idempotent notifications", async () => {
+    const reportId = seedContributionDecision("submission-a", "event-shared");
+    table("plantingContributions").set("submission-b", {
+      id: "submission-b", reportId, eventId: "event-shared",
+      participantId: "participant-3", contributorId: "participant-3",
+      contributorName: "Participant Three", inventoryId: "narra", quantity: 50,
+      verificationStatus: "Needs Review", staffReviewStatus: "Pending Review",
+      photos: [{ photoPath: "planting-reports/test/review-b.jpg" }],
+    });
+    table("plantingReports").set(reportId, {
+      ...table("plantingReports").get(reportId),
+      quantityReleased: 200, quantityPlanted: 200, activeSubmittedQuantity: 200,
+      acceptedQuantity: 100, pendingReviewQuantity: 100,
+    });
+    table("events").set("event-shared", {
+      ...table("events").get("event-shared"),
+      seedlingTotalQuantity: 200, recordedSeedlingQuantity: 200,
+      recordedSeedlingsByInventory: { narra: 200 },
+      seedlingItems: [{ inventoryId: "narra", quantity: 200, species: "Narra" }],
+    });
+
+    await service.approvePlantingReport("submission-a", "staff-1", "", "Staff Name");
+    await service.approvePlantingReport("submission-b", "staff-1", "", "Staff Name");
+
+    const firstId = "planting_report_accepted_event_event-shared_submission-a_participant-1";
+    const secondId = "planting_report_accepted_event_event-shared_submission-b_participant-3";
+    assert.equal(table("notifications").get(firstId).recipientUserId, "participant-1");
+    assert.equal(table("notifications").get(secondId).recipientUserId, "participant-3");
+    assert.notEqual(firstId, secondId);
+    await assert.rejects(
+      service.approvePlantingReport("submission-a", "staff-1", "", "Staff Name"),
+      /Only submissions pending Staff review/,
+    );
+    assert.equal([...table("notifications")].filter(([id]) => id === firstId).length, 1);
   });
 
   test("rejecting a contribution records reason and reopens quantity", async () => {
@@ -224,6 +266,11 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(table("plantingReports").get(reportId).rejectedQuantity, 50);
     assert.equal(table("events").get("event-reject").recordedSeedlingQuantity, 100);
     assert.equal(table("events").get("event-reject").remainingSeedlingQuantity, 50);
+    const notification = table("notifications").get(
+      "planting_report_rejected_event_event-reject_submission-reject_participant-1",
+    );
+    assert.equal(notification.recipientUserId, "participant-1");
+    assert.equal(notification.relatedSubrecordId, "submission-reject");
   });
 
 test("Staff approval is final and preserves automated findings", async () => {
