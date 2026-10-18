@@ -2,12 +2,16 @@ const { initializeApp, cert } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
 const { getFirestore } = require("firebase-admin/firestore");
 const path = require("path");
+const { validateIntegrationEnvironment } = require("./integrationEnvironment");
 
 require("dotenv").config();
 
 let credential;
+const integration = validateIntegrationEnvironment();
 
-if (process.env.NODE_ENV === "production") {
+if (integration.integration) {
+  console.log(`[firebase] Emulator integration mode enabled for ${integration.projectId}.`);
+} else if (process.env.NODE_ENV === "production") {
   const {
     FIREBASE_PROJECT_ID,
     FIREBASE_CLIENT_EMAIL,
@@ -50,9 +54,9 @@ if (process.env.NODE_ENV === "production") {
   credential = cert(serviceAccount);
 }
 
-const app = initializeApp({
-  credential,
-});
+const app = initializeApp(integration.integration
+  ? { projectId: integration.projectId }
+  : { credential });
 
 const db = getFirestore(app);
 const auth = getAuth(app);

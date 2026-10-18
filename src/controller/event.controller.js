@@ -6,6 +6,8 @@ const {
 } = require("../utils/response.util");
 
 function getErrorStatus(error) {
+  if (["EVENT_HAS_LINKED_RECORDS", "REQUEST_EVENT_RELATIONSHIP_LOCKED",
+    "COMPLETED_EVENT_RELATIONSHIP_LOCKED"].includes(error?.code)) return 409;
   const message = String(
     error?.message || ""
   ).toLowerCase();

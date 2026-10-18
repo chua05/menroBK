@@ -22,8 +22,10 @@ const data = {
   monitoringRecords: [{ id: "monitor-1", plantingReportId: "report-1", siteId: "site-1", barangay: "Bical", species: "Narra",
     startMonitoringDate: "2026-06-15", nextMonitoringDate: "2026-09-01", monitoringEndDate: "2028-06-01",
     history: [
-      { monitoredDate: "2026-06-15", healthyCount: 50, damagedCount: 20, deadCount: 10, totalMonitored: 80 },
-      { monitoredDate: "2026-08-01", healthyCount: 60, damagedCount: 10, deadCount: 10, totalMonitored: 80 },
+      { monitoredDate: "2026-06-15", healthyCount: 50, damagedCount: 20, deadCount: 10, totalMonitored: 80,
+        reviewStatus: "Approved" },
+      { monitoredDate: "2026-08-01", healthyCount: 60, damagedCount: 10, deadCount: 10, totalMonitored: 80,
+        reviewStatus: "Approved" },
     ] }],
   sites: [{ id: "site-1", siteName: "Bical Site", barangay: "Bical", status: "Active" }],
 };
@@ -31,7 +33,35 @@ const data = {
 const db = { collection: (name) => ({ get: async () => ({ docs: data[name].map((row) => ({ id: row.id, data: () => row })) }) }) };
 const firebasePath = require.resolve("../src/config/firebase");
 require.cache[firebasePath] = { id: firebasePath, filename: firebasePath, loaded: true, exports: { db } };
-const { getDashboard } = require("../src/services/analytics.service");
+const { getDashboard, lifecycleStatus } = require("../src/services/analytics.service");
+
+test("analytics lifecycle eligibility uses only approved full observations", () => {
+  const base = { startMonitoringDate: "2026-06-15", nextMonitoringDate: null,
+    monitoringEndDate: "2028-06-01", quantityPlanted: 80 };
+  const phaseTwo = { workflowVersion: 2, monitoredDate: "2026-08-01",
+    totalMonitored: 80, cohortQuantityAtObservation: 80 };
+  for (const reviewStatus of ["Pending Review", "Reviewed", "Returned for Rechecking", "Rejected"]) {
+    assert.equal(lifecycleStatus({ ...base, history: [{ ...phaseTwo, reviewStatus }] }, "2026-10-15"),
+      "Available for Monitoring", `${reviewStatus} must not complete an official cycle`);
+  }
+  assert.equal(lifecycleStatus({ ...base, history: [{ ...phaseTwo, reviewStatus: "Approved",
+    adminDecision: "Approve", adminDecidedBy: "admin-1", adminDecidedAt: "2026-08-02" }],
+    nextMonitoringDate: "2026-11-01" }, "2026-10-15"), "Next Monitoring Scheduled");
+  assert.equal(lifecycleStatus({ ...base, history: [{ ...phaseTwo, totalMonitored: 25,
+    isFullCohortAssessment: false, reviewStatus: "Approved", adminDecision: "Approve",
+    adminDecidedBy: "admin-1", adminDecidedAt: "2026-08-02" }] }, "2026-10-15"),
+  "Available for Monitoring");
+  assert.equal(lifecycleStatus({ ...base, history: [{ monitoredDate: "2026-08-01",
+    totalMonitored: 80, reviewStatus: "Validated" }], nextMonitoringDate: "2026-11-01" },
+  "2026-10-15"), "Next Monitoring Scheduled");
+  assert.equal(lifecycleStatus({ ...base, history: [{ monitoredDate: "2026-10-01",
+    totalMonitored: 80, reviewStatus: "Validated" }], nextMonitoringDate: null },
+  "2026-10-15"), "Next Monitoring Scheduled");
+  assert.equal(lifecycleStatus({ ...base, history: [], startMonitoringDate: "2026-11-01" },
+    "2026-10-15"), "Not Yet Available");
+  assert.equal(lifecycleStatus({ ...base, history: [], monitoringEndDate: "2026-10-15" },
+    "2026-10-15"), "Monitoring Completed");
+});
 
 test("analytics uses actual releases, contribution rows, final approvals, and latest monitoring history", async () => {
   const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
@@ -55,8 +85,8 @@ test("analytics filters remain synchronized and empty periods do not invent char
   const empty = await getDashboard({ dateFrom: "2025-01-01", dateTo: "2025-03-31" });
   assert.equal(empty.summary.totalTreesPlanted, 0);
   assert.deepEqual(empty.plantingTrend.map((item) => item.count), [0, 0, 0]);
-  assert.deepEqual(empty.survivalTrend.map((item) => item.rate), [0, 0, 0]);
-  assert.equal(empty.summary.overallSurvivalRate, 0);
+  assert.deepEqual(empty.survivalTrend.map((item) => item.rate), [null, null, null]);
+  assert.equal(empty.summary.overallSurvivalRate, null);
   assert.equal(empty.summary.activePlantingSites, 1);
 });
 
@@ -94,17 +124,174 @@ test("analytics counts qualifying submissions without flattening verification, r
   }
 });
 
+test("official survival analytics use the latest approved observation chronologically", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { monitoredDate: "2026-09-01", healthyCount: 5, damagedCount: 5, deadCount: 70,
+      totalMonitored: 80, reviewStatus: "Pending" },
+    { monitoredDate: "2026-08-01", healthyCount: 55, damagedCount: 5, deadCount: 20,
+      totalMonitored: 80, reviewStatus: "Approved" },
+    { monitoredDate: "2026-10-01", healthyCount: 0, damagedCount: 0, deadCount: 80,
+      totalMonitored: 80, reviewStatus: "Rejected" },
+    { monitoredDate: "2026-07-01", healthyCount: 40, damagedCount: 10, deadCount: 30,
+      totalMonitored: 80, reviewStatus: "Validated" },
+  ];
+
+  try {
+    const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, 75);
+    assert.deepEqual(result.monitoringConditions, [
+      { condition: "Healthy", count: 55 },
+      { condition: "Damaged", count: 5 },
+      { condition: "Dead", count: 20 },
+    ]);
+    assert.equal(result.meta.monitoringEntryCount, 2,
+      "pending and rejected observations must not enter official trends");
+    assert.equal(result.meta.latestMonitoringCount, 1);
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("Phase 2 Reviewed is excluded until Admin approval", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { workflowVersion: 2, monitoredDate: "2026-08-01", healthyCount: 70,
+      damagedCount: 5, deadCount: 5, totalMonitored: 80,
+      cohortQuantityAtObservation: 80, reviewStatus: "Reviewed", staffReviewedBy: "staff-1" },
+  ];
+  try {
+    let result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, null);
+    data.monitoringRecords[0].history[0] = { ...data.monitoringRecords[0].history[0],
+      reviewStatus: "Approved", adminDecision: "Approve", adminDecidedBy: "admin-1",
+      adminDecidedAt: "2026-08-02T00:00:00Z" };
+    result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, 93.75);
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("records without an approved observation do not imply healthy or dead trees", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { monitoredDate: "2026-08-01", healthyCount: 80, damagedCount: 0, deadCount: 0,
+      totalMonitored: 80, reviewStatus: "Pending Review" },
+    { monitoredDate: "2026-09-01", healthyCount: 0, damagedCount: 0, deadCount: 80,
+      totalMonitored: 80, reviewStatus: "Rejected" },
+  ];
+
+  try {
+    const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, null);
+    assert.deepEqual(result.monitoringConditions, [
+      { condition: "Healthy", count: 0 },
+      { condition: "Damaged", count: 0 },
+      { condition: "Dead", count: 0 },
+    ]);
+    assert.equal(result.meta.monitoringEntryCount, 0);
+    assert.equal(result.meta.latestMonitoringCount, 0);
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("a latest approved partial observation makes official cohort analytics unavailable", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { monitoredDate: "2026-07-01", healthyCount: 60, damagedCount: 10, deadCount: 10,
+      totalMonitored: 80, cohortQuantityAtObservation: 80, reviewStatus: "Approved" },
+    { monitoredDate: "2026-08-01", healthyCount: 20, damagedCount: 3, deadCount: 2,
+      totalMonitored: 25, cohortQuantityAtObservation: 80, isFullCohortAssessment: false,
+      reviewStatus: "Approved" },
+  ];
+  try {
+    const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, null);
+    assert.equal(result.meta.latestMonitoringCount, 0);
+    assert.equal(result.meta.monitoringEntryCount, 1);
+    assert.equal(result.meta.partialMonitoringEntryCount, 1);
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("analytics use monitoredDate and deduplicate full cohorts within each month", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { id: "first", monitoredDate: "2026-08-05", monitoredAt: "2026-10-20T00:00:00Z",
+      healthyCount: 40, damagedCount: 20, deadCount: 20, totalMonitored: 80,
+      cohortQuantityAtObservation: 80, reviewStatus: "Approved" },
+    { id: "latest-in-month", monitoredDate: "2026-08-25", monitoredAt: "2026-09-01T00:00:00Z",
+      healthyCount: 60, damagedCount: 10, deadCount: 10, totalMonitored: 80,
+      cohortQuantityAtObservation: 80, reviewStatus: "Approved" },
+  ];
+  try {
+    const result = await getDashboard({ dateFrom: "2026-08-01", dateTo: "2026-08-31" });
+    assert.equal(result.summary.overallSurvivalRate, 87.5,
+      "actual monitoredDate, not later submission time, determines the latest observation");
+    const august = result.survivalTrend.find((item) => item.period === "Aug 2026");
+    assert.equal(august.rate, 87.5,
+      "one lifecycle must contribute only its latest full observation in the month");
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("a newer approved partial observation prevents fallback to an older full observation in the same month", async () => {
+  const originalHistory = data.monitoringRecords[0].history;
+  data.monitoringRecords[0].history = [
+    { id: "older-full", monitoredDate: "2026-08-05", healthyCount: 70, damagedCount: 5,
+      deadCount: 5, totalMonitored: 80, cohortQuantityAtObservation: 80,
+      reviewStatus: "Approved", adminDecision: { decidedBy: "admin-1", decidedAt: "2026-08-06T00:00:00Z" } },
+    { id: "newer-partial", monitoredDate: "2026-08-25", healthyCount: 15, damagedCount: 3,
+      deadCount: 2, totalMonitored: 20, cohortQuantityAtObservation: 80,
+      reviewStatus: "Approved", adminDecision: { decidedBy: "admin-1", decidedAt: "2026-08-26T00:00:00Z" } },
+  ];
+  try {
+    const result = await getDashboard({ dateFrom: "2026-08-01", dateTo: "2026-08-31" });
+    assert.equal(result.summary.overallSurvivalRate, null);
+    assert.equal(result.meta.latestMonitoringCount, 0);
+    assert.equal(result.survivalTrend.find((item) => item.period === "Aug 2026").rate, null);
+  } finally {
+    data.monitoringRecords[0].history = originalHistory;
+  }
+});
+
+test("statusless legacy history inherits a validated lifecycle review without including pending entries", async () => {
+  const record = data.monitoringRecords[0];
+  const originalHistory = record.history;
+  const originalReviewStatus = record.reviewStatus;
+  record.reviewStatus = "Reviewed";
+  record.history = [
+    { monitoredDate: "2026-07-01", healthyCount: 40, damagedCount: 20, deadCount: 20, totalMonitored: 80 },
+    { monitoredDate: "2026-08-01", healthyCount: 50, damagedCount: 10, deadCount: 20,
+      totalMonitored: 80, reviewStatus: "Pending" },
+  ];
+
+  try {
+    const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-12-31" });
+    assert.equal(result.summary.overallSurvivalRate, 75);
+    assert.equal(result.meta.monitoringEntryCount, 1);
+  } finally {
+    record.history = originalHistory;
+    if (originalReviewStatus === undefined) delete record.reviewStatus;
+    else record.reviewStatus = originalReviewStatus;
+  }
+});
+
 test("empty analytics keeps zero chart periods and stable response sections", async () => {
   const saved = Object.fromEntries(Object.entries(data).map(([name, rows]) => [name, [...rows]]));
   for (const rows of Object.values(data)) rows.length = 0;
   try {
     const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-03-31" });
     assert.deepEqual(result.summary, {
-      totalSaplingsDistributed: 0, totalTreesPlanted: 0, overallSurvivalRate: 0,
+      totalSaplingsDistributed: 0, totalTreesPlanted: 0, overallSurvivalRate: null,
       verifiedPlantingReports: 0, barangaysCovered: 0, activePlantingSites: 0,
     });
     assert.deepEqual(result.plantingTrend.map((item) => item.count), [0, 0, 0]);
-    assert.deepEqual(result.survivalTrend.map((item) => item.rate), [0, 0, 0]);
+    assert.deepEqual(result.survivalTrend.map((item) => item.rate), [null, null, null]);
     assert.deepEqual(result.monitoringConditions.map((item) => item.count), [0, 0, 0]);
     assert.deepEqual(result.siteMap, []);
   } finally {

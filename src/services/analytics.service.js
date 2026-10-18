@@ -1,4 +1,10 @@
 const { db } = require("../config/firebase");
+const {
+  validatedMonitoringHistory,
+  monitoringObservationTotal,
+  isFullCohortObservation,
+  officialNextMonitoringDate,
+} = require("../utils/monitoringObservation.util");
 
 const COLLECTIONS = [
   "seedlingInventory", "distributions", "events", "plantingReports", "plantingContributions",
@@ -39,6 +45,21 @@ function dateValue(value) {
       ? new Date(Number(value._seconds ?? value.seconds) * 1000)
       : new Date(value);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function observationOrder(entry) {
+  return {
+    businessDate: dateOnly(entry.monitoredDate || entry.monitoringDate || entry.date),
+    submittedAt: dateValue(entry.monitoredAt || entry.createdAt)?.getTime() || 0,
+  };
+}
+
+function compareObservations(a, b) {
+  const left = observationOrder(a);
+  const right = observationOrder(b);
+  return left.businessDate.localeCompare(right.businessDate) ||
+    left.submittedAt - right.submittedAt ||
+    Number(a.__historyIndex || 0) - Number(b.__historyIndex || 0);
 }
 
 function todayInManila() {
@@ -108,10 +129,13 @@ function monthBuckets(filters) {
 
 function lifecycleStatus(record, today) {
   if (record.monitoringEndDate && today >= record.monitoringEndDate) return "Monitoring Completed";
-  const history = Array.isArray(record.history) ? record.history : [];
-  const due = history.length ? record.nextMonitoringDate : record.startMonitoringDate;
-  if (!history.length && due && today < due) return "Not Yet Available";
-  if (history.length && (!due || today < due)) return "Next Monitoring Scheduled";
+  const fullHistory = validatedMonitoringHistory(record)
+    .filter((entry) => isFullCohortObservation(entry, record));
+  const due = fullHistory.length
+    ? record.nextMonitoringDate || officialNextMonitoringDate(record)
+    : record.startMonitoringDate;
+  if (!fullHistory.length && due && today < due) return "Not Yet Available";
+  if (fullHistory.length && due && today < due) return "Next Monitoring Scheduled";
   return "Available for Monitoring";
 }
 
@@ -192,7 +216,17 @@ async function getDashboard(rawFilters = {}) {
     const context = reportContext({ ...report, ...record });
     const history = Array.isArray(record.history) ? record.history
       : (record.monitoredDate || record.monitoringDate || record.createdAt) ? [{ ...record }] : [];
-    return { ...record, ...context, history };
+    return {
+      ...record,
+      ...context,
+      quantityPlanted: number(record.quantityPlanted ?? report.quantityPlanted),
+      history,
+      validatedHistory: validatedMonitoringHistory({
+        ...record,
+        quantityPlanted: number(record.quantityPlanted ?? report.quantityPlanted),
+        history,
+      }),
+    };
   });
   const lifecycleReportIds = new Set(monitoringLifecycles.map((record) => record.plantingReportId).filter(Boolean));
   for (const report of records.plantingReports) {
@@ -205,19 +239,26 @@ async function getDashboard(rawFilters = {}) {
       nextMonitoringDate: null, monitoringEndDate: addYears(baseDate, 2), history: [],
     });
   }
-  const monitoringEntries = monitoringLifecycles.flatMap((lifecycle) => lifecycle.history.map((entry) => ({
+  const monitoringEntries = monitoringLifecycles.flatMap((lifecycle) =>
+    (lifecycle.validatedHistory || []).map((entry, historyIndex) => ({
     ...entry, lifecycleId: lifecycle.id, plantingReportId: lifecycle.plantingReportId,
-    date: entry.monitoredAt || entry.monitoredDate || entry.monitoringDate || entry.createdAt,
+    date: entry.monitoredDate || entry.monitoringDate || entry.monitoredAt || entry.createdAt,
+    __historyIndex: historyIndex,
     barangay: lifecycle.barangay, species: lifecycle.species, siteId: lifecycle.siteId, siteName: lifecycle.siteName,
     healthy: number(entry.healthyCount ?? entry.healthy), damaged: number(entry.damagedCount ?? entry.damaged),
     dead: number(entry.deadCount ?? entry.dead),
-    total: number(entry.totalMonitored ?? entry.totalChecked) || number(entry.healthyCount ?? entry.healthy) +
-      number(entry.damagedCount ?? entry.damaged) + number(entry.deadCount ?? entry.dead),
+    total: monitoringObservationTotal(entry),
+    isFullCohortAssessment: isFullCohortObservation(entry, lifecycle),
   })));
   const filteredMonitoringEntries = monitoringEntries.filter((entry) => matches(entry, filters));
   const latestByLifecycle = new Map();
-  for (const entry of filteredMonitoringEntries.sort((a, b) => dateOnly(a.date).localeCompare(dateOnly(b.date)))) latestByLifecycle.set(entry.lifecycleId, entry);
-  const latestMonitoring = [...latestByLifecycle.values()];
+  for (const entry of [...filteredMonitoringEntries].sort(compareObservations)) {
+    latestByLifecycle.set(entry.lifecycleId, entry);
+  }
+  const latestMonitoring = [...latestByLifecycle.values()]
+    .filter((entry) => entry.isFullCohortAssessment);
+  const fullMonitoringEntries = filteredMonitoringEntries
+    .filter((entry) => entry.isFullCohortAssessment);
   const monitoredTotal = sum(latestMonitoring, (entry) => entry.total);
   const survivingTotal = sum(latestMonitoring, (entry) => entry.healthy + entry.damaged);
 
@@ -239,8 +280,14 @@ async function getDashboard(rawFilters = {}) {
     const period = monthKey(item.date);
     if (period) plantingByMonth.set(period, (plantingByMonth.get(period) || 0) + item.quantity);
   }
+  const latestByLifecycleMonth = new Map();
+  for (const entry of [...filteredMonitoringEntries].sort(compareObservations)) {
+    const period = monthKey(entry.date);
+    if (period) latestByLifecycleMonth.set(`${entry.lifecycleId}|${period}`, entry);
+  }
   const survivalByMonth = new Map();
-  for (const entry of filteredMonitoringEntries) {
+  for (const entry of latestByLifecycleMonth.values()) {
+    if (!entry.isFullCohortAssessment) continue;
     const period = monthKey(entry.date);
     if (!period) continue;
     const bucket = survivalByMonth.get(period) || { surviving: 0, total: 0 };
@@ -388,7 +435,9 @@ async function getDashboard(rawFilters = {}) {
   return {
     summary: {
       totalSaplingsDistributed: totalReleased, totalTreesPlanted: totalPlanted,
-      overallSurvivalRate: monitoredTotal > 0 ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2)) : 0,
+      overallSurvivalRate: monitoredTotal > 0
+        ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2))
+        : null,
       verifiedPlantingReports: approvedReports.length,
       barangaysCovered: new Set(filteredPlanting.map((item) => text(item.barangay)).filter(Boolean)).size,
       activePlantingSites: activeSites.length,
@@ -396,7 +445,7 @@ async function getDashboard(rawFilters = {}) {
     plantingTrend: periods.map((period) => ({ period: period.period, count: plantingByMonth.get(period.key) || 0 })),
     survivalTrend: periods.map((period) => {
       const row = survivalByMonth.get(period.key);
-      return { period: period.period, rate: row?.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : 0 };
+      return { period: period.period, rate: row?.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : null };
     }),
     monitoringConditions: CONDITION_NAMES.map((condition) => ({ condition, count: conditions[condition] || 0 })),
     speciesDistribution: [...species.entries()].map(([name, row]) => ({
@@ -443,7 +492,8 @@ async function getDashboard(rawFilters = {}) {
     meta: {
       generatedAt: new Date().toISOString(), filters,
       plantingActivityCount: filteredPlanting.length,
-      monitoringEntryCount: filteredMonitoringEntries.length,
+      monitoringEntryCount: fullMonitoringEntries.length,
+      partialMonitoringEntryCount: filteredMonitoringEntries.length - fullMonitoringEntries.length,
       latestMonitoringCount: latestMonitoring.length,
       monitoringDenominator: "Latest actual monitoring entry per lifecycle",
     },

@@ -1,5 +1,6 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
+const { activationState } = require("../utils/earlyMonitoring.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
 
 const reports = db.collection("plantingReports");
@@ -120,6 +121,9 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     createdAt: now,
     updatedAt: now,
   };
+  if (activationState().enabled && Number(initialQuantity) > 0) {
+    data.earlyMonitoringOriginalSubmittedAt = now;
+  }
   transaction.create(ref, data);
   return { ref, data, created: true };
 }

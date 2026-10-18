@@ -1,13 +1,9 @@
 const fs = require("fs/promises");
 const path = require("path");
+const { UPLOAD_ROOT } = require("../config/uploadRoot");
 const {
   randomUUID,
 } = require("crypto");
-
-const UPLOAD_ROOT = path.join(
-  process.cwd(),
-  "uploads"
-);
 
 const PLANTING_REPORT_FOLDER =
   "planting-reports";

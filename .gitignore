@@ -9,6 +9,7 @@ node_modules/
 .env
 .env.*
 !.env.example
+!.env.integration.example
 
 # Firebase Admin private credentials
 serviceAccountKey.json
@@ -22,3 +23,4 @@ postman/globals/
 
 # Uploaded development files
 uploads/
+tests/integration/fixtures/

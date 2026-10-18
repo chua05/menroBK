@@ -110,6 +110,12 @@ const extractImageMetadata =
           metadata?.DateTime ??
           null,
 
+        captureOffset:
+          metadata?.OffsetTimeOriginal ??
+          metadata?.OffsetTimeDigitized ??
+          metadata?.OffsetTime ??
+          "",
+
         deviceMake:
           metadata?.Make ??
           "",
@@ -145,6 +151,8 @@ const extractImageMetadata =
         metadataErrorName: String(error?.name || "MetadataParseError"),
 
         capturedAt: null,
+
+        captureOffset: "",
 
         deviceMake: "",
 

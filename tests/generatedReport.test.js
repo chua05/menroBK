@@ -108,15 +108,104 @@ test("monthly reporting groups only dates backed by real records", async () => {
 test("tree monitoring report reads the stored survival fields", async () => {
   rows("monitoringRecords").set("monitor-1", {
     plantingReportId: "event_event-1", monitoringDate: "2026-09-17",
+    quantityPlanted: 5,
     healthyCount: 3, damagedCount: 1, deadCount: 1,
-    survivingCount: 4, survivalRate: 80,
+    survivingCount: 4, survivalRate: 80, reviewStatus: "Approved",
   });
   const result = await service.buildRows(service.cleanFilters({ type: "tree-monitoring" }));
   assert.deepEqual(result[0], {
-    monitoringId: "monitor-1", reportId: "event_event-1", date: "2026-09-17",
+    monitoringId: "monitor-1", observationId: "monitor-1", reportId: "event_event-1", date: "2026-09-17",
     healthyCount: 3, damagedCount: 1, deadCount: 1,
-    survivingCount: 4, survivalRate: 80,
+    totalMonitored: 5, survivingCount: 4, survivalRate: 80,
+    mortalityRate: null, coverage: "Full cohort", monitoredBy: "",
+    workflowStatus: "Approved", revisionNumber: null,
+    staffReviewedBy: "", adminDecidedBy: "", adminDecision: "",
+    approvalBasis: "Legacy Validated",
   });
+});
+
+test("tree monitoring reports include every validated observation in the selected range", async () => {
+  rows("monitoringRecords").set("monitor-history", {
+    plantingReportId: "report-history",
+    quantityPlanted: 10,
+    history: [
+      { monitoredDate: "2026-08-01", healthyCount: 6, damagedCount: 2, deadCount: 2,
+        survivingCount: 8, survivalRate: 80, reviewStatus: "Approved" },
+      { monitoredDate: "2026-10-01", healthyCount: 1, damagedCount: 0, deadCount: 9,
+        survivingCount: 1, survivalRate: 10, reviewStatus: "Pending" },
+      { monitoredDate: "2026-09-01", healthyCount: 5, damagedCount: 2, deadCount: 3,
+        survivingCount: 7, survivalRate: 70, reviewStatus: "Validated" },
+      { monitoredDate: "2026-11-01", healthyCount: 0, damagedCount: 0, deadCount: 10,
+        survivingCount: 0, survivalRate: 0, reviewStatus: "Rejected" },
+    ],
+  });
+
+  try {
+    const result = await service.buildRows(service.cleanFilters({
+      type: "tree-monitoring", dateFrom: "2026-01-01", dateTo: "2026-12-31",
+    }));
+    const lifecycleRows = result.filter((item) => item.monitoringId === "monitor-history");
+    assert.deepEqual(lifecycleRows.map((item) => item.date), ["2026-08-01", "2026-09-01"]);
+  } finally {
+    rows("monitoringRecords").delete("monitor-history");
+  }
+});
+
+test("historical monitoring reports filter by actual monitoredDate before returning observations", async () => {
+  rows("monitoringRecords").set("monitor-dates", {
+    plantingReportId: "report-dates", quantityPlanted: 100,
+    history: [
+      { id: "august", monitoredDate: "2026-08-10", monitoredAt: "2026-11-01T00:00:00Z",
+        healthyCount: 80, damagedCount: 10, deadCount: 10, totalMonitored: 100,
+        reviewStatus: "Approved" },
+      { id: "october", monitoredDate: "2026-10-10", monitoredAt: "2026-10-11T00:00:00Z",
+        healthyCount: 70, damagedCount: 10, deadCount: 20, totalMonitored: 100,
+        reviewStatus: "Approved" },
+    ],
+  });
+  try {
+    const result = await service.buildRows(service.cleanFilters({
+      type: "tree-monitoring", dateFrom: "2026-08-01", dateTo: "2026-08-31",
+    }));
+    const row = result.find((item) => item.monitoringId === "monitor-dates");
+    assert.equal(row.observationId, "august");
+    assert.equal(row.date, "2026-08-10");
+  } finally {
+    rows("monitoringRecords").delete("monitor-dates");
+  }
+});
+
+test("operational reports retain multiple partial observations and unknown legacy coverage", async () => {
+  rows("monitoringRecords").set("monitor-partials", {
+    plantingReportId: "report-partials", quantityPlanted: 100,
+    history: [
+      { id: "partial-1", monitoredDate: "2026-08-01", healthyCount: 18, damagedCount: 1,
+        deadCount: 1, totalMonitored: 20, cohortQuantityAtObservation: 100,
+        survivingCount: 19, survivalRate: 95, mortalityRate: 5, monitoredBy: "user-1",
+        reviewStatus: "Approved" },
+      { id: "partial-2", monitoredDate: "2026-08-15", healthyCount: 20, damagedCount: 3,
+        deadCount: 2, totalMonitored: 25, cohortQuantityAtObservation: 100,
+        survivingCount: 23, survivalRate: 92, mortalityRate: 8, monitoredBy: "user-2",
+        reviewStatus: "Approved" },
+    ],
+  });
+  rows("monitoringRecords").set("monitor-unknown", {
+    plantingReportId: "report-unknown", monitoringDate: "2026-08-20",
+    healthyCount: 3, damagedCount: 1, deadCount: 1, reviewStatus: "Approved",
+  });
+  try {
+    const result = await service.buildRows(service.cleanFilters({
+      type: "tree-monitoring", dateFrom: "2026-08-01", dateTo: "2026-08-31",
+    }));
+    const partials = result.filter((item) => item.monitoringId === "monitor-partials");
+    assert.deepEqual(partials.map((item) => item.observationId), ["partial-1", "partial-2"]);
+    assert.deepEqual(partials.map((item) => item.coverage), ["Partial observation", "Partial observation"]);
+    assert.equal(result.find((item) => item.monitoringId === "monitor-unknown").coverage,
+      "Coverage Unavailable / Legacy");
+  } finally {
+    rows("monitoringRecords").delete("monitor-partials");
+    rows("monitoringRecords").delete("monitor-unknown");
+  }
 });
 
 test("report generation accepts small datasets and does not persist zero-data attempts", async () => {

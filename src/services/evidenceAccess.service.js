@@ -1,12 +1,13 @@
 const fs = require("fs/promises");
 const path = require("path");
+const { UPLOAD_ROOT } = require("../config/uploadRoot");
 const { getPlantingReportById } = require("./plantingReport.service");
 const {
   getMonitoringRecordById,
+  getRawMonitoringRecordById,
   getAllMonitoringRecords,
 } = require("./monitoring.service");
 
-const UPLOAD_ROOT = path.resolve(process.cwd(), "uploads");
 const EVIDENCE_ROOTS = {
   planting: path.resolve(UPLOAD_ROOT, "planting-reports"),
   monitoring: path.resolve(UPLOAD_ROOT, "monitoring"),
@@ -130,7 +131,7 @@ async function plantingEvidenceForUser(reportId, photoIndex, user) {
 
 async function monitoringRecord(recordId) {
   try {
-    return await getMonitoringRecordById(recordId);
+    return await (getRawMonitoringRecordById || getMonitoringRecordById)(recordId);
   } catch (error) {
     if (error.message !== "Monitoring record not found.") throw error;
     const records = await getAllMonitoringRecords({ includeArchived: true });
@@ -142,23 +143,41 @@ async function monitoringRecord(recordId) {
 
 async function monitoringEvidenceForUser(recordId, entryIndex, user) {
   const record = await monitoringRecord(recordId);
+  const history = Array.isArray(record.history) ? record.history : [];
+  const entry = history[parseIndex(entryIndex)];
   const authorized = ["admin", "staff"].includes(user.role) ||
-    record.participantId === user.uid;
+    record.participantId === user.uid || entry?.originalReporterId === user.uid ||
+    entry?.monitoredBy === user.uid;
 
   if (!authorized) {
     throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
   }
 
-  const history = Array.isArray(record.history) ? record.history : [];
-  const entry = history[parseIndex(entryIndex)];
   if (!entry?.photoUrl) {
     throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   }
   return resolveStoredEvidence(entry.photoUrl, "monitoring");
 }
 
+async function monitoringRevisionEvidenceForUser(recordId, observationId, revisionNumber, user) {
+  const record = await getRawMonitoringRecordById(recordId);
+  const history = Array.isArray(record.history) ? record.history : [];
+  const matches = history.filter((entry) => entry?.id === observationId);
+  if (matches.length !== 1) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const observation = matches[0];
+  const authorized = ["admin", "staff"].includes(user.role) ||
+    observation.originalReporterId === user.uid || observation.monitoredBy === user.uid;
+  if (!authorized) throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
+  const revision = (observation.revisionHistory || []).find(
+    (entry) => Number(entry.revisionNumber) === Number(revisionNumber)
+  );
+  if (!revision?.evidenceRef?.photoUrl) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  return resolveStoredEvidence(revision.evidenceRef.photoUrl, "monitoring");
+}
+
 module.exports = {
   plantingEvidenceForUser,
   monitoringEvidenceForUser,
+  monitoringRevisionEvidenceForUser,
   resolveStoredEvidence,
 };
