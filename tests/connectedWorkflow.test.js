@@ -121,32 +121,18 @@ function seedApproved(id, eventId, available = 250) {
   });
 }
 
-const fixtureBaseTime = Date.now();
-
-function futureManilaDate(daysFromNow) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Manila",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date(fixtureBaseTime + daysFromNow * 24 * 60 * 60 * 1000));
-  const value = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
-  return `${value.year}-${value.month}-${value.day}`;
-}
-
-const futureReleaseDate = futureManilaDate(7);
-const futurePlantingDate = futureManilaDate(8);
-
-test("Admin approval creates a scheduled event and only needed secure invitations", async () => {
+test("Admin approval creates a scheduled event and only needed secure invitations", async (t) => {
+  // These fixed October schedules describe a future approval scenario, not wall-clock time.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-18T00:00:00Z") });
   const originalSecret = process.env.GUEST_INVITATION_SECRET;
   const seedReviewed = (id, expectedParticipants) => {
     table("seedlingRequests").set(id, {
       status: "Reviewed", participantId: "participant-1", participantName: "Participant One",
-      preferredReleaseDate: futureReleaseDate,
+      preferredReleaseDate: "2026-10-19",
       items: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 10 }],
       eventProposal: {
         eventName: "Planting", barangay: "Bical", plantingSiteId: "site-approval",
-        proposedDate: futurePlantingDate, proposedStartTime: "08:00", proposedEndTime: "10:00",
+        proposedDate: "2026-10-20", proposedStartTime: "08:00", proposedEndTime: "10:00",
         expectedParticipants,
       },
     });
@@ -171,7 +157,7 @@ test("Admin approval creates a scheduled event and only needed secure invitation
       item.recipientUserId === "admin-1" && item.relatedEventId === withoutGuests.eventId));
     assert.ok(approvalNotifications.some((item) => item.type === "request_approved" &&
       item.recipientUserId === "participant-1" && item.relatedEventId === withoutGuests.eventId &&
-      item.message.includes(`is scheduled for ${futurePlantingDate} 08:00-10:00`)));
+      item.message.includes("is scheduled for 2026-10-20 08:00-10:00")));
 
     seedReviewed("approve-guests-unconfigured", 4);
     const approvedWithoutInvitation = await requestService.approveSeedlingRequest(
@@ -224,10 +210,11 @@ test("Admin approval rejects an expired effective schedule without creating an e
   assert.equal(table("seedlingRequests").get("approve-expired").status, "Reviewed");
 });
 
-test("Admin approval registers a proposed site with the authenticated administrator audit UID", async () => {
+test("Admin approval registers a proposed site with the authenticated administrator audit UID", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-18T00:00:00Z") });
   table("seedlingRequests").set("approve-proposed-site", {
     status: "Reviewed",
-    preferredReleaseDate: futureReleaseDate,
+    preferredReleaseDate: "2026-10-19",
     participantId: "participant-proposed",
     participantName: "Proposed Site Owner",
     items: [{ inventoryId: "narra-proposed", species: "Narra", quantity: 10 }],
@@ -245,7 +232,7 @@ test("Admin approval registers a proposed site with the authenticated administra
       eventName: "Proposed Site Planting",
       barangay: "Bical",
       plantingSiteId: "",
-      proposedDate: futurePlantingDate,
+      proposedDate: "2026-10-20",
       proposedStartTime: "08:00",
       proposedEndTime: "10:00",
       expectedParticipants: 0,
