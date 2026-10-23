@@ -101,3 +101,4 @@ legacy key, or the previous key when its ID is `legacy-v1`.
   counts, authorization failures, service-health regressions or any suspected log leak.
 - Never retire the old key while any unkeyed/old-key record or unresolved ledger entry
   remains.
+
