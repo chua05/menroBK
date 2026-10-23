@@ -3,6 +3,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const { createCorsOptions } = require("./config/cors");
+const { configureTrustProxy } = require("./config/trustProxy");
 
 // Middlewares
 const { generalLimiter } = require("./middleware/rateLimiter.middleware");
@@ -26,7 +27,20 @@ const evidenceRoutes = require("./routes/evidence.routes");
 
 const app = express();
 
+configureTrustProxy(app);
+
 app.use(helmet());
+
+// Emulator identities are not a network authentication boundary. Real-cloud
+// development requests must originate on this machine, never a forwarded header.
+if (require('./config/evidenceStorage').resolveEvidenceStorageConfig().gcsDevelopment) {
+  app.use((req, res, next) => {
+    if (!require('./config/developmentGcs').isDevelopmentLoopback(req)) {
+      return res.status(403).json({ success: false, message: 'Development evidence access requires a local connection.' });
+    }
+    next();
+  });
+}
 
 // ---------------------------------------------
 // CORS

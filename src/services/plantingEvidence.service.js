@@ -11,7 +11,20 @@ const reports = db.collection("plantingReports");
 const events = db.collection("events");
 const evidenceHashes = db.collection("plantingEvidenceHashes");
 
-async function attachEvidence(eventId, participantId, contributionId, files) {
+async function attachEvidence(eventId, participantId, contributionId, files, idempotencyKey) {
+  const { enabled, runWorkflow } = require("./evidenceWorkflow.service");
+  if (enabled()) {
+    const doc = await contributions.doc(contributionId).get();
+    if (!doc.exists || doc.data().eventId !== eventId || doc.data().participantId !== participantId) {
+      throw new Error("Planting contribution not found.");
+    }
+  }
+  return runWorkflow({ actor: { guestParticipantId: participantId }, workflow: "planting-contribution",
+    target: contributionId, key: idempotencyKey, payload: { eventId, contributionId }, files },
+  operation => attachEvidenceImpl(eventId, participantId, contributionId, files, operation),
+  async () => { const doc = await contributions.doc(contributionId).get(); return { id: doc.id, ...doc.data() }; });
+}
+async function attachEvidenceImpl(eventId, participantId, contributionId, files, operation) {
   if (!Array.isArray(files) || files.length < 1 || files.length > 10) {
     throw new Error("Provide 1 to 10 original planting evidence photos.");
   }
@@ -103,9 +116,12 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
         : hasPolygon ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon) : siteDistance <= 20;
       const flags = [...verification.suspiciousFlags];
       if (!siteValid) flags.push("OUTSIDE_REGISTERED_SITE");
-      const stored = await savePlantingPhoto({ file, participantId });
-      saved.push(stored.filePath);
+      const privateEvidence = operation ? await require("./evidenceWorkflow.service").workflow().upload(
+        operation, photos.length, file, { recordId: contributionId, evidenceType: "planting-contribution" }) : null;
+      const stored = privateEvidence ? { photoURL: "", filePath: "" } : await savePlantingPhoto({ file, participantId });
+      if (stored.filePath) saved.push(stored.filePath);
       photos.push({
+        ...(privateEvidence ? { privateEvidence, hasEvidence: true } : {}),
         photoURL: stored.photoURL,
         photoPath: stored.filePath,
         imageHash,
@@ -130,6 +146,7 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
       });
     }
     await db.runTransaction(async (transaction) => {
+      const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
       const eventRef = events.doc(eventId);
       const [latestContribution, latestReport, latestEvent, ...hashDocs] = await Promise.all([
         transaction.get(contributionRef),
@@ -179,6 +196,7 @@ async function attachEvidence(eventId, participantId, contributionId, files) {
       if (hasReservation) {
         pendingReservations[inventoryId] = Math.max(0, reserved - quantity);
       }
+      if (complete) complete({ collection: "plantingContributions", recordId: contributionId });
       for (const photo of photos) {
         transaction.create(evidenceHashes.doc(photo.imageHash), {
           reportId: reportRef.id, contributionId, eventId, createdAt: now,

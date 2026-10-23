@@ -4,6 +4,8 @@ const path = require("node:path");
 const DEMO_PROJECT_ID = "demo-menro-phase2";
 const FIRESTORE_HOST = "127.0.0.1:8080";
 const AUTH_HOST = "127.0.0.1:9099";
+const STORAGE_HOST = "127.0.0.1:9199";
+const STORAGE_BUCKET = "demo-menro-phase2.firebasestorage.app";
 
 function enabled(env = process.env) {
   return String(env.MENRO_INTEGRATION_TEST || "").toLowerCase() === "true";
@@ -11,7 +13,8 @@ function enabled(env = process.env) {
 
 function validateIntegrationEnvironment(env = process.env) {
   const integration = enabled(env);
-  const hasEmulatorSetting = Boolean(env.FIRESTORE_EMULATOR_HOST || env.FIREBASE_AUTH_EMULATOR_HOST);
+  const hasEmulatorSetting = Boolean(env.FIRESTORE_EMULATOR_HOST || env.FIREBASE_AUTH_EMULATOR_HOST ||
+    env.FIREBASE_STORAGE_EMULATOR_HOST !== undefined);
   if (!integration) {
     if (hasEmulatorSetting) {
       throw new Error("Firebase emulator hosts require MENRO_INTEGRATION_TEST=true.");
@@ -24,6 +27,16 @@ function validateIntegrationEnvironment(env = process.env) {
   }
   if (env.FIRESTORE_EMULATOR_HOST !== FIRESTORE_HOST || env.FIREBASE_AUTH_EMULATOR_HOST !== AUTH_HOST) {
     throw new Error("Integration testing requires the approved loopback Firestore and Auth emulator hosts.");
+  }
+  const hasStorageHost = env.FIREBASE_STORAGE_EMULATOR_HOST !== undefined;
+  const hasStorageBucket = env.FIREBASE_STORAGE_BUCKET !== undefined;
+  if (hasStorageHost || hasStorageBucket) {
+    if (env.FIREBASE_STORAGE_EMULATOR_HOST !== STORAGE_HOST) {
+      throw new Error("Storage integration testing requires the approved loopback Storage emulator host.");
+    }
+    if (env.FIREBASE_STORAGE_BUCKET !== STORAGE_BUCKET) {
+      throw new Error("Storage integration testing requires the synthetic demo Storage bucket.");
+    }
   }
   return { integration: true, projectId: DEMO_PROJECT_ID };
 }
@@ -43,6 +56,6 @@ function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
 }
 
 module.exports = {
-  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, enabled,
+  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, STORAGE_HOST, STORAGE_BUCKET, enabled,
   resolveUploadRoot, validateIntegrationEnvironment,
 };

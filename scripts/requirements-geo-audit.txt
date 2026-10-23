@@ -1,0 +1,4 @@
+# Optional offline audit tooling only; not a backend/runtime dependency.
+# Python 3.13 tested. Install into an isolated temporary environment.
+shapely==2.2.0
+pyproj==3.8.0

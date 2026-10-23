@@ -350,7 +350,18 @@ const toTimestampOrNull = (
 // --------------------------------
 // CREATE PLANTING REPORT
 // --------------------------------
-const createPlantingReport = async (
+async function createPlantingReport(data, files) {
+  const { idempotencyKey, ...payload } = data;
+  const { runWorkflow } = require("./evidenceWorkflow.service");
+  const fingerprintPayload = Object.fromEntries(["distributionId", "inventoryId", "siteId", "barangay",
+    "quantityPlanted", "plantingDate", "plantingLocation", "eventId", "eventName", "remarks",
+    "submittedByName", "submittedBySector", "submittedByContactNumber"].map(key => [key, payload[key]]));
+  return runWorkflow({ actor: { uid: data.participantId }, workflow: "planting-report",
+    key: idempotencyKey, payload: fingerprintPayload, files },
+  operation => createPlantingReportImpl({ ...payload, workflowOperation: operation }, files),
+  link => getPlantingReportById(link.recordId));
+}
+const createPlantingReportImpl = async (
   data,
   files
 ) => {
@@ -926,6 +937,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
   // 14. SAVE ALL PHOTOS
   // --------------------------------
   const uploadedPhotos = [];
+  const operation = data.workflowOperation;
   let persisted = false;
   const now = verificationTimestamp;
 
@@ -934,7 +946,12 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       const preparedPhoto of
       preparedPhotos
     ) {
-      const uploadedImage =
+      const privateEvidence = operation ? await require("./evidenceWorkflow.service").workflow().upload(
+        operation, uploadedPhotos.length, preparedPhoto.file, {
+          recordId: operation.targetId,
+          evidenceType: linkedEvent?.sourceRequestId ? "planting-contribution" : "planting-report",
+        }) : null;
+      const uploadedImage = privateEvidence ? { photoURL: "", filePath: "" } :
         await savePlantingPhoto({
           file:
             preparedPhoto.file,
@@ -949,6 +966,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
 
       uploadedPhotos.push({
+        ...(privateEvidence ? { privateEvidence, hasEvidence: true } : {}),
         photoURL:
           uploadedImage.photoURL,
 
@@ -1456,9 +1474,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       if (!allocation || !linkedEvent.allocationReleasedAt) {
         throw new Error("Seedling tree item has not been released for this event.");
       }
-      const contributionRef = contributionCollection.doc();
+      const contributionRef = operation ? contributionCollection.doc(operation.targetId) : contributionCollection.doc();
       let parentId;
       await db.runTransaction(async (transaction) => {
+        const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
         const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
         const eventRef = db.collection(EVENT_COLLECTION).doc(submittedEventId);
         const eventDoc = await transaction.get(eventRef);
@@ -1498,6 +1517,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
             reportingProgress: initialProgress,
           }
         );
+        if (complete) complete({ collection: "plantingReports", recordId: parentId, contributionId: contributionRef.id });
         if (!parent.created && !["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial",
           "Fully Reported — Awaiting Review", "Fully Reported â€” Awaiting Review"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
@@ -1647,10 +1667,11 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       return reportDetails(doc.id, doc.data());
     }
 
-    const docRef = reportCollection.doc();
+    const docRef = operation ? reportCollection.doc(operation.targetId) : reportCollection.doc();
     const hashRefs = uploadedPhotos.map((photo) => evidenceHashCollection.doc(photo.imageHash));
     let reportNumber = "";
     await db.runTransaction(async (transaction) => {
+      const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const hashDocs = await Promise.all(hashRefs.map((hashRef) => transaction.get(hashRef)));
       if (hashDocs.some((hashDoc) => hashDoc.exists)) {
@@ -1662,6 +1683,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         date: typeof now?.toDate === "function" ? now.toDate() : new Date(),
         timestamp: now,
       });
+      if (complete) complete({ collection: "plantingReports", recordId: docRef.id });
       transaction.create(docRef, { ...reportData, reportNumber });
       hashRefs.forEach((hashRef) => transaction.create(hashRef, {
         reportId: docRef.id,

@@ -77,6 +77,29 @@ test("GPS mismatches stay truthful findings and invalid image bytes remain rejec
   await assert.rejects(validateImageBuffer(Buffer.from("not an image")), /not a valid image/);
 });
 
+test("image validation accepts only genuine JPEG, PNG, and WebP buffers", async () => {
+  for (const format of ["jpeg", "png", "webp"]) {
+    const buffer = await sharp({
+      create: { width: 4, height: 4, channels: 3, background: "green" },
+    })[format]().toBuffer();
+    const result = await validateImageBuffer(buffer);
+    assert.equal(result.format, format);
+  }
+});
+
+test("disguised HEIF, SVG, TIFF, and GIF buffers are rejected before native decoding", async () => {
+  const unsupportedBuffers = {
+    heif: Buffer.from("00000018667479706865696300000000", "hex"),
+    svg: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'),
+    tiff: Buffer.from("49492a0008000000", "hex"),
+    gif: Buffer.from("GIF89a04000400", "ascii"),
+  };
+
+  for (const [format, buffer] of Object.entries(unsupportedBuffers)) {
+    await assert.rejects(validateImageBuffer(buffer), /not a valid image/, format);
+  }
+});
+
 test("screenshot detection requires a strong signal or combined weak signals", () => {
   assert.equal(isClearlyScreenshot({
     fileName: "Screenshot_20260922.png",

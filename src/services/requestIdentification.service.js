@@ -149,6 +149,10 @@ function resolveEncryptionKeyring(env = process.env) {
   return Object.freeze({ active: Object.freeze(active), keys, legacyKey });
 }
 
+function getEncryptionKey(env = process.env) {
+  return resolveEncryptionKeyring(env).active.key;
+}
+
 function getDecryptionKey(record, env = process.env) {
   const keyring = resolveEncryptionKeyring(env);
   if (record?.keyId) {
@@ -274,9 +278,12 @@ module.exports = {
   ACCESS_LOG_COLLECTION,
   IDENTIFICATION_COLLECTION,
   IDENTIFICATION_TYPES,
+  KEY_ID_PATTERN,
+  LEGACY_KEY_ID,
   buildIdentificationRecord,
   decryptIdNumber,
   encryptIdNumber,
+  resolveEncryptionKeyring,
   getMaskedIdentifications,
   maskIdNumber,
   publicIdentification,

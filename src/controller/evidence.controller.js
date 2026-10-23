@@ -15,6 +15,7 @@ function evidenceStatus(error) {
 }
 
 function sendEvidence(res, evidence) {
+  if (evidence.provider === "firebase") return evidence.streamTo(res);
   res.setHeader("Content-Type", evidence.contentType);
   res.setHeader("Cache-Control", "private, no-store");
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -22,8 +23,9 @@ function sendEvidence(res, evidence) {
 }
 
 function handleEvidenceError(res, error) {
+  if (res.headersSent || res.destroyed) { if (!res.destroyed) res.destroy(); return; }
   const status = evidenceStatus(error);
-  if (status === 500) console.error("Evidence retrieval failed:", error);
+  if (status === 500) console.error("Evidence retrieval failed:", { code: "PRIVATE_EVIDENCE_UNAVAILABLE" });
   return sendError(
     res,
     status,
@@ -37,7 +39,7 @@ function handleEvidenceError(res, error) {
 
 async function getPlantingEvidence(req, res) {
   try {
-    return sendEvidence(res, await plantingEvidenceForUser(
+    return await sendEvidence(res, await plantingEvidenceForUser(
       req.params.reportId,
       req.params.photoIndex,
       req.user
@@ -49,7 +51,7 @@ async function getPlantingEvidence(req, res) {
 
 async function getMonitoringEvidence(req, res) {
   try {
-    return sendEvidence(res, await monitoringEvidenceForUser(
+    return await sendEvidence(res, await monitoringEvidenceForUser(
       req.params.recordId,
       req.params.entryIndex,
       req.user
@@ -61,7 +63,7 @@ async function getMonitoringEvidence(req, res) {
 
 async function getMonitoringRevisionEvidence(req, res) {
   try {
-    return sendEvidence(res, await monitoringRevisionEvidenceForUser(
+    return await sendEvidence(res, await monitoringRevisionEvidenceForUser(
       req.params.monitoringId,
       req.params.observationId,
       req.params.revisionNumber,

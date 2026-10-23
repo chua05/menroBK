@@ -19,6 +19,16 @@ const contentTypes = {
   ".png": "image/png",
   ".webp": "image/webp",
 };
+let cloudRetrieval;
+// Monitoring corrections explicitly store null when replacing cloud evidence
+// with verified local evidence. Null is a cleared marker, not a cloud reference.
+const hasPrivateReference = value => value && Object.hasOwn(value, "privateEvidence") && value.privateEvidence !== null;
+function cloudEvidence(reference, recordId, evidenceType) {
+  if (!require("../config/evidenceStorage").resolveEvidenceStorageConfig().cloudRead) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  cloudRetrieval ||= require("./firebaseEvidenceRetrieval.service").createFirebaseEvidenceRetrieval();
+  const token = cloudRetrieval.serverResolvedEvidence({ reference, recordId, evidenceType });
+  return { provider: "firebase", streamTo: (response, options) => cloudRetrieval.streamTo(token, response, options) };
+}
 
 function evidenceError(code, message) {
   const error = new Error(message);
@@ -107,7 +117,8 @@ async function resolveStoredEvidence(reference, kind) {
 function plantingPhotos(report) {
   if (Array.isArray(report.photos) && report.photos.length > 0) return report.photos;
   if (report.photoURL || report.photoPath) {
-    return [{ photoURL: report.photoURL, photoPath: report.photoPath }];
+    return [{ photoURL: report.photoURL, photoPath: report.photoPath,
+      ...(hasPrivateReference(report) ? { privateEvidence: report.privateEvidence } : {}) }];
   }
   return [];
 }
@@ -126,6 +137,9 @@ async function plantingEvidenceForUser(reportId, photoIndex, user) {
 
   const photo = plantingPhotos(report)[parseIndex(photoIndex)];
   if (!photo) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  if (hasPrivateReference(photo)) return cloudEvidence(photo.privateEvidence,
+    report.reportType === "parent" ? photo._evidenceRecordId : report.id,
+    report.reportType === "parent" ? "planting-contribution" : "planting-report");
   return resolveStoredEvidence(photo.photoPath || photo.photoURL, "planting");
 }
 
@@ -153,6 +167,8 @@ async function monitoringEvidenceForUser(recordId, entryIndex, user) {
     throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
   }
 
+  if (hasPrivateReference(entry)) return cloudEvidence(entry.privateEvidence, entry.id,
+    entry.observationType === "early" ? "monitoring-early" : "monitoring-official");
   if (!entry?.photoUrl) {
     throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   }
@@ -171,6 +187,8 @@ async function monitoringRevisionEvidenceForUser(recordId, observationId, revisi
   const revision = (observation.revisionHistory || []).find(
     (entry) => Number(entry.revisionNumber) === Number(revisionNumber)
   );
+  if (hasPrivateReference(revision?.evidenceRef)) return cloudEvidence(revision.evidenceRef.privateEvidence, observation.id,
+    observation.observationType === "early" ? "monitoring-early" : "monitoring-official");
   if (!revision?.evidenceRef?.photoUrl) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   return resolveStoredEvidence(revision.evidenceRef.photoUrl, "monitoring");
 }

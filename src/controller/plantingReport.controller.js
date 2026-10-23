@@ -187,6 +187,7 @@ const submitPlantingReport = async (
       await createPlantingReport(
         {
           distributionId,
+          idempotencyKey: req.headers?.["idempotency-key"],
           inventoryId,
           siteId,
           barangay,
@@ -247,6 +248,7 @@ const submitPlantingReport = async (
       data: report,
     });
   } catch (error) {
+    if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
     console.error(
       "Submit planting report error:",
       error

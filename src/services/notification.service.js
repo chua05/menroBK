@@ -206,9 +206,8 @@ async function getUnreadCount(userId) {
   const snapshot = await collection
     .where("recipientUserId", "==", userId)
     .where("isRead", "==", false)
-    .count()
     .get();
-  return snapshot.data().count;
+  return snapshot.size;
 }
 
 async function getMyNotifications(userId, options = {}) {

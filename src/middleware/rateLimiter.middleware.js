@@ -2,7 +2,8 @@ const { rateLimit, ipKeyGenerator } = require("express-rate-limit");
 const { enabled, validateIntegrationEnvironment } = require("../config/integrationEnvironment");
 
 const integrationMode = enabled() && validateIntegrationEnvironment().integration;
-const skipIntegration = () => integrationMode;
+// Synthetic emulator suites may skip throttles; real-cloud development may not.
+const skipIntegration = () => integrationMode && !require("../config/evidenceStorage").resolveEvidenceStorageConfig().gcsDevelopment;
 
 const actorKey = (req) => req.user?.uid
   ? `user:${req.user.uid}`
@@ -27,7 +28,7 @@ const generalLimiter = rateLimit({
   // A signed-in dashboard can make many read requests while navigating.
   // Keep a bounded per-IP ceiling without throttling ordinary page loads.
   max: 300,
-  skip: (req) => integrationMode || req.method === "OPTIONS",
+  skip: (req) => skipIntegration() || req.method === "OPTIONS",
   message: {
     success: false,
     message: "Too many requests. Please slow down.",

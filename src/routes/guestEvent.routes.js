@@ -1,4 +1,5 @@
 const router = require("express").Router();
+router.use(require("../middleware/privateEvidenceResponse.middleware").privateEvidenceResponse);
 const { verifyToken } = require("../middleware/auth.middleware");
 const { authorizeRoles } = require("../middleware/role.middleware");
 const { sendSuccess, sendError } = require("../utils/response.util");
@@ -95,9 +96,10 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
 }, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
   try {
     const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
-      req.params.id, req.files);
+      req.params.id, req.files, req.headers["idempotency-key"]);
     return sendSuccess(res, 200, "Planting evidence recorded", data);
   } catch (error) {
+    if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
     const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Bulan|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
       .test(error.message);
     if (!expected) console.error(error);
