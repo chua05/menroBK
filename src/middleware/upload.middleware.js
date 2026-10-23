@@ -73,7 +73,7 @@ const imageFileFilter = (
       file.mimetype
     );
 
- 
+
   const hasAllowedGenericMimeType =
     file.mimetype ===
       "application/octet-stream" &&
