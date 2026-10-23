@@ -23,7 +23,6 @@ function queryFor(name, state = {}) {
     },
     startAfter(...values) { return next({ cursor: values }); },
     limit(value) { return next({ maximum: value }); },
-    count() { return { async get() { const result = await queryFor(name, state).get(); return { data: () => ({ count: result.size }) }; } }; },
     async get() {
       let rows = [...table(name)].map(([id, value]) => ({ id, value }));
       for (const filter of state.filters || []) {
@@ -105,6 +104,16 @@ test("retrieval is recipient-scoped, newest-first, cursor-paginated, and globall
   const second = await getMyNotifications("user-a", { limit: 2, cursor: first.nextCursor });
   assert.deepEqual(second.notifications.map((item) => item.id), ["c"]);
   assert.equal(second.hasMore, false);
+});
+
+test("unread counting works when Firestore query aggregation is unavailable", async () => {
+  notice("unread");
+  notice("read", { isRead: true });
+  notice("another-user", { recipientUserId: "user-b" });
+
+  const result = await getMyNotifications("user-a");
+
+  assert.equal(result.unreadCount, 1);
 });
 
 test("read-state filtering keeps every module visible across same-time cursor pages", async () => {

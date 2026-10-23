@@ -121,7 +121,9 @@ function seedApproved(id, eventId, available = 250) {
   });
 }
 
-test("Admin approval creates a scheduled event and only needed secure invitations", async () => {
+test("Admin approval creates a scheduled event and only needed secure invitations", async (t) => {
+  // These fixed October schedules describe a future approval scenario, not wall-clock time.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-18T00:00:00Z") });
   const originalSecret = process.env.GUEST_INVITATION_SECRET;
   const seedReviewed = (id, expectedParticipants) => {
     table("seedlingRequests").set(id, {
@@ -208,7 +210,8 @@ test("Admin approval rejects an expired effective schedule without creating an e
   assert.equal(table("seedlingRequests").get("approve-expired").status, "Reviewed");
 });
 
-test("Admin approval registers a proposed site with the authenticated administrator audit UID", async () => {
+test("Admin approval registers a proposed site with the authenticated administrator audit UID", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-18T00:00:00Z") });
   table("seedlingRequests").set("approve-proposed-site", {
     status: "Reviewed",
     preferredReleaseDate: "2026-10-19",

@@ -27,6 +27,7 @@ const SITE_TOLERANCE_METERS = 20;
 const MAX_WORKFLOW_TEXT_LENGTH = 1000;
 const MAX_REVISIONS_PER_OBSERVATION = 25;
 const MAX_AUDIT_ENTRIES_PER_OBSERVATION = 100;
+let retainedRetrieval;
 const OUTSTANDING_OBSERVATION_STATUSES = new Set([
   PHASE_TWO_STATUSES.PENDING,
   PHASE_TWO_STATUSES.RETURNED,
@@ -92,7 +93,8 @@ function appendAudit(observation, audit) {
 }
 
 function publicEvidence(entry = {}) {
-  const clone = { ...entry, hasEvidence: Boolean(entry.photoUrl || entry.hasEvidence) };
+  const clone = { ...entry, hasEvidence: Boolean(entry.photoUrl || entry.privateEvidence || entry.hasEvidence) };
+  delete clone.privateEvidence;
   delete clone.photoUrl;
   delete clone.imageHash;
   if (Array.isArray(clone.revisionHistory)) {
@@ -215,7 +217,7 @@ function present(record) {
     survivalRate: latest.survivalRate ?? 0,
     mortalityRate: latest.mortalityRate ?? 0,
     remarks: latest.remarks || "",
-    hasEvidence: Boolean(latest.photoUrl || latest.hasEvidence),
+    hasEvidence: Boolean(latest.photoUrl || latest.privateEvidence || latest.hasEvidence),
     photoName: latest.photoName || "",
     photoSize: latest.photoSize || 0,
     latitude: latest.latitude ?? null,
@@ -224,6 +226,7 @@ function present(record) {
     nextMonitoringDate: status === "Monitoring Completed" ? null : record.nextMonitoringDate || null,
   };
   delete output.photoUrl;
+  delete output.privateEvidence;
   delete output.imageHash;
   return output;
 }
@@ -268,6 +271,14 @@ async function savePhoto(file, participantId) {
 }
 
 async function createMonitoringRecord(data) {
+  const { idempotencyKey, file, imageDetails, metadata, imageHash, ...payload } = data;
+  return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.monitoredBy },
+    workflow: data.observationType === "early" ? "monitoring-early" : "monitoring-official",
+    target: data.plantingReportId, key: idempotencyKey, payload, files: [file] },
+  operation => createMonitoringRecordImpl({ ...data, workflowOperation: operation }),
+  link => getMonitoringRecordById(link.recordId));
+}
+async function createMonitoringRecordImpl(data) {
   const observationType = data.observationType === "early" ? "early" : "official";
   const reportRef = reports.doc(data.plantingReportId);
   const reportDoc = await reportRef.get();
@@ -314,9 +325,14 @@ async function createMonitoringRecord(data) {
   const id = lifecycleId(report.participantId, report.id, report.eventId || "", report.siteId);
   const lifecycleRef = monitoringCollection.doc(id);
   const hashRef = evidenceHashes.doc(data.imageHash);
-  const saved = await savePhoto(data.file, data.monitoredBy);
+  const operation = data.workflowOperation;
+  const observationId = operation?.observationId || `OBS-${crypto.randomUUID()}`;
+  const privateEvidence = operation ? await require("./evidenceWorkflow.service").workflow().upload(
+    operation, 0, data.file, { recordId: observationId, evidenceType: `monitoring-${observationType}` }) : null;
+  const saved = privateEvidence ? { target: null, url: "" } : await savePhoto(data.file, data.monitoredBy);
   try {
     await db.runTransaction(async (transaction) => {
+      const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const [currentDoc, duplicateDoc, currentReportDoc] = await Promise.all([
         transaction.get(lifecycleRef), transaction.get(hashRef), transaction.get(reportRef),
@@ -397,7 +413,8 @@ async function createMonitoringRecord(data) {
         }
       );
       const entry = {
-        id: `OBS-${crypto.randomUUID()}`,
+        id: observationId,
+        ...(privateEvidence ? { privateEvidence, hasEvidence: true } : {}),
         workflowVersion: 2,
         observationType,
         observationPolicyVersion: 1,
@@ -469,6 +486,7 @@ async function createMonitoringRecord(data) {
         remarks: entry.remarks,
         evidenceRevision: 1,
         evidenceRef: {
+          ...(privateEvidence ? { privateEvidence } : {}),
           photoUrl: saved.url,
           imageHash: data.imageHash,
           photoName: entry.photoName,
@@ -516,6 +534,7 @@ async function createMonitoringRecord(data) {
         updatedAt: now,
         createdAt: current.createdAt || now,
       };
+      if (complete) complete({ collection: "monitoringRecords", recordId: id, observationId });
       if (currentDoc.exists) transaction.update(lifecycleRef, payload);
       else transaction.create(lifecycleRef, payload);
       transaction.create(hashRef, { lifecycleId: id, participantId: data.monitoredBy, createdAt: now });
@@ -545,7 +564,7 @@ async function createMonitoringRecord(data) {
       });
     });
   } catch (error) {
-    await fs.unlink(saved.target).catch(() => {});
+    if (saved.target) await fs.unlink(saved.target).catch(() => {});
     throw error;
   }
   const result = await lifecycleRef.get();
@@ -645,7 +664,7 @@ async function transitionObservation({
       if (actorRole !== "staff") throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can review observations.", 403);
       if (observation.reviewStatus !== PHASE_TWO_STATUSES.PENDING) throw workflowError("INVALID_STATUS_TRANSITION", "Only pending observations can be reviewed.");
       const hasEvidence = Boolean(observation.photoUrl || observation.hasEvidence ||
-        observation.revisionHistory?.some((revision) => revision.evidenceRef?.photoUrl));
+        observation.revisionHistory?.some((revision) => revision.evidenceRef?.photoUrl || revision.evidenceRef?.privateEvidence));
       if (!hasEvidence) throw workflowError("OBSERVATION_EVIDENCE_MISSING", "Monitoring evidence is required before Staff review.", 422);
       const remarks = cleanWorkflowText(text);
       updated = { ...observation, reviewStatus: PHASE_TWO_STATUSES.REVIEWED,
@@ -740,13 +759,63 @@ const approveMonitoringObservation = (args) => transitionObservation({ ...args, 
 const rejectMonitoringObservation = (args) => transitionObservation({ ...args, action: "reject", text: args.reason || "" });
 
 async function resubmitMonitoringObservation(data) {
+  const { idempotencyKey, file, imageDetails, metadata, imageHash, savedEvidence, ...payload } = data;
+  return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.actorId },
+    workflow: "monitoring-resubmit", target: `${data.monitoringId}:${data.observationId}`,
+    key: idempotencyKey, payload, files: file ? [file] : [] },
+  operation => resubmitMonitoringObservationImpl({ ...data, workflowOperation: operation }),
+  link => getMonitoringRecordById(link.recordId));
+}
+async function resubmitMonitoringObservationImpl(data) {
   const ref = monitoringCollection.doc(data.monitoringId);
+  const operation = data.workflowOperation;
+  let privateEvidence = null;
+  let retainedCloudFingerprint = null;
+  if (operation) {
+    // Authorize BEFORE cloud admission/I/O; the transaction below repeats every guard.
+    const doc = await ref.get();
+    const history = doc.data()?.history || [];
+    const observation = history[uniqueObservationIndex(history, data.observationId)];
+    if (observation.originalReporterId !== data.actorId) throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only the original reporter can resubmit this observation.", 403);
+    assertVersion(observation, data.expectedVersion);
+    if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
+    if (data.file) privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(
+      operation, 0, data.file, { recordId: data.observationId,
+        evidenceType: observation.observationType === "early" ? "monitoring-early" : "monitoring-official" });
+    else {
+      const retained = (observation.revisionHistory || []).find(revision =>
+        Number(revision.evidenceRevision) === Number(data.retainEvidenceRevision));
+      if (retained?.evidenceRef?.privateEvidence) {
+        // Validate actual retained bytes OUTSIDE the transaction. Reuse is not a
+        // new upload and consumes no upload intent or quota reservation.
+        try {
+          retainedRetrieval ||= require("./firebaseEvidenceRetrieval.service").createFirebaseEvidenceRetrieval();
+          const token = retainedRetrieval.serverResolvedEvidence({ reference: retained.evidenceRef.privateEvidence,
+            recordId: data.observationId, evidenceType: observation.observationType === "early" ? "monitoring-early" : "monitoring-official" });
+          const sink = new (require("node:stream").Writable)({ write(chunk, encoding, callback) { callback(); } });
+          sink.setHeader = () => {};
+          await retainedRetrieval.streamTo(token, sink);
+          retainedCloudFingerprint = require("./evidenceWorkflow.service").canonical(retained.evidenceRef.privateEvidence);
+        } catch (error) {
+          if (!["INVALID_EVIDENCE_REFERENCE", "EVIDENCE_NOT_FOUND", "EVIDENCE_GENERATION_MISMATCH",
+            "EVIDENCE_SIZE_MISMATCH", "EVIDENCE_CONTENT_TYPE_MISMATCH", "EVIDENCE_METADATA_MISMATCH",
+            "EVIDENCE_CHECKSUM_MISMATCH"].includes(error.code)) {
+            const { EvidenceWorkflowError } = require("./evidenceWorkflow.service");
+            throw new EvidenceWorkflowError("EVIDENCE_RECONCILIATION_REQUIRED", 503,
+              "Existing evidence is temporarily unavailable. Please retry with the same Idempotency-Key.");
+          }
+          throw workflowError("OBSERVATION_EVIDENCE_INVALID", "Existing evidence could not be verified. Please provide a valid replacement photo.", 422);
+        }
+      }
+    }
+  }
   if (data.file) {
-    const saved = await savePhoto(data.file, data.actorId);
+    const saved = privateEvidence ? { target: null, url: "" } : await savePhoto(data.file, data.actorId);
     data.savedEvidence = {
       target: saved.target,
       imageHash: data.imageHash,
       evidenceRef: {
+        ...(privateEvidence ? { privateEvidence } : {}),
         photoUrl: saved.url, imageHash: data.imageHash,
         photoName: data.file.originalname, photoType: data.file.mimetype,
         photoSize: data.file.size, latitude: Number(data.metadata.latitude),
@@ -764,6 +833,7 @@ async function resubmitMonitoringObservation(data) {
   let newFile = data.savedEvidence?.target || null;
   try {
     await db.runTransaction(async (transaction) => {
+      const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const doc = await transaction.get(ref);
       if (!doc.exists) throw workflowError("MONITORING_NOT_FOUND", "Monitoring record not found.", 404);
@@ -818,6 +888,9 @@ async function resubmitMonitoringObservation(data) {
         const retained = revisions.find((revision) => Number(revision.evidenceRevision) === requestedEvidenceRevision);
         if (!retained?.evidenceRef) throw workflowError("OBSERVATION_EVIDENCE_MISSING", "Valid existing evidence was not found.", 422);
         evidenceRef = retained.evidenceRef;
+        if (operation && evidenceRef.privateEvidence && require("./evidenceWorkflow.service").canonical(evidenceRef.privateEvidence) !== retainedCloudFingerprint) {
+          throw workflowError("STALE_OBSERVATION_VERSION", "The evidence changed while the correction was being submitted. Please refresh and try again.");
+        }
         reusedEvidence = true;
       }
       const retainedCapture = evidenceRef.captureTimestamp || evidenceRef.capturedAt;
@@ -852,6 +925,8 @@ async function resubmitMonitoringObservation(data) {
         evidenceRevision: reusedEvidence ? requestedEvidenceRevision : revisionNumber,
         reusedEvidence, evidenceRef };
       const updated = { ...observation, monitoredDate: data.monitoredDate,
+        ...(evidenceRef.privateEvidence ? { privateEvidence: evidenceRef.privateEvidence, hasEvidence: true }
+          : observation.privateEvidence ? { privateEvidence: null } : {}),
         healthyCount: healthy, damagedCount: damaged, deadCount: dead, totalMonitored: total,
         isFullCohortAssessment: total === quantity, survivingCount: healthy + damaged,
         survivalRate: calculateSurvivalRate(healthy, damaged, total),
@@ -880,6 +955,7 @@ async function resubmitMonitoringObservation(data) {
         toStatus: PHASE_TWO_STATUSES.PENDING, revisionNumber, actedAt: now });
       history[index] = updated;
       const nextMonitoringDate = officialNextMonitoringDate(history, current);
+      if (complete) complete({ collection: "monitoringRecords", recordId: data.monitoringId, observationId: data.observationId, revisionNumber });
       transaction.update(ref, { history, latestObservationId: updated.id,
         latestObservationStatus: updated.reviewStatus, nextMonitoringDate,
         ...workflowCounts(history), updatedAt: now });
