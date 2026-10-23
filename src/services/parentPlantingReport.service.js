@@ -153,7 +153,8 @@ async function reportDetails(id, data) {
       remaining: Number(item.quantity || 0) - recorded,
     };
   });
-  const evidence = contributions.flatMap((entry) => entry.photos || []);
+  const evidence = contributions.flatMap((entry) => (entry.photos || []).map(photo =>
+    photo.privateEvidence ? { ...photo, _evidenceRecordId: entry.id } : photo));
   const latestContribution = contributions[contributions.length - 1] || null;
   const primaryContribution = contributions.find((entry) => entry.participantType === "requester") ||
     contributions.find((entry) => entry.photos?.length) || latestContribution;

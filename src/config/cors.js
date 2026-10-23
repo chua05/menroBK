@@ -122,7 +122,8 @@ const createCorsOptions = (env = process.env) => ({
   },
   credentials: true,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type"],
+  allowedHeaders: ["Authorization", "Content-Type", ...(env.EVIDENCE_CLOUD_WORKFLOW_ENABLED === "true" &&
+    require("./evidenceStorage").resolveEvidenceStorageConfig(env).cloudWorkflow ? ["Idempotency-Key"] : [])],
   optionsSuccessStatus: 204,
 });
 

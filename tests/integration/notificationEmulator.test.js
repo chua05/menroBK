@@ -4,13 +4,19 @@ const { Timestamp } = require("firebase-admin/firestore");
 const { validateIntegrationEnvironment } = require("../../src/config/integrationEnvironment");
 
 validateIntegrationEnvironment();
-const { db } = require("../../src/config/firebase");
+const { auth, db } = require("../../src/config/firebase");
 const service = require("../../src/services/notification.service");
+const app = require("../../src/app");
 
 const collection = db.collection("notifications");
 const PREFIX = "notification-acceptance-";
 const USER_A = "notification-acceptance-user-a";
 const USER_B = "notification-acceptance-user-b";
+const USER_A_EMAIL = "notification-acceptance-user-a@example.test";
+const PASSWORD = "Notification-Test-Only!2026";
+let server;
+let baseUrl;
+let idToken;
 
 async function cleanup() {
   const snapshot = await collection.get();
@@ -54,8 +60,47 @@ async function seed() {
   }
 }
 
-test.before(seed);
-test.after(cleanup);
+test.before(async () => {
+  try { await auth.deleteUser(USER_A); } catch (error) {
+    if (error.code !== "auth/user-not-found") throw error;
+  }
+  await auth.createUser({ uid: USER_A, email: USER_A_EMAIL, password: PASSWORD, emailVerified: true });
+  await db.collection("users").doc(USER_A).set({
+    uid: USER_A, email: USER_A_EMAIL, role: "participant", status: "active",
+    profileComplete: true, testFixture: true,
+  });
+  await seed();
+  server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const response = await fetch("http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: USER_A_EMAIL, password: PASSWORD, returnSecureToken: true }),
+  });
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  idToken = body.idToken;
+});
+test.after(async () => {
+  if (server) await new Promise((resolve) => server.close(resolve));
+  await cleanup();
+  await db.collection("users").doc(USER_A).delete();
+  try { await auth.deleteUser(USER_A); } catch (error) {
+    if (error.code !== "auth/user-not-found") throw error;
+  }
+});
+
+test("authenticated notification API returns recipient-scoped unread count without HTTP 500", async () => {
+  const response = await fetch(`${baseUrl}/api/notifications?limit=20`, {
+    headers: { authorization: `Bearer ${idToken}` },
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(payload));
+  assert.equal(payload.data.unreadCount, 424);
+  assert.equal(payload.data.notifications.length, 20);
+  assert.equal(payload.data.notifications.every((item) => item.recipientUserId === USER_A), true);
+});
 
 test("real Firestore pagination is stable, ordered, duplicate-free, and recipient-only", async () => {
   const ids = [];

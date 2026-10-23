@@ -11,6 +11,7 @@
     "integration:seed": "node tests/integration/seedEmulator.js",
     "integration:cleanup": "node tests/integration/seedEmulator.js --cleanup",
     "integration:fixtures": "node tests/integration/generateEvidenceFixtures.js",
+    "migration:request-identification-keys": "node scripts/migrateRequestIdentificationKeys.js",
     "test:integration:emulator": "node --test --test-isolation=none tests/integration/monitoringEmulator.test.js",
     "test:integration:worker-reliability": "node --test --test-isolation=none tests/integration/workerReliabilityEmulator.test.js",
     "worker:early-monitoring-notifications": "node src/workers/earlyMonitoringNotifications.worker.js",
@@ -21,6 +22,9 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22 <25"
+  },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
@@ -28,12 +32,11 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "express-validator": "^7.3.2",
-    "firebase": "^12.14.0",
-    "firebase-admin": "^10.3.0",
+    "firebase-admin": "14.5.0",
     "helmet": "^8.2.0",
-    "morgan": "^1.11.0",
-    "multer": "^2.2.0",
-    "sharp": "^0.35.3",
+    "morgan": "^1.12.1",
+    "multer": "^2.4.0",
+    "sharp": "^0.35.5",
     "uuid": "^14.0.0"
   },
   "devDependencies": {

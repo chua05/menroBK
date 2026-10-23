@@ -1,6 +1,6 @@
 const express = require("express");
 const multer = require("multer");
-const { uploadConcurrencyGuard } = require("../middleware/upload.middleware");
+const { uploadConcurrencyGuard, UPLOAD_FORM_LIMITS } = require("../middleware/upload.middleware");
 const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
 
 const router =
@@ -44,10 +44,12 @@ const upload =
     storage: multer.memoryStorage(),
 
     limits: {
+      ...UPLOAD_FORM_LIMITS,
       fileSize:
         10 * 1024 * 1024,
 
       files: 1,
+      parts: 101,
     },
 
     fileFilter: (

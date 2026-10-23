@@ -11,6 +11,8 @@ const {
 const { validateMonitoringEvidenceTimestamp } = require("../utils/monitoringEvidenceTimestamp.util");
 
 async function addMonitoringRecord(req, res, observationType = "official") {
+  // Express supplies next as argument three on the official POST route.
+  observationType = observationType === "early" ? "early" : "official";
   try {
     const {
       plantingReportId, totalMonitored, healthyCount, damagedCount, deadCount,
@@ -55,6 +57,7 @@ async function addMonitoringRecord(req, res, observationType = "official") {
     const captureAudit = validateMonitoringEvidenceTimestamp(metadata, String(monitoredDate), new Date());
 
     const record = await createMonitoringRecord({
+      idempotencyKey: req.headers?.["idempotency-key"],
       plantingReportId,
       totalMonitored: monitoredTotal,
       healthyCount: counts[0], damagedCount: counts[1], deadCount: counts[2],
@@ -66,6 +69,7 @@ async function addMonitoringRecord(req, res, observationType = "official") {
     });
     return res.status(201).json({ success: true, message: "Monitoring record submitted successfully.", data: record });
   } catch (error) {
+    if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
     const status = error.message === "Planting report not found." || error.message === "Planting site not found." ? 404 : 400;
     return res.status(status).json({ success: false, message: error.message });
   }
@@ -171,6 +175,7 @@ async function resubmitMonitoring(req, res) {
         ...validateMonitoringEvidenceTimestamp(metadata, String(req.body?.monitoredDate), new Date()) };
     }
     const data = await resubmitMonitoringObservation({
+      idempotencyKey: req.headers?.["idempotency-key"],
       monitoringId: req.params.monitoringId, observationId: req.params.observationId,
       expectedVersion: req.body?.expectedVersion, retainEvidenceRevision: req.body?.retainEvidenceRevision,
       totalMonitored: req.body?.totalMonitored, healthyCount: req.body?.healthyCount,
@@ -181,6 +186,7 @@ async function resubmitMonitoring(req, res) {
     });
     return res.status(200).json({ success: true, message: "Monitoring observation resubmitted for review.", data });
   } catch (error) {
+    if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
     return res.status(workflowStatus(error)).json({ success: false, code: error.code, message: error.message });
   }
 }

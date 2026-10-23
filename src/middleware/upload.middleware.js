@@ -4,6 +4,13 @@ const path = require("path");
 const storage = multer.memoryStorage();
 const MAX_AGGREGATE_BYTES = 60 * 1024 * 1024;
 const MAX_CONCURRENT_UPLOADS = 3;
+const UPLOAD_FORM_LIMITS = Object.freeze({
+  fieldNameSize: 100,
+  fieldSize: 1024 * 1024,
+  fields: 100,
+  fieldNestingDepth: 5,
+  fieldArrayIndexLimit: 100,
+});
 let activeUploads = 0;
 
 const uploadConcurrencyGuard = (req, res, next) => {
@@ -66,17 +73,7 @@ const imageFileFilter = (
       file.mimetype
     );
 
-  // Some clients such as Postman may
-  // send valid image files using
-  // application/octet-stream.
-  //
-  // We only allow it here when the
-  // filename has an accepted image
-  // extension.
-  //
-  // The actual image buffer is still
-  // validated later by
-  // validateImageBuffer().
+ 
   const hasAllowedGenericMimeType =
     file.mimetype ===
       "application/octet-stream" &&
@@ -101,9 +98,12 @@ const imageFileFilter = (
 const uploadPlantingPhoto = multer({
   storage,
   limits: {
+    ...UPLOAD_FORM_LIMITS,
     // Maximum size PER photo.
     fileSize:
       10 * 1024 * 1024,
+    files: 10,
+    parts: 110,
   },
   fileFilter:
     imageFileFilter,
@@ -136,4 +136,5 @@ module.exports = {
   uploadContributionEvidence,
   uploadConcurrencyGuard,
   validateAggregateUploadSize,
+  UPLOAD_FORM_LIMITS,
 };
