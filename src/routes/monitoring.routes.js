@@ -2,6 +2,9 @@ const express = require("express");
 const multer = require("multer");
 const { uploadConcurrencyGuard, UPLOAD_FORM_LIMITS } = require("../middleware/upload.middleware");
 const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
+const {
+  evidenceUploadMaintenanceGate,
+} = require("../middleware/evidenceUploadMaintenance.middleware");
 
 const router =
   express.Router();
@@ -89,6 +92,7 @@ router.post(
   "/early",
   verifyToken,
   authorizeRoles("participant"),
+  evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
   upload.single("photo"),
@@ -101,6 +105,7 @@ router.post(
   authorizeRoles(
     "participant"
   ),
+  evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
   upload.single("photo"),
@@ -156,6 +161,7 @@ router.patch(
   "/:monitoringId/observations/:observationId/resubmit",
   verifyToken,
   authorizeRoles("participant"),
+  evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
   upload.single("photo"),

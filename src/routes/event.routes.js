@@ -28,6 +28,9 @@ const { sendSuccess, sendError } = require("../utils/response.util");
 const { attachEvidence } = require("../services/plantingEvidence.service");
 const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
 const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
+const {
+  evidenceUploadMaintenanceGate,
+} = require("../middleware/evidenceUploadMaintenance.middleware");
 
 router.post("/:id/join", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -79,7 +82,7 @@ router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), as
 });
 
 router.post("/:id/contributions/:contributionId/evidence", verifyToken,
-  authorizeRoles("participant"), uploadLimiter, uploadConcurrencyGuard,
+  authorizeRoles("participant"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
   uploadContributionEvidence, async (req, res) => {
     try {
       const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);

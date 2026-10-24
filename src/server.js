@@ -7,6 +7,7 @@ const {
 } = require("./services/requestIdentification.service");
 
 validateIdentificationEncryptionConfig();
+require("./config/evidenceUploadMaintenance").resolveEvidenceUploadMaintenance();
 
 const app = require("./app");
 

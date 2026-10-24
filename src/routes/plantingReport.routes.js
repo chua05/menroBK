@@ -36,6 +36,9 @@ const {
   "../middleware/upload.middleware"
 );
 const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
+const {
+  evidenceUploadMaintenanceGate,
+} = require("../middleware/evidenceUploadMaintenance.middleware");
 
 
 // --------------------------------
@@ -125,6 +128,7 @@ router.post(
   "/",
   verifyToken,
   authorizeRoles("participant"),
+  evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
   handlePlantingEvidenceUpload,

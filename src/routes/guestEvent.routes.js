@@ -8,6 +8,9 @@ const contributions = require("../services/plantingContribution.service");
 const { attachEvidence } = require("../services/plantingEvidence.service");
 const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
 const { uploadLimiter, guestContributionLimiter } = require("../middleware/rateLimiter.middleware");
+const {
+  evidenceUploadMaintenanceGate,
+} = require("../middleware/evidenceUploadMaintenance.middleware");
 
 router.get("/invitation/:eventId", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -93,7 +96,7 @@ router.post("/session/contributions/:id/evidence", async (req, res, next) => {
       ? "Your guest session has expired. Please use a valid invitation link."
       : "Invalid guest session.");
   }
-}, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
+}, evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
   try {
     const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
       req.params.id, req.files, req.headers["idempotency-key"]);

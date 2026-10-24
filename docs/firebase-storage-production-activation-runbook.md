@@ -127,6 +127,7 @@ EVIDENCE_STORAGE_PROVIDER=gcs
 EVIDENCE_CLOUD_WORKFLOW_ENABLED=true
 EVIDENCE_CLOUD_READ_ENABLED=true
 EVIDENCE_GCS_PRODUCTION_APPROVAL=AUTHORIZED_CONTROLLED_PRODUCTION_ACTIVATION
+EVIDENCE_UPLOAD_MAINTENANCE_ENABLED=false
 ```
 
 Explicitly remove/reject `GOOGLE_APPLICATION_CREDENTIALS`, `FIREBASE_CONFIG`, emulator
@@ -217,9 +218,11 @@ Do not delete objects, rewrite references, reset ledgers or disable cloud reads.
 
 ## 9. Read-preserving rollback
 
-Because the free Render service has no persistent disk, first place evidence-submission
-workflows in an approved operational maintenance pause. The source rollback mode writes
-new evidence locally; those bytes are ephemeral, so it is emergency containment only.
+Because the free Render service has no persistent disk, first enable the backend's
+evidence-upload maintenance gate. It returns HTTP 503 after authentication and
+authorization but before rate limiting, multipart parsing, file processing, Storage
+access or Firestore mutation. The source rollback mode selects local writes, but the
+gate prevents requests from reaching that ephemeral path.
 
 Apply this exact environment delta in one separately approved Render deployment:
 
@@ -230,6 +233,7 @@ EVIDENCE_STORAGE_PROVIDER=local
 EVIDENCE_CLOUD_WORKFLOW_ENABLED=false
 EVIDENCE_CLOUD_READ_ENABLED=true
 EVIDENCE_GCS_PRODUCTION_APPROVAL=AUTHORIZED_CONTROLLED_PRODUCTION_ACTIVATION
+EVIDENCE_UPLOAD_MAINTENANCE_ENABLED=true
 ```
 
 Keep the exact Firebase project/account credentials. After deploy, verify health,
@@ -241,9 +245,10 @@ If cloud reads themselves must be disabled for a security incident, set producti
 off and both cloud gates false only under incident approval. This intentionally makes
 cloud evidence unavailable and is not the normal preservation-safe rollback.
 
+Keep `EVIDENCE_UPLOAD_MAINTENANCE_ENABLED=true` for the entire local-mode rollback.
 Do not resume new photo submissions in local mode on the free ephemeral service. Either
 repair and reactivate the private GCS path or separately approve durable alternative
-storage before reopening evidence workflows.
+storage before setting the gate back to `false`.
 
 ## 10. Phased local-storage retirement
 
