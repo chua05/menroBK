@@ -44,8 +44,19 @@ async function addMonitoringRecord(req, res, observationType = "official") {
     }
 
     const imageDetails = await validateImageBuffer(req.file.buffer);
-    const metadata = await extractImageMetadata(req.file.buffer);
-    if (isClearlyScreenshot({ fileName: req.file.originalname, metadata })) {
+    const [captureEvidence] = await require("../services/evidenceCaptureSession.service").resolveSubmissionEvidence({
+      actorId: req.user.uid,
+      workflow: observationType === "early" ? "monitoring-early" : "monitoring-official",
+      binding: { plantingReportId, siteId: req.body?.siteId },
+      files: [req.file], manifest: req.body?.evidenceManifest,
+    });
+    const metadata = captureEvidence ? {
+      latitude: captureEvidence.latitude, longitude: captureEvidence.longitude,
+      capturedAt: captureEvidence.capturedAtClient.toDate().toISOString(),
+      gpsStatus: "browser-session", evidenceSource: "browser-camera",
+      locationSource: "Browser Capture Session", locationAccuracyMeters: captureEvidence.accuracyMeters,
+    } : await extractImageMetadata(req.file.buffer);
+    if (!captureEvidence && isClearlyScreenshot({ fileName: req.file.originalname, metadata })) {
       throw new Error("Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo.");
     }
     const latitude = metadata.latitude === null ? NaN : Number(metadata.latitude);
@@ -65,7 +76,7 @@ async function addMonitoringRecord(req, res, observationType = "official") {
       remarks: typeof remarks === "string" ? remarks.trim() : "",
       monitoredBy: req.user.uid, requesterRole: req.user.role,
       file: req.file, imageDetails, metadata: { ...metadata, ...captureAudit }, observationType,
-      imageHash: generateImageHash(req.file.buffer),
+      imageHash: generateImageHash(req.file.buffer), captureEvidence,
     });
     return res.status(201).json({ success: true, message: "Monitoring record submitted successfully.", data: record });
   } catch (error) {
@@ -163,8 +174,20 @@ async function resubmitMonitoring(req, res) {
     let imageHash = null;
     if (req.file?.buffer) {
       imageDetails = await validateImageBuffer(req.file.buffer);
-      metadata = await extractImageMetadata(req.file.buffer);
-      if (isClearlyScreenshot({ fileName: req.file.originalname, metadata })) {
+      const [captureEvidence] = await require("../services/evidenceCaptureSession.service").resolveSubmissionEvidence({
+        actorId: req.user.uid, workflow: "monitoring-resubmit",
+        binding: { plantingReportId: req.body?.plantingReportId, siteId: req.body?.siteId,
+          monitoringId: req.params.monitoringId, observationId: req.params.observationId,
+          expectedVersion: req.body?.expectedVersion },
+        files: [req.file], manifest: req.body?.evidenceManifest,
+      });
+      metadata = captureEvidence ? {
+        latitude: captureEvidence.latitude, longitude: captureEvidence.longitude,
+        capturedAt: captureEvidence.capturedAtClient.toDate().toISOString(),
+        gpsStatus: "browser-session", evidenceSource: "browser-camera",
+        locationSource: "Browser Capture Session", locationAccuracyMeters: captureEvidence.accuracyMeters,
+      } : await extractImageMetadata(req.file.buffer);
+      if (!captureEvidence && isClearlyScreenshot({ fileName: req.file.originalname, metadata })) {
         throw requestError("INVALID_MONITORING_INPUT", "Screenshot images are not accepted as monitoring evidence.");
       }
       if (!Number.isFinite(Number(metadata.latitude)) || !Number.isFinite(Number(metadata.longitude))) {
@@ -173,6 +196,7 @@ async function resubmitMonitoring(req, res) {
       imageHash = generateImageHash(req.file.buffer);
       metadata = { ...metadata,
         ...validateMonitoringEvidenceTimestamp(metadata, String(req.body?.monitoredDate), new Date()) };
+      req.captureEvidence = captureEvidence;
     }
     const data = await resubmitMonitoringObservation({
       idempotencyKey: req.headers?.["idempotency-key"],
@@ -183,6 +207,7 @@ async function resubmitMonitoring(req, res) {
       monitoredDate: req.body?.monitoredDate, maturityStatus: req.body?.maturityStatus,
       remarks: typeof req.body?.remarks === "string" ? req.body.remarks.trim() : "",
       actorId: req.user.uid, file: req.file, imageDetails, metadata, imageHash,
+      captureEvidence: req.captureEvidence || null,
     });
     return res.status(200).json({ success: true, message: "Monitoring observation resubmitted for review.", data });
   } catch (error) {

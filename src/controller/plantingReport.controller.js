@@ -231,6 +231,9 @@ const submitPlantingReport = async (
 
           remarks:
             remarks || "",
+
+          evidenceManifest:
+            req.body?.evidenceManifest || "",
         },
         photos
       );

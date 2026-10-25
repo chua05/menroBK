@@ -674,14 +674,21 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
   // Never trust client/device coordinates as planting-photo evidence.
   const locationSource = PHOTO_EXIF_LOCATION_SOURCE;
 
+  const captureEvidence = await require("./evidenceCaptureSession.service").resolveSubmissionEvidence({
+    actorId: data.participantId,
+    workflow: "planting-report",
+    binding: { siteId: data.siteId, eventId: submittedEventId, distributionId: data.distributionId },
+    files: evidenceFiles,
+    manifest: data.evidenceManifest,
+  });
+
   const submissionHashes =
     new Set();
   const verificationTimestamp = Timestamp.now();
 
-  for (
-    const file of
-    evidenceFiles
-  ) {
+  for (let fileIndex = 0; fileIndex < evidenceFiles.length; fileIndex += 1) {
+    const file = evidenceFiles[fileIndex];
+    const browserCapture = captureEvidence[fileIndex];
     // Confirm actual image buffer
     const imageDetails =
       await validateImageBuffer(
@@ -728,12 +735,16 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
 
     // Extract EXIF metadata
-    const metadata =
-      await extractImageMetadata(
-        file.buffer
-      );
+    const metadata = browserCapture ? {
+      latitude: browserCapture.latitude,
+      longitude: browserCapture.longitude,
+      capturedAt: typeof browserCapture.capturedAtClient?.toDate === "function"
+        ? browserCapture.capturedAtClient.toDate().toISOString()
+        : new Date(Number(browserCapture.capturedAtClient?._seconds ?? browserCapture.capturedAtClient?.seconds) * 1000).toISOString(),
+      gpsStatus: "browser-session",
+    } : await extractImageMetadata(file.buffer);
 
-    if (isClearlyScreenshot({ fileName: file.originalname, metadata, imageDetails })) {
+    if (!browserCapture && isClearlyScreenshot({ fileName: file.originalname, metadata, imageDetails })) {
       throw new Error(
         "Screenshot images are not accepted as planting evidence. Please upload the original geotagged photo."
       );
@@ -814,6 +825,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon)
         : photoSiteDistanceMeters <= SITE_GPS_TOLERANCE_METERS;
 
+    if (browserCapture && !photoSiteValid) {
+      throw new Error("Browser camera evidence must be captured within the assigned planting site.");
+    }
+
     // Registered site check using authoritative photo EXIF coordinates.
     if (!photoSiteValid) {
       if (
@@ -844,15 +859,19 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
       longitude: photoLongitude,
 
-      locationSource,
+      locationSource: browserCapture ? "Browser Capture Session" : locationSource,
 
-      locationAccuracyMeters: null,
+      evidenceSource: browserCapture ? "browser-camera" : "original-exif",
+
+      captureSessionAuditId: browserCapture?.id || null,
+
+      locationAccuracyMeters: browserCapture?.accuracyMeters ?? null,
 
       locationCapturedAt: toTimestampOrNull(metadata.capturedAt),
 
       photoCapturedAt: toTimestampOrNull(metadata.capturedAt),
 
-      gpsMetadataPresent: photoVerification.gpsMetadataPresent,
+      gpsMetadataPresent: browserCapture ? false : photoVerification.gpsMetadataPresent,
 
       timestampMetadataPresent: photoVerification.timestampMetadataPresent,
 
@@ -950,6 +969,19 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         operation, uploadedPhotos.length, preparedPhoto.file, {
           recordId: operation.targetId,
           evidenceType: linkedEvent?.sourceRequestId ? "planting-contribution" : "planting-report",
+          verification: {
+            capturedAt: preparedPhoto.metadata.capturedAt || null,
+            latitude: preparedPhoto.latitude,
+            longitude: preparedPhoto.longitude,
+            gpsValid: preparedPhoto.gpsValid,
+            timestampValid: preparedPhoto.timestampValid,
+            siteGpsValid: preparedPhoto.siteGpsValid,
+            suspiciousFlags: preparedPhoto.suspiciousFlags,
+            evidenceSource: preparedPhoto.evidenceSource,
+            locationSource: preparedPhoto.locationSource,
+            locationAccuracyMeters: preparedPhoto.locationAccuracyMeters,
+            verificationPolicyVersion: 1,
+          },
         }) : null;
       const uploadedImage = privateEvidence ? { photoURL: "", filePath: "" } :
         await savePlantingPhoto({
@@ -1036,6 +1068,14 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
         locationSource:
           preparedPhoto.locationSource,
+
+        evidenceSource:
+          preparedPhoto.evidenceSource,
+
+        captureSessionAuditId:
+          preparedPhoto.captureSessionAuditId,
+
+        verificationPolicyVersion: 1,
 
         locationAccuracyMeters:
           preparedPhoto.locationAccuracyMeters,
@@ -1313,7 +1353,9 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
       gpsAccuracyMeters: primaryPhoto.locationAccuracyMeters,
 
-      locationSource,
+      locationSource: primaryPhoto.locationSource,
+
+      evidenceSource: primaryPhoto.evidenceSource,
 
       locationCapturedAt:
         primaryPhoto.locationCapturedAt,
@@ -1478,6 +1520,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       let parentId;
       await db.runTransaction(async (transaction) => {
         const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
+        const consumeCaptures = await require("./evidenceCaptureSession.service").prepareConsumption(transaction, captureEvidence);
         const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
         const eventRef = db.collection(EVENT_COLLECTION).doc(submittedEventId);
         const eventDoc = await transaction.get(eventRef);
@@ -1518,6 +1561,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           }
         );
         if (complete) complete({ collection: "plantingReports", recordId: parentId, contributionId: contributionRef.id });
+        consumeCaptures(`${parentId}:${contributionRef.id}`);
         if (!parent.created && !["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial",
           "Fully Reported — Awaiting Review", "Fully Reported â€” Awaiting Review"].includes(parent.data.verificationStatus)) {
           throw new Error("This planting report has already been finalized.");
@@ -1672,6 +1716,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
     let reportNumber = "";
     await db.runTransaction(async (transaction) => {
       const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
+      const consumeCaptures = await require("./evidenceCaptureSession.service").prepareConsumption(transaction, captureEvidence);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const hashDocs = await Promise.all(hashRefs.map((hashRef) => transaction.get(hashRef)));
       if (hashDocs.some((hashDoc) => hashDoc.exists)) {
@@ -1684,6 +1729,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         timestamp: now,
       });
       if (complete) complete({ collection: "plantingReports", recordId: docRef.id });
+      consumeCaptures(docRef.id);
       transaction.create(docRef, { ...reportData, reportNumber });
       hashRefs.forEach((hashRef) => transaction.create(hashRef, {
         reportId: docRef.id,

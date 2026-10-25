@@ -72,6 +72,31 @@ async function image(date = today, outside = false) {
       IFD3: { GPSLatitudeRef: "N", GPSLatitude: outside ? "12/1 41/1 0/1" : "12/1 40/1 156/10", GPSLongitudeRef: "E", GPSLongitude: "123/1 52/1 30/1" } },
   }).toBuffer();
 }
+async function browserCameraEvidence(binding, bytes) {
+  const session = ok(await api("participant", "POST", "/evidence-capture-sessions", binding));
+  const verification = ok(await api("participant", "POST",
+    `/evidence-capture-sessions/${session.captureSessionId}/verify`, form({
+      nonce: session.nonce, capturedAt: new Date().toISOString(), latitude: 12.671,
+      longitude: 123.875, accuracy: 50, clientImageSha256: hash(bytes),
+    }, bytes), undefined), 200);
+  return { session, verification, evidenceManifest: JSON.stringify([{ source: "browser-camera",
+    captureSessionId: session.captureSessionId, nonce: session.nonce,
+    verificationId: verification.verificationId, imageSha256: verification.imageSha256 }]) };
+}
+async function assertConsumed(camera, recordId) {
+  const snapshot = await db.collection("evidenceCaptureSessions").doc(camera.session.captureSessionId).get();
+  assert.equal(snapshot.data().state, "CONSUMED");
+  assert.equal(snapshot.data().consumedRecordId, recordId);
+}
+async function assertPrivateObject(reference, expectedBytes) {
+  const file = getStorageBucket().file(reference.objectName);
+  const [exists] = await file.exists();
+  assert.equal(exists, true);
+  const [metadata] = await file.getMetadata();
+  assert.equal(metadata.contentType, "image/jpeg");
+  const [stored] = await file.download();
+  assert.deepEqual(stored, expectedBytes);
+}
 async function site() {
   const id = `${prefix}-site-${randomUUID()}`;
   await db.collection("sites").doc(id).create({ siteName: "Synthetic Phase 5 site", barangay: "Bical",
@@ -355,4 +380,99 @@ test("failed Storage upload leaves no business linkage and retries the original 
     assert.equal((await db.collection("evidenceUploadIntents").where("sha256", "==", hash(bytes)).get()).size, 1);
     assert.ok(result.id);
   } finally { prototype.save = originalSave; }
+});
+
+test("browser-camera planting report completes authenticated HTTP submission and idempotent retry", async () => {
+  const fields = await plantingFixture(), bytes = await image(fields.plantingDate);
+  const binding = { workflow: "planting-report", siteId: fields.siteId,
+    eventId: fields.eventId, distributionId: fields.distributionId };
+  const camera = await browserCameraEvidence(binding, bytes), key = randomUUID();
+  const blocked = await api("participant", "POST", "/planting-reports",
+    form({ ...fields, quantityPlanted: 0, evidenceManifest: camera.evidenceManifest }, bytes, "photos"), key);
+  assert.equal(blocked.status, 400);
+  assert.equal((await db.collection("evidenceCaptureSessions").doc(camera.session.captureSessionId).get()).data().state, "VERIFIED");
+  const first = ok(await api("participant", "POST", "/planting-reports",
+    form({ ...fields, evidenceManifest: camera.evidenceManifest }, bytes, "photos"), key));
+  const retry = ok(await api("participant", "POST", "/planting-reports",
+    form({ ...fields, evidenceManifest: camera.evidenceManifest }, bytes, "photos"), key));
+  assert.equal(retry.id, first.id);
+  await assertConsumed(camera, first.id);
+  const saved = (await db.collection("plantingReports").doc(first.id).get()).data();
+  assert.equal(saved.photos[0].evidenceSource, "browser-camera");
+  assert.equal(saved.photos[0].captureSessionAuditId, camera.session.captureSessionId);
+  await assertPrivateObject(saved.photos[0].privateEvidence, bytes);
+  assert.equal((await api("participant", "GET", `/evidence/planting-reports/${first.id}/photos/0`)).status, 200);
+  assert.equal((await api("other", "GET", `/evidence/planting-reports/${first.id}/photos/0`)).status, 403);
+  assert.equal((await api("participant", "POST", "/planting-reports",
+    form({ ...fields, evidenceManifest: camera.evidenceManifest }, bytes, "photos"), randomUUID())).status, 400);
+});
+
+test("browser-camera early monitoring persists privately without advancing official schedule", async () => {
+  const fields = await monitoringFixture(true), reportBefore = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
+  const bytes = await image(), binding = { workflow: "monitoring-early",
+    plantingReportId: fields.plantingReportId, siteId: reportBefore.siteId };
+  const camera = await browserCameraEvidence(binding, bytes), key = randomUUID();
+  const first = ok(await api("participant", "POST", "/monitoring/early",
+    form({ ...fields, siteId: reportBefore.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
+  const retry = ok(await api("participant", "POST", "/monitoring/early",
+    form({ ...fields, siteId: reportBefore.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
+  assert.equal(retry.id, first.id);
+  const observation = retry.history[0];
+  assert.equal(observation.observationType, "early");
+  assert.equal(observation.evidenceSource, "browser-camera");
+  assert.equal(retry.nextMonitoringDate, null);
+  await assertConsumed(camera, `${first.id}:${observation.id}`);
+  const saved = await raw(first.id);
+  await assertPrivateObject(saved.history[0].privateEvidence, bytes);
+  const reportAfter = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
+  assert.deepEqual(reportAfter.nextMonitoringDate, reportBefore.nextMonitoringDate);
+  assert.equal((await api("participant", "GET", `/evidence/monitoring/${first.id}/photos/0`)).status, 200);
+  assert.equal((await api("other", "GET", `/evidence/monitoring/${first.id}/photos/0`)).status, 403);
+});
+
+test("browser-camera official monitoring preserves partial-observation KPI scheduling rules", async () => {
+  const fields = await monitoringFixture(), report = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
+  const bytes = await image(), camera = await browserCameraEvidence({ workflow: "monitoring-official",
+    plantingReportId: fields.plantingReportId, siteId: report.siteId }, bytes), key = randomUUID();
+  const first = ok(await api("participant", "POST", "/monitoring",
+    form({ ...fields, siteId: report.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
+  const retry = ok(await api("participant", "POST", "/monitoring",
+    form({ ...fields, siteId: report.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
+  assert.equal(retry.id, first.id);
+  const observation = retry.history[0];
+  assert.equal(observation.observationType, "official");
+  assert.equal(observation.evidenceSource, "browser-camera");
+  assert.equal(observation.survivalRate, 92);
+  assert.equal(observation.isFullCohortAssessment, false);
+  assert.equal(retry.nextMonitoringDate, null);
+  await assertConsumed(camera, `${first.id}:${observation.id}`);
+  const saved = await raw(first.id);
+  await assertPrivateObject(saved.history[0].privateEvidence, bytes);
+  assert.equal((await api("participant", "GET", `/evidence/monitoring/${first.id}/photos/0`)).status, 200);
+  assert.equal((await api("other", "GET", `/evidence/monitoring/${first.id}/photos/0`)).status, 403);
+});
+
+test("browser-camera monitoring resubmission after Staff Return atomically replaces evidence", async () => {
+  const fields = await monitoringFixture(), report = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
+  const originalBytes = await image(), originalCamera = await browserCameraEvidence({ workflow: "monitoring-official",
+    plantingReportId: fields.plantingReportId, siteId: report.siteId }, originalBytes);
+  const created = ok(await api("participant", "POST", "/monitoring", form({ ...fields, siteId: report.siteId,
+    evidenceManifest: originalCamera.evidenceManifest }, originalBytes), randomUUID()));
+  const observation = created.history[0], route = `/monitoring/${created.id}/observations/${observation.id}`;
+  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Retake evidence" }), 200);
+  const replacement = await image(), replacementCamera = await browserCameraEvidence({ workflow: "monitoring-resubmit",
+    plantingReportId: fields.plantingReportId, siteId: report.siteId, monitoringId: created.id,
+    observationId: observation.id, expectedVersion: 1 }, replacement), key = randomUUID();
+  const payload = { ...fields, siteId: report.siteId, expectedVersion: 1,
+    evidenceManifest: replacementCamera.evidenceManifest };
+  const updated = ok(await api("participant", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
+  const retry = ok(await api("participant", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
+  assert.equal(retry.history[0].revisionNumber, updated.history[0].revisionNumber);
+  assert.equal(retry.history[0].reviewStatus, "Pending Review");
+  assert.equal(retry.history[0].evidenceSource, "browser-camera");
+  await assertConsumed(replacementCamera, `${created.id}:${observation.id}:2`);
+  const saved = await raw(created.id);
+  await assertPrivateObject(saved.history[0].privateEvidence, replacement);
+  assert.equal((await api("participant", "GET", `/evidence/monitoring/${created.id}/observations/${observation.id}/revisions/2`)).status, 200);
+  assert.equal((await api("other", "GET", `/evidence/monitoring/${created.id}/observations/${observation.id}/revisions/2`)).status, 403);
 });

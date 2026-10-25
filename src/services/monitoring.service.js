@@ -271,7 +271,7 @@ async function savePhoto(file, participantId) {
 }
 
 async function createMonitoringRecord(data) {
-  const { idempotencyKey, file, imageDetails, metadata, imageHash, ...payload } = data;
+  const { idempotencyKey, file, imageDetails, metadata, imageHash, captureEvidence, ...payload } = data;
   return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.monitoredBy },
     workflow: data.observationType === "early" ? "monitoring-early" : "monitoring-official",
     target: data.plantingReportId, key: idempotencyKey, payload, files: [file] },
@@ -328,11 +328,19 @@ async function createMonitoringRecordImpl(data) {
   const operation = data.workflowOperation;
   const observationId = operation?.observationId || `OBS-${crypto.randomUUID()}`;
   const privateEvidence = operation ? await require("./evidenceWorkflow.service").workflow().upload(
-    operation, 0, data.file, { recordId: observationId, evidenceType: `monitoring-${observationType}` }) : null;
+    operation, 0, data.file, { recordId: observationId, evidenceType: `monitoring-${observationType}`,
+      verification: { capturedAt: data.metadata.capturedAt || null,
+        latitude, longitude, gpsValid: true, timestampValid: data.metadata.captureTimestampValid === true,
+        siteGpsValid: inside, suspiciousFlags: inside ? [] : ["OUTSIDE_REGISTERED_SITE"],
+        evidenceSource: data.captureEvidence ? "browser-camera" : "original-exif",
+        locationSource: data.captureEvidence ? "Browser Capture Session" : "Photo Metadata",
+        locationAccuracyMeters: data.captureEvidence?.accuracyMeters ?? null, verificationPolicyVersion: 1 } }) : null;
   const saved = privateEvidence ? { target: null, url: "" } : await savePhoto(data.file, data.monitoredBy);
   try {
     await db.runTransaction(async (transaction) => {
       const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
+      const consumeCapture = await require("./evidenceCaptureSession.service").prepareConsumption(
+        transaction, data.captureEvidence ? [data.captureEvidence] : []);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const [currentDoc, duplicateDoc, currentReportDoc] = await Promise.all([
         transaction.get(lifecycleRef), transaction.get(hashRef), transaction.get(reportRef),
@@ -437,6 +445,11 @@ async function createMonitoringRecordImpl(data) {
         photoName: data.file.originalname,
         photoType: data.file.mimetype,
         photoSize: data.file.size,
+        evidenceSource: data.captureEvidence ? "browser-camera" : "original-exif",
+        locationSource: data.captureEvidence ? "Browser Capture Session" : "Photo Metadata",
+        locationAccuracyMeters: data.captureEvidence?.accuracyMeters ?? null,
+        captureSessionAuditId: data.captureEvidence?.id || null,
+        verificationPolicyVersion: 1,
         photoUrl: saved.url,
         imageHash: data.imageHash,
         imageDetails: data.imageDetails,
@@ -492,6 +505,11 @@ async function createMonitoringRecordImpl(data) {
           photoName: entry.photoName,
           photoType: entry.photoType,
           photoSize: entry.photoSize,
+          evidenceSource: entry.evidenceSource,
+          locationSource: entry.locationSource,
+          locationAccuracyMeters: entry.locationAccuracyMeters,
+          captureSessionAuditId: entry.captureSessionAuditId,
+          verificationPolicyVersion: 1,
           latitude,
           longitude,
           capturedAt: entry.photoTakenAt,
@@ -535,6 +553,7 @@ async function createMonitoringRecordImpl(data) {
         createdAt: current.createdAt || now,
       };
       if (complete) complete({ collection: "monitoringRecords", recordId: id, observationId });
+      consumeCapture(`${id}:${observationId}`);
       if (currentDoc.exists) transaction.update(lifecycleRef, payload);
       else transaction.create(lifecycleRef, payload);
       transaction.create(hashRef, { lifecycleId: id, participantId: data.monitoredBy, createdAt: now });
@@ -759,7 +778,7 @@ const approveMonitoringObservation = (args) => transitionObservation({ ...args, 
 const rejectMonitoringObservation = (args) => transitionObservation({ ...args, action: "reject", text: args.reason || "" });
 
 async function resubmitMonitoringObservation(data) {
-  const { idempotencyKey, file, imageDetails, metadata, imageHash, savedEvidence, ...payload } = data;
+  const { idempotencyKey, file, imageDetails, metadata, imageHash, savedEvidence, captureEvidence, ...payload } = data;
   return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.actorId },
     workflow: "monitoring-resubmit", target: `${data.monitoringId}:${data.observationId}`,
     key: idempotencyKey, payload, files: file ? [file] : [] },
@@ -781,7 +800,13 @@ async function resubmitMonitoringObservationImpl(data) {
     if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
     if (data.file) privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(
       operation, 0, data.file, { recordId: data.observationId,
-        evidenceType: observation.observationType === "early" ? "monitoring-early" : "monitoring-official" });
+        evidenceType: observation.observationType === "early" ? "monitoring-early" : "monitoring-official",
+        verification: { capturedAt: data.metadata?.capturedAt || null,
+          latitude: Number(data.metadata?.latitude), longitude: Number(data.metadata?.longitude), gpsValid: true,
+          timestampValid: data.metadata?.captureTimestampValid === true,
+          evidenceSource: data.captureEvidence ? "browser-camera" : "original-exif",
+          locationSource: data.captureEvidence ? "Browser Capture Session" : "Photo Metadata",
+          locationAccuracyMeters: data.captureEvidence?.accuracyMeters ?? null, verificationPolicyVersion: 1 } });
     else {
       const retained = (observation.revisionHistory || []).find(revision =>
         Number(revision.evidenceRevision) === Number(data.retainEvidenceRevision));
@@ -820,6 +845,11 @@ async function resubmitMonitoringObservationImpl(data) {
         photoName: data.file.originalname, photoType: data.file.mimetype,
         photoSize: data.file.size, latitude: Number(data.metadata.latitude),
         longitude: Number(data.metadata.longitude), capturedAt: data.metadata.capturedAt || null,
+        evidenceSource: data.captureEvidence ? "browser-camera" : "original-exif",
+        locationSource: data.captureEvidence ? "Browser Capture Session" : "Photo Metadata",
+        locationAccuracyMeters: data.captureEvidence?.accuracyMeters ?? null,
+        captureSessionAuditId: data.captureEvidence?.id || null,
+        verificationPolicyVersion: 1,
         captureTimestamp: data.metadata.captureTimestamp || null,
         captureTimestampRaw: data.metadata.captureTimestampRaw || "",
         captureDateManila: data.metadata.captureDateManila || "",
@@ -834,6 +864,8 @@ async function resubmitMonitoringObservationImpl(data) {
   try {
     await db.runTransaction(async (transaction) => {
       const complete = operation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, operation) : null;
+      const consumeCapture = await require("./evidenceCaptureSession.service").prepareConsumption(
+        transaction, data.captureEvidence ? [data.captureEvidence] : []);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       const doc = await transaction.get(ref);
       if (!doc.exists) throw workflowError("MONITORING_NOT_FOUND", "Monitoring record not found.", 404);
@@ -956,6 +988,7 @@ async function resubmitMonitoringObservationImpl(data) {
       history[index] = updated;
       const nextMonitoringDate = officialNextMonitoringDate(history, current);
       if (complete) complete({ collection: "monitoringRecords", recordId: data.monitoringId, observationId: data.observationId, revisionNumber });
+      consumeCapture(`${data.monitoringId}:${data.observationId}:${revisionNumber}`);
       transaction.update(ref, { history, latestObservationId: updated.id,
         latestObservationStatus: updated.reviewStatus, nextMonitoringDate,
         ...workflowCounts(history), updatedAt: now });

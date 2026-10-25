@@ -24,6 +24,7 @@ const guestEventRoutes = require("./routes/guestEvent.routes");
 const reportRoutes = require("./routes/report.routes");
 const searchRoutes = require("./routes/search.routes");
 const evidenceRoutes = require("./routes/evidence.routes");
+const evidenceCaptureSessionRoutes = require("./routes/evidenceCaptureSession.routes");
 
 const app = express();
 
@@ -97,6 +98,7 @@ app.use("/api/analytics", analyticsRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/search", searchRoutes);
 app.use("/api/evidence", evidenceRoutes);
+app.use("/api/evidence-capture-sessions", evidenceCaptureSessionRoutes);
 
 // ---------------------------------------------
 // 404

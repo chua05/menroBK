@@ -87,7 +87,8 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
       if (Buffer.byteLength(json) > 16_384) throw new Error();
       verification = JSON.parse(json);
       if (!onlyKeys(verification, ["capturedAt", "captureTimestamp", "captureOffset", "latitude", "longitude",
-        "gpsValid", "timestampValid", "siteGpsValid", "suspiciousFlags", "captureDateManila", "captureTimezoneSource"])) throw new Error();
+        "gpsValid", "timestampValid", "siteGpsValid", "suspiciousFlags", "captureDateManila", "captureTimezoneSource",
+        "evidenceSource", "locationSource", "locationAccuracyMeters", "verificationPolicyVersion"])) throw new Error();
       for (const key of ["latitude", "longitude"]) {
         if (key in verification && (!Number.isFinite(verification[key]) ||
           Math.abs(verification[key]) > (key === "latitude" ? 90 : 180))) throw new Error();
