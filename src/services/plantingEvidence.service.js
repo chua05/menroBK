@@ -2,9 +2,9 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { generateImageHash, validateImageBuffer, extractImageMetadata, isClearlyScreenshot } = require("../utils/imageVerification.util");
 const { validatePlantingReport } = require("../utils/plantingVerification.util");
-const { calculateDistanceMeters, isPointInPolygon, isPointInGeoJsonFeatureCollection } = require("../utils/geo.util");
+const { calculateDistanceMeters, isPointInPolygon } = require("../utils/geo.util");
 const { savePlantingPhoto, deletePlantingPhoto } = require("./fileStorage.service");
-const { barangayGeoJson: bulanBarangayBoundaries } = require("../config/municipality");
+const { isPointWithinMunicipality } = require("../config/municipality");
 
 const contributions = db.collection("plantingContributions");
 const reports = db.collection("plantingReports");
@@ -95,7 +95,7 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
       }
       const photoLatitude = Number(metadata.latitude);
       const photoLongitude = Number(metadata.longitude);
-      if (!isPointInGeoJsonFeatureCollection(photoLatitude, photoLongitude, bulanBarangayBoundaries)) {
+      if (!isPointWithinMunicipality(photoLatitude, photoLongitude)) {
         throw new Error("The photo is outside the Municipality of Bulan.");
       }
       const verification = validatePlantingReport({

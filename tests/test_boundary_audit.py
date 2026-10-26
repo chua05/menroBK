@@ -69,6 +69,47 @@ class BoundaryAuditTests(unittest.TestCase):
         # Structural checks run independently of geometric validity.
         self.assertTrue(any("longitude/latitude" in error for error in audit(f)["rows"][0]["structureErrors"]))
 
+    def test_mpdo_candidate_known_topology_and_schema(self):
+        data = tool.load(ROOT / "src/data/bulan-barangays-mpdo-candidate.json")
+        result = tool.audit(data)
+        self.assertEqual(result["featureCount"], 63)
+        self.assertEqual(result["invalidCount"], 0)
+        self.assertEqual(len(result["overlaps"]), 8)
+        self.assertEqual(len(result["enclosedGapCandidates"]), 26)
+        self.assertEqual(round(sum(row["areaM2"] for row in result["overlaps"]), 4), 4735.4641)
+        self.assertEqual(round(sum(row["areaM2"] for row in result["enclosedGapCandidates"]), 4), 2284.2269)
+        expected_pairs = {
+            frozenset(pair) for pair in (
+                ("SanVicente", "ZoneVIIIPoblacion"), ("SanVicente", "SanRafael"),
+                ("Obrero", "SantaRemedios"), ("SantaRemedios", "A.Bonifacio"),
+                ("Taromata", "SantaTeresita"), ("Taromata", "Gate"),
+                ("SanJuanBag-O", "Fabrica"), ("Inararan", "Calomagon"),
+            )
+        }
+        actual_pairs = {frozenset((row["first"], row["second"])) for row in result["overlaps"]}
+        self.assertEqual(actual_pairs, expected_pairs)
+
+    def test_mpdo_overlap_and_gap_points_remain_ambiguous_or_unassigned(self):
+        data = tool.load(ROOT / "src/data/bulan-barangays-mpdo-candidate.json")
+        geometries = [(tool.name_of(feature), tool.make_valid(tool.shape(feature["geometry"])))
+                      for feature in data["features"]]
+        first_overlap = next(
+            left.intersection(right)
+            for index, (_, left) in enumerate(geometries)
+            for _, right in geometries[index + 1:]
+            if left.intersection(right).area > 0
+        )
+        point = first_overlap.representative_point()
+        self.assertGreaterEqual(sum(geometry.covers(point) for _, geometry in geometries), 2)
+
+        projected = [tool.project(geometry) for _, geometry in geometries]
+        union = tool.unary_union(projected)
+        parts = list(union.geoms) if union.geom_type == "MultiPolygon" else [union]
+        gap = next(tool.Polygon(ring) for part in parts for ring in part.interiors
+                   if tool.Polygon(ring).area > 0.01)
+        gap_point = gap.representative_point()
+        self.assertFalse(any(geometry.covers(gap_point) for geometry in projected))
+
 
 if __name__ == "__main__":
     unittest.main()

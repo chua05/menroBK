@@ -6,7 +6,8 @@ const municipalityPath = require.resolve("../src/config/municipality");
 require.cache[firebasePath] = { id: firebasePath, filename: firebasePath, loaded: true,
   exports: { db: {} } };
 require.cache[municipalityPath] = { id: municipalityPath, filename: municipalityPath, loaded: true,
-  exports: { barangayGeoJson: { type: "FeatureCollection", features: [{ type: "Feature",
+  exports: { isPointWithinMunicipality: (lat, lng) => lat >= 12 && lat <= 14 && lng >= 123 && lng <= 125,
+    barangayGeoJson: { type: "FeatureCollection", features: [{ type: "Feature",
     geometry: { type: "Polygon", coordinates: [[[123, 12], [125, 12], [125, 14], [123, 14], [123, 12]]] } }] } } };
 
 const { SESSION_TTL_MS, MAX_ACCURACY_METERS, SITE_FALLBACK_METERS, _test } = require("../src/services/evidenceCaptureSession.service");

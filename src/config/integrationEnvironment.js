@@ -3,12 +3,17 @@ const path = require("node:path");
 
 const DEMO_PROJECT_ID = "demo-menro-phase2";
 const FIRESTORE_HOST = "127.0.0.1:8080";
+const MPDO_FIRESTORE_HOST = "127.0.0.1:8180";
 const AUTH_HOST = "127.0.0.1:9099";
 const STORAGE_HOST = "127.0.0.1:9199";
 const STORAGE_BUCKET = "demo-menro-phase2.firebasestorage.app";
 
 function enabled(env = process.env) {
   return String(env.MENRO_INTEGRATION_TEST || "").toLowerCase() === "true";
+}
+
+function mpdoAcceptanceEnabled(env = process.env) {
+  return String(env.MENRO_MPDO_BOUNDARY_ACCEPTANCE || "").toLowerCase() === "true";
 }
 
 function validateIntegrationEnvironment(env = process.env) {
@@ -25,7 +30,18 @@ function validateIntegrationEnvironment(env = process.env) {
   if (env.GCLOUD_PROJECT !== DEMO_PROJECT_ID || env.FIREBASE_PROJECT_ID !== DEMO_PROJECT_ID) {
     throw new Error(`Integration testing requires project ${DEMO_PROJECT_ID}.`);
   }
-  if (env.FIRESTORE_EMULATOR_HOST !== FIRESTORE_HOST || env.FIREBASE_AUTH_EMULATOR_HOST !== AUTH_HOST) {
+  const mpdoAcceptance = mpdoAcceptanceEnabled(env);
+  if (env.MENRO_MPDO_BOUNDARY_ACCEPTANCE !== undefined && !mpdoAcceptance) {
+    throw new Error("MENRO_MPDO_BOUNDARY_ACCEPTANCE must be exactly true when supplied.");
+  }
+  if (mpdoAcceptance && env.MENRO_TEST_BOUNDARY_SOURCE !== "mpdo-candidate") {
+    throw new Error("MPDO boundary acceptance requires the inactive MPDO candidate source.");
+  }
+  if (!mpdoAcceptance && env.MENRO_TEST_BOUNDARY_SOURCE === "mpdo-candidate") {
+    throw new Error("The MPDO candidate requires the explicit MPDO acceptance gate in integration mode.");
+  }
+  const requiredFirestoreHost = mpdoAcceptance ? MPDO_FIRESTORE_HOST : FIRESTORE_HOST;
+  if (env.FIRESTORE_EMULATOR_HOST !== requiredFirestoreHost || env.FIREBASE_AUTH_EMULATOR_HOST !== AUTH_HOST) {
     throw new Error("Integration testing requires the approved loopback Firestore and Auth emulator hosts.");
   }
   const hasStorageHost = env.FIREBASE_STORAGE_EMULATOR_HOST !== undefined;
@@ -38,7 +54,7 @@ function validateIntegrationEnvironment(env = process.env) {
       throw new Error("Storage integration testing requires the synthetic demo Storage bucket.");
     }
   }
-  return { integration: true, projectId: DEMO_PROJECT_ID };
+  return { integration: true, projectId: DEMO_PROJECT_ID, mpdoAcceptance };
 }
 
 function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
@@ -56,6 +72,6 @@ function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
 }
 
 module.exports = {
-  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, STORAGE_HOST, STORAGE_BUCKET, enabled,
-  resolveUploadRoot, validateIntegrationEnvironment,
+  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, MPDO_FIRESTORE_HOST, STORAGE_HOST, STORAGE_BUCKET, enabled,
+  mpdoAcceptanceEnabled, resolveUploadRoot, validateIntegrationEnvironment,
 };

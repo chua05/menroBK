@@ -45,11 +45,10 @@ const {
 const {
   calculateDistanceMeters,
   isPointInPolygon,
-  isPointInGeoJsonFeatureCollection,
 } = require(
   "../utils/geo.util"
 );
-const { barangayGeoJson: bulanBarangayBoundaries } = require("../config/municipality");
+const { isPointWithinMunicipality } = require("../config/municipality");
 
 
 const REPORT_COLLECTION =
@@ -768,11 +767,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       );
     }
 
-    const insideBulan = isPointInGeoJsonFeatureCollection(
-      photoLatitude,
-      photoLongitude,
-      bulanBarangayBoundaries
-    );
+    const insideBulan = isPointWithinMunicipality(photoLatitude, photoLongitude);
 
     if (!insideBulan) {
       throw new Error(

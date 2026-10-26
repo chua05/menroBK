@@ -62,7 +62,8 @@ async function seed() {
       createdAt: new Date("2026-01-01T00:00:00Z"), testFixture: true });
   }
   await db.collection("sites").doc("phase2-site").set({ siteName: "Phase 2 Test Site",
-    barangay: "Bical", latitude: 12.671, longitude: 123.875, coverageRadius: 100,
+    barangay: "Bical", municipality: "Bulan", province: "Sorsogon",
+    latitude: 12.671, longitude: 123.875, coverageRadius: 100,
     polygon: [{ lat: 12.6705, lng: 123.8745 }, { lat: 12.6715, lng: 123.8745 },
       { lat: 12.6715, lng: 123.8755 }, { lat: 12.6705, lng: 123.8755 }],
     status: "Active", testFixture: true });

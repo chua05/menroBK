@@ -1,12 +1,11 @@
 const { db } = require("../config/firebase");
 const crypto = require("crypto");
 const { Timestamp } = require("firebase-admin/firestore");
-const { isPointInGeoJsonFeatureCollection } = require("../utils/geo.util");
 const {
   MUNICIPALITY,
   PROVINCE,
   BARANGAY_SET,
-  barangayGeoJson,
+  isPointWithinMunicipality,
 } = require("../config/municipality");
 
 const SITE_COLLECTION = "sites";
@@ -131,7 +130,7 @@ function validateCoordinates(latitudeValue, longitudeValue) {
     throw new Error("Longitude must be between -180 and 180.");
   }
 
-  if (!isPointInGeoJsonFeatureCollection(latitude, longitude, barangayGeoJson)) {
+  if (!isPointWithinMunicipality(latitude, longitude)) {
     throw new Error(`Planting site coordinates must be within the Municipality of ${MUNICIPALITY}.`);
   }
 
@@ -220,11 +219,7 @@ function formatSiteDocument(doc) {
 function isCurrentMunicipalitySite(site) {
   return cleanString(site.municipality).toLowerCase() === MUNICIPALITY.toLowerCase() &&
     cleanString(site.province).toLowerCase() === PROVINCE.toLowerCase() &&
-    isPointInGeoJsonFeatureCollection(
-      Number(site.latitude),
-      Number(site.longitude),
-      barangayGeoJson
-    );
+    isPointWithinMunicipality(Number(site.latitude), Number(site.longitude));
 }
 
 // --------------------------------

@@ -51,23 +51,35 @@ const isPointInPolygon = (latitude, longitude, polygon) => {
   return inside;
 };
 
-const isPointInGeoJsonRing = (latitude, longitude, ring) => {
-  if (!Array.isArray(ring) || ring.length < 3) return false;
-  return isPointInPolygon(
-    latitude,
-    longitude,
-    ring.map((coordinate) => ({
-      lat: coordinate?.[1],
-      lng: coordinate?.[0],
-    }))
-  );
+const pointLocationInGeoJsonRing = (latitude, longitude, ring) => {
+  if (!Array.isArray(ring) || ring.length < 3) return "outside";
+  const x = Number(longitude);
+  const y = Number(latitude);
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const ax = Number(ring[j]?.[0]);
+    const ay = Number(ring[j]?.[1]);
+    const bx = Number(ring[i]?.[0]);
+    const by = Number(ring[i]?.[1]);
+    if (![ax, ay, bx, by].every(Number.isFinite)) return "outside";
+    const cross = (x - ax) * (by - ay) - (y - ay) * (bx - ax);
+    const scale = Math.max(1, Math.abs(ax), Math.abs(ay), Math.abs(bx), Math.abs(by));
+    if (Math.abs(cross) <= Number.EPSILON * scale * 16 &&
+        x >= Math.min(ax, bx) && x <= Math.max(ax, bx) &&
+        y >= Math.min(ay, by) && y <= Math.max(ay, by)) return "edge";
+    if ((ay > y) !== (by > y) && x < ((bx - ax) * (y - ay)) / (by - ay) + ax) {
+      inside = !inside;
+    }
+  }
+  return inside ? "inside" : "outside";
 };
 
 const isPointInGeoJsonPolygon = (latitude, longitude, coordinates) => {
   if (!Array.isArray(coordinates) || coordinates.length === 0) return false;
-  if (!isPointInGeoJsonRing(latitude, longitude, coordinates[0])) return false;
+  const outer = pointLocationInGeoJsonRing(latitude, longitude, coordinates[0]);
+  if (outer === "outside") return false;
   return !coordinates.slice(1).some((hole) =>
-    isPointInGeoJsonRing(latitude, longitude, hole)
+    pointLocationInGeoJsonRing(latitude, longitude, hole) === "inside"
   );
 };
 
@@ -93,8 +105,20 @@ const isPointInGeoJsonFeatureCollection = (latitude, longitude, geoJson) => {
   );
 };
 
+const getContainingGeoJsonFeatures = (latitude, longitude, geoJson) => {
+  if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude)) ||
+      geoJson?.type !== "FeatureCollection" || !Array.isArray(geoJson.features)) {
+    return [];
+  }
+  return geoJson.features.filter((feature) =>
+    isPointInGeoJsonGeometry(Number(latitude), Number(longitude), feature?.geometry)
+  );
+};
+
 module.exports = {
   calculateDistanceMeters,
   isPointInPolygon,
+  getContainingGeoJsonFeatures,
+  isPointInGeoJsonGeometry,
   isPointInGeoJsonFeatureCollection,
 };

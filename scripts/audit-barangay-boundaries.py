@@ -28,7 +28,7 @@ def project(geometry):
 
 def name_of(feature):
     p = feature.get("properties") or {}
-    return next((str(p[k]) for k in ("brgy_name", "NAME_3", "ADM4_EN", "adm4_en", "name") if p.get(k)), "")
+    return next((str(p[k]) for k in ("brgy_name", "mpdo_name", "NAME_3", "ADM4_EN", "adm4_en", "name") if p.get(k)), "")
 
 
 def normalized(name):

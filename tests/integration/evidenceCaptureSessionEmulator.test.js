@@ -4,9 +4,24 @@ const sharp = require("sharp");
 const { Timestamp } = require("firebase-admin/firestore");
 const { validateIntegrationEnvironment } = require("../../src/config/integrationEnvironment");
 
+// emulators:exec injects demo SDK discovery metadata. Validate its exact
+// synthetic shape before removing it so application credential guards remain
+// unchanged and no real Firebase configuration can enter this process.
+if (process.env.FIREBASE_CONFIG) {
+  const config = JSON.parse(process.env.FIREBASE_CONFIG);
+  assert.equal(config.projectId, "demo-menro-phase2");
+  assert.ok(Object.keys(config).every(key => ["projectId", "databaseURL", "storageBucket"].includes(key)));
+  if (config.storageBucket) {
+    assert.ok(["demo-menro-phase2.appspot.com", "demo-menro-phase2.firebasestorage.app"].includes(config.storageBucket));
+  }
+  if (config.databaseURL) assert.equal(config.databaseURL, "https://demo-menro-phase2.firebaseio.com");
+  delete process.env.FIREBASE_CONFIG;
+}
+
 const environment = validateIntegrationEnvironment();
 assert.equal(environment.projectId, "demo-menro-phase2");
-assert.equal(process.env.FIRESTORE_EMULATOR_HOST, "127.0.0.1:8080");
+const approvedFirestorePort = process.env.MENRO_MPDO_BOUNDARY_ACCEPTANCE === "true" ? "8180" : "8080";
+assert.equal(process.env.FIRESTORE_EMULATOR_HOST, `127.0.0.1:${approvedFirestorePort}`);
 assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST, "127.0.0.1:9099");
 assert.equal(process.env.FIREBASE_STORAGE_EMULATOR_HOST, "127.0.0.1:9199");
 

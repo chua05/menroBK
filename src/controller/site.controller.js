@@ -103,8 +103,12 @@ const getAllSites = async (
 };
 
 // Return the single Bulan dataset used by validation and map rendering.
-const getBarangayBoundaries = (req, res) =>
-  res.status(200).json(barangayGeoJson);
+const getBarangayBoundaries = (req, res) => {
+  // Boundary activation and rollback must be observed immediately rather than
+  // leaving a stale administrative layer in a browser or intermediary cache.
+  res.setHeader("Cache-Control", "no-cache, must-revalidate");
+  return res.status(200).json(barangayGeoJson);
+};
 
 // --------------------------------
 // GET ARCHIVED SITES

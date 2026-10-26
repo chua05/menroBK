@@ -16,7 +16,9 @@ if (process.env.FIREBASE_CONFIG) {
   delete process.env.FIREBASE_CONFIG;
 }
 if (!resolveEvidenceStorageConfig().cloudWorkflow) throw Error("Explicit credential-free demo cloud gate required");
-const allowedPorts = new Set(["8080", "9099", "9199"]);
+const approvedFirestorePort = process.env.MENRO_MPDO_BOUNDARY_ACCEPTANCE === "true" ? "8180" : "8080";
+assert.equal(process.env.FIRESTORE_EMULATOR_HOST, `127.0.0.1:${approvedFirestorePort}`);
+const allowedPorts = new Set([approvedFirestorePort, "9099", "9199"]);
 const nativeRequest = http.request, nativeFetch = globalThis.fetch;
 http.request = function (input, ...args) {
   const url = typeof input === "string" || input instanceof URL ? new URL(input) :

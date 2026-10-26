@@ -1,11 +1,10 @@
 const crypto = require("node:crypto");
 const { Timestamp } = require("firebase-admin/firestore");
 const { db } = require("../config/firebase");
-const { barangayGeoJson } = require("../config/municipality");
+const { isPointWithinMunicipality } = require("../config/municipality");
 const {
   calculateDistanceMeters,
   isPointInPolygon,
-  isPointInGeoJsonFeatureCollection,
 } = require("../utils/geo.util");
 const {
   generateImageHash,
@@ -155,7 +154,7 @@ function validateLocation(site, input) {
   if (!Number.isFinite(accuracyMeters) || accuracyMeters < 0 || accuracyMeters > MAX_ACCURACY_METERS) {
     throw problem("CAPTURE_LOCATION_INACCURATE", 422, "Camera evidence requires GPS accuracy of 50 meters or better.");
   }
-  if (!isPointInGeoJsonFeatureCollection(latitude, longitude, barangayGeoJson)) {
+  if (!isPointWithinMunicipality(latitude, longitude)) {
     throw problem("CAPTURE_LOCATION_OUTSIDE_BULAN", 422, "Camera evidence must be captured within the Municipality of Bulan.");
   }
   const siteLatitude = Number(site.latitude);
