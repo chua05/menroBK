@@ -16,6 +16,7 @@ const {
   proposeLateReleaseSchedule,
   decideLateReleaseSchedule,
   revealIdentification,
+  deriveSeedlingRequestDocumentId,
 } = require("../services/seedlingRequest.service");
 const {
   validateIdentificationInput,
@@ -32,6 +33,15 @@ const { validateReleasePlantingOrder } = require("../utils/seedlingRequestSchedu
 
 const cleanString = (value) =>
   String(value || "").trim();
+
+const getSeedlingRequestCapabilities = (req, res) => {
+  const config = require("../config/requestLetterStorage")
+    .resolveRequestLetterStorageConfig();
+  return res.status(200).json({
+    success: true,
+    data: { requestLetterStorage: { uploadEnabled: config.enabled, uploadRequired: config.required } },
+  });
+};
 
 const requireExpectedVersion = (body = {}) => {
   const value = Number(body.expectedVersion);
@@ -58,6 +68,42 @@ const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
     isGroup: isGroupWorkflow(workflow),
     expectedParticipants: eventProposal.expectedParticipants,
   });
+
+const validateWorkflow = (workflow = {}) => {
+  const errors = {};
+  const requireField = (field, message) => {
+    if (!cleanString(workflow[field])) errors[field] = message;
+  };
+  const allowedSectors = new Set(["Resident / Individual", "Barangay Official", "School / Student",
+    "Private Sector / Business", "Civic Organization / NGO", "Government Agency", "Other (please specify)"]);
+  if (!allowedSectors.has(cleanString(workflow.sector))) errors.sector = "Please select a valid sector.";
+  if (workflow.sector === "Other (please specify)") {
+    requireField("sectorOther", "Please specify the sector.");
+    if (!["individual", "group"].includes(workflow.requestingAs)) errors.requestingAs = "Select how you are requesting.";
+  }
+  ["addressProvince", "addressMunicipality", "addressBarangay", "street", "siteBarangay",
+    "areaChoice", "releaseMethod", "caretaker", "carePlan", "monitoringFrequency"]
+    .forEach((field) => requireField(field, "This field is required."));
+  if (workflow.monitoringFrequency === "Other") requireField("monitoringOther", "Specify the monitoring frequency.");
+  if (!["existing", "proposed"].includes(workflow.siteMode)) errors.siteMode = "Select a valid planting-site option.";
+  if (workflow.siteMode === "existing") requireField("existingSiteId", "Select a planting site.");
+  if (workflow.siteMode === "proposed") {
+    ["siteName", "specificLocation", "latitude", "longitude", "niyogan"]
+      .forEach((field) => requireField(field, "This field is required."));
+    if (["no", "unsure"].includes(cleanString(workflow.niyogan).toLowerCase())) {
+      requireField("landType", "Select a land or area type.");
+      requireField("currentCondition", "Describe the current condition or use.");
+      if (workflow.landType === "Other") requireField("landTypeOther", "Describe the type of land or area.");
+    }
+  }
+  if (isGroupWorkflow(workflow)) requireField("eventName", "Enter an event name.");
+  if (Object.keys(errors).length) {
+    const error = new Error("Complete all required request fields before submitting.");
+    error.fieldErrors = errors;
+    throw error;
+  }
+  return workflow;
+};
 
 // ========================================
 // HELPER — VALIDATE DECISION REASON
@@ -231,6 +277,7 @@ const validateResubmissionPayload = (body = {}) => {
     purpose: cleanString(purpose),
     plantingLocation: cleanString(plantingLocation),
     preferredReleaseDate,
+    expectedVersion: requireExpectedVersion(body),
     workflow: workflow && typeof workflow === "object" ? workflow : {},
     eventProposal: {
       eventName: cleanString(eventProposal.eventName),
@@ -300,6 +347,25 @@ const submitSeedlingRequest = async (
     }
 
     const validatedIdentification = validateIdentificationInput(identification);
+    validateWorkflow(workflow);
+    const groupRequest = isGroupWorkflow(workflow);
+    const requestLetterStorage = require("../config/requestLetterStorage")
+      .resolveRequestLetterStorageConfig();
+    let privateRequestLetter = null;
+    if (groupRequest && req.file && !requestLetterStorage.enabled) {
+      return res.status(503).json({ success: false, message: "Secure request-letter storage is not enabled." });
+    }
+    if (groupRequest && requestLetterStorage.required && !req.file) {
+      return res.status(400).json({ success: false, fieldErrors: { requestLetter: "Upload a request letter." }, message: "A request letter is required for group requests." });
+    }
+    if (groupRequest && requestLetterStorage.enabled && req.file) {
+      const requestId = deriveSeedlingRequestDocumentId(participantId, clientSubmissionId);
+      privateRequestLetter = await require("../services/requestLetterStorage.service").uploadRequestLetter({
+        requestId, participantId, clientSubmissionId: cleanString(clientSubmissionId), file: req.file,
+      });
+    } else if (!groupRequest && req.file) {
+      return res.status(400).json({ success: false, message: "A request letter is not required for an individual request." });
+    }
 
     if (
       workflow?.siteMode === "proposed" &&
@@ -391,7 +457,7 @@ const submitSeedlingRequest = async (
     const proposedStartTime = submittedProposedStartTime ?? eventProposal.startTime;
     const proposedEndTime = submittedProposedEndTime ?? eventProposal.endTime;
     const description = submittedDescription ?? eventProposal.eventDescription;
-    const groupRequest = isGroupWorkflow(workflow);
+
 
     if (
       !cleanString(eventName) ||
@@ -530,6 +596,8 @@ const submitSeedlingRequest = async (
 
         workflow: workflow && typeof workflow === "object" ? workflow : {},
 
+        ...(privateRequestLetter ? { requestLetter: { privateDocument: privateRequestLetter } } : {}),
+
         eventProposal: {
           eventName:
             cleanString(
@@ -631,11 +699,34 @@ const submitSeedlingRequest = async (
         : error.message || "Failed to submit seedling request.";
 
     return res
-      .status(configurationError || databaseError ? 503 : 400)
+      .status(error.status || (configurationError || databaseError ? 503 : 400))
       .json({
         success: false,
         message: publicMessage,
+        fieldErrors: error.fieldErrors || undefined,
       });
+  }
+};
+
+const getRequestLetter = async (req, res) => {
+  try {
+    const request = await getSeedlingRequestById(req.params.id, { includeRequestLetter: true });
+    if (req.user.role === "participant" && request.participantId !== req.user.uid) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    if (!["participant", "staff", "admin"].includes(req.user.role)) {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    if (!request.requestLetter?.privateDocument) {
+      return res.status(404).json({ success: false, message: "Request letter not found." });
+    }
+    return await require("../services/requestLetterStorage.service").streamRequestLetter(
+      request.requestLetter.privateDocument, res,
+    );
+  } catch (error) {
+    if (!res.headersSent) return res.status(error.status || 500).json({ success: false,
+      message: error.status === 404 ? "Request letter not found." : "Unable to retrieve the request letter." });
+    if (!res.destroyed) res.destroy();
   }
 };
 
@@ -881,6 +972,17 @@ const resubmitRequest = async (req, res) => {
   try {
     requireExpectedVersion(req.body);
     const requestData = validateResubmissionPayload(req.body);
+    if (req.file) {
+      const requestLetterStorageEnabled = require("../config/requestLetterStorage")
+        .resolveRequestLetterStorageConfig().enabled;
+      if (!requestLetterStorageEnabled) {
+        return res.status(503).json({ success: false, message: "Secure request-letter storage is not enabled." });
+      }
+      requestData.requestLetter = { privateDocument: await require("../services/requestLetterStorage.service").uploadRequestLetter({
+        requestId: req.params.id, participantId: req.user.uid,
+        clientSubmissionId: `replacement-${req.params.id}-${requestData.expectedVersion}`, file: req.file,
+      }) };
+    }
     const request = await resubmitSeedlingRequest(
       req.params.id,
       req.user.uid,
@@ -896,7 +998,7 @@ const resubmitRequest = async (req, res) => {
     const notFound = error.message === "Seedling request not found.";
     const forbidden = error.message === "You can only edit your own returned request.";
     const conflict = error.message === "This request can no longer be edited because its status has changed.";
-    const statusCode = notFound ? 404 : forbidden ? 403 : conflict ? 409 : 400;
+    const statusCode = notFound ? 404 : forbidden ? 403 : conflict || error.code === "STALE_REQUEST_VERSION" ? 409 : 400;
 
     return res.status(statusCode).json({
       success: false,
@@ -1101,7 +1203,9 @@ const approveLateReleaseProposal = scheduleActionResponse(
 );
 
 module.exports = {
+  getSeedlingRequestCapabilities,
   submitSeedlingRequest,
+  getRequestLetter,
   getSeedlingRequests,
   getSeedlingRequest,
   getMySeedlingRequests,

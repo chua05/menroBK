@@ -4,6 +4,7 @@ const path = require("node:path");
 const DEMO_PROJECT_ID = "demo-menro-phase2";
 const FIRESTORE_HOST = "127.0.0.1:8080";
 const MPDO_FIRESTORE_HOST = "127.0.0.1:8180";
+const REQUEST_LETTER_FIRESTORE_HOST = "127.0.0.1:8181";
 const AUTH_HOST = "127.0.0.1:9099";
 const STORAGE_HOST = "127.0.0.1:9199";
 const STORAGE_BUCKET = "demo-menro-phase2.firebasestorage.app";
@@ -14,6 +15,10 @@ function enabled(env = process.env) {
 
 function mpdoAcceptanceEnabled(env = process.env) {
   return String(env.MENRO_MPDO_BOUNDARY_ACCEPTANCE || "").toLowerCase() === "true";
+}
+
+function requestLetterAcceptanceEnabled(env = process.env) {
+  return String(env.MENRO_REQUEST_LETTER_ACCEPTANCE || "").toLowerCase() === "true";
 }
 
 function validateIntegrationEnvironment(env = process.env) {
@@ -31,6 +36,11 @@ function validateIntegrationEnvironment(env = process.env) {
     throw new Error(`Integration testing requires project ${DEMO_PROJECT_ID}.`);
   }
   const mpdoAcceptance = mpdoAcceptanceEnabled(env);
+  const requestLetterAcceptance = requestLetterAcceptanceEnabled(env);
+  if (mpdoAcceptance && requestLetterAcceptance) throw new Error("Integration acceptance gates cannot be combined.");
+  if (env.MENRO_REQUEST_LETTER_ACCEPTANCE !== undefined && !requestLetterAcceptance) {
+    throw new Error("MENRO_REQUEST_LETTER_ACCEPTANCE must be exactly true when supplied.");
+  }
   if (env.MENRO_MPDO_BOUNDARY_ACCEPTANCE !== undefined && !mpdoAcceptance) {
     throw new Error("MENRO_MPDO_BOUNDARY_ACCEPTANCE must be exactly true when supplied.");
   }
@@ -40,7 +50,9 @@ function validateIntegrationEnvironment(env = process.env) {
   if (!mpdoAcceptance && env.MENRO_TEST_BOUNDARY_SOURCE === "mpdo-candidate") {
     throw new Error("The MPDO candidate requires the explicit MPDO acceptance gate in integration mode.");
   }
-  const requiredFirestoreHost = mpdoAcceptance ? MPDO_FIRESTORE_HOST : FIRESTORE_HOST;
+  const requiredFirestoreHost = requestLetterAcceptance
+    ? REQUEST_LETTER_FIRESTORE_HOST
+    : mpdoAcceptance ? MPDO_FIRESTORE_HOST : FIRESTORE_HOST;
   if (env.FIRESTORE_EMULATOR_HOST !== requiredFirestoreHost || env.FIREBASE_AUTH_EMULATOR_HOST !== AUTH_HOST) {
     throw new Error("Integration testing requires the approved loopback Firestore and Auth emulator hosts.");
   }
@@ -54,7 +66,7 @@ function validateIntegrationEnvironment(env = process.env) {
       throw new Error("Storage integration testing requires the synthetic demo Storage bucket.");
     }
   }
-  return { integration: true, projectId: DEMO_PROJECT_ID, mpdoAcceptance };
+  return { integration: true, projectId: DEMO_PROJECT_ID, mpdoAcceptance, requestLetterAcceptance };
 }
 
 function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
@@ -72,6 +84,7 @@ function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
 }
 
 module.exports = {
-  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, MPDO_FIRESTORE_HOST, STORAGE_HOST, STORAGE_BUCKET, enabled,
-  mpdoAcceptanceEnabled, resolveUploadRoot, validateIntegrationEnvironment,
+  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, MPDO_FIRESTORE_HOST, REQUEST_LETTER_FIRESTORE_HOST,
+  STORAGE_HOST, STORAGE_BUCKET, enabled, mpdoAcceptanceEnabled, requestLetterAcceptanceEnabled,
+  resolveUploadRoot, validateIntegrationEnvironment,
 };

@@ -31,3 +31,18 @@ test("group planting requires a later same-day end time and positive participant
   assert.equal(validatePlantingSchedule({ proposedDate: "2026-10-11", startTime: "08:00", endTime: "", isGroup: true, expectedParticipants: 10 }, now).field, "endTime");
   assert.equal(validatePlantingSchedule({ proposedDate: "2026-10-11", startTime: "08:00", endTime: "11:00", isGroup: true, expectedParticipants: 0 }, now).field, "participants");
 });
+
+test("same-day release and planting remain valid until the planting start time", () => {
+  const beforeStart = new Date("2026-10-28T08:00:00.000Z"); // 4:00 PM Asia/Manila
+  assert.equal(validatePreferredReleaseDate("2026-10-28", "2026-10-28"), "");
+  assert.equal(validatePlantingSchedule({
+    proposedDate: "2026-10-28", startTime: "17:00", endTime: "18:00",
+    isGroup: true, expectedParticipants: 40,
+  }, beforeStart), null);
+
+  const afterStart = new Date("2026-10-28T09:01:00.000Z"); // 5:01 PM Asia/Manila
+  assert.equal(validatePlantingSchedule({
+    proposedDate: "2026-10-28", startTime: "17:00", endTime: "18:00",
+    isGroup: true, expectedParticipants: 40,
+  }, afterStart).field, "startTime");
+});

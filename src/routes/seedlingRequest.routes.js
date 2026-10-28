@@ -11,7 +11,9 @@ const {
 } = require("../middleware/role.middleware");
 
 const {
+  getSeedlingRequestCapabilities,
   submitSeedlingRequest,
+  getRequestLetter,
   getSeedlingRequests,
   getSeedlingRequest,
   getMySeedlingRequests,
@@ -29,6 +31,10 @@ const {
   returnLateReleaseProposal,
   approveLateReleaseProposal,
 } = require("../controller/seedlingRequest.controller");
+const { parseRequestLetterSubmission } = require("../middleware/requestLetterUpload.middleware");
+
+// Non-sensitive capability used to coordinate staggered frontend/backend releases.
+router.get("/capabilities", verifyToken, authorizeRoles("participant"), getSeedlingRequestCapabilities);
 
 // ========================================
 // PARTICIPANT — SUBMIT REQUEST
@@ -38,8 +44,12 @@ router.post(
   "/",
   verifyToken,
   authorizeRoles("participant"),
+  parseRequestLetterSubmission,
   submitSeedlingRequest
 );
+
+router.get("/:id/request-letter", verifyToken,
+  authorizeRoles("admin", "staff", "participant"), getRequestLetter);
 
 // ========================================
 // ADMIN / STAFF — VIEW ALL REQUESTS
@@ -98,6 +108,7 @@ router.patch(
   "/:id/resubmit",
   verifyToken,
   authorizeRoles("participant"),
+  parseRequestLetterSubmission,
   resubmitRequest
 );
 

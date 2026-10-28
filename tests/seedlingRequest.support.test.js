@@ -338,6 +338,7 @@ test("Staff return and participant resubmission preserve the same request and re
     inventoryDeducted: false,
     inventoryReserved: false,
     reviewHistory: [],
+    workflow: { requestLetter: { name: "legacy-letter.pdf", type: "application/pdf", size: 12 } },
   });
   records.seedlingInventory.set("inventory-returned", {
     species: "Narra",
@@ -409,6 +410,7 @@ test("Staff return and participant resubmission preserve the same request and re
   assert.equal(resubmitted.requestNumber, "REQ-2026-001");
   assert.equal(resubmitted.returnReason, "");
   assert.equal(resubmitted.reviewHistory.at(-1).action, "resubmitted");
+  assert.equal(records.seedlingRequests.get("request-returned").workflow.requestLetter.name, "legacy-letter.pdf");
   assert.equal(
     records.notifications.get("request_resubmitted_staff_request-returned_2_staff-notify").recipientUserId,
     "staff-notify",
@@ -564,6 +566,13 @@ test("request submission rejects a real site in a different barangay", async () 
   const next = await service.createSeedlingRequest({ ...payload, eventProposal: { ...payload.eventProposal, barangay: "Bical" } });
   assert.match(next.requestNumber, /^REQ-\d{4}-\d{3,}$/);
   assert.notEqual(next.requestNumber, created.requestNumber);
+  records.sites.get("site-2").barangay = "Zone VIII";
+  const mpdoAlias = await service.createSeedlingRequest({
+    ...payload,
+    eventProposal: { ...payload.eventProposal, barangay: "ZoneVIIIPoblacion" },
+  });
+  assert.equal(mpdoAlias.eventProposal.plantingSiteId, "site-2");
+  records.sites.get("site-2").barangay = "Bical";
   const retryPayload = {
     ...payload,
     clientSubmissionId: "4b82758d-8883-4e2e-b5dd-736e647838a4",
@@ -645,7 +654,27 @@ test("submission reports unavailable secure identification storage as a service 
       plantingLocation: "Purok 1, Bical, Bulan, Sorsogon",
       preferredReleaseDate: "2099-01-02",
       clientSubmissionId: "25ee06a9-6702-4236-9589-f22f8ce83dcb",
-      workflow: { siteMode: "proposed" },
+      workflow: {
+        sector: "Resident / Individual",
+        siteMode: "proposed",
+        addressProvince: "Sorsogon",
+        addressMunicipality: "Bulan",
+        addressBarangay: "Bical",
+        street: "Purok 1",
+        siteBarangay: "Bical",
+        areaChoice: "1 hectare",
+        siteName: "Secure Test Site",
+        specificLocation: "Purok 1",
+        latitude: "12.65",
+        longitude: "123.91",
+        niyogan: "no",
+        landType: "Residential / Private Property",
+        currentCondition: "Available for planting",
+        releaseMethod: "Pick-up",
+        caretaker: "Participant Secure",
+        carePlan: "Water and monitor the seedlings.",
+        monitoringFrequency: "Weekly",
+      },
       identification: {
         identificationType: "national_id",
         idNumber: "1234-5678-9012",

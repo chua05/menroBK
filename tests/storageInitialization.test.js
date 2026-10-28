@@ -46,6 +46,30 @@ const demo = { MENRO_INTEGRATION_TEST: "true", NODE_ENV: "test", GCLOUD_PROJECT:
   FIREBASE_PROJECT_ID: "demo-menro-phase2", FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080",
   FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9099" };
 
+test("credential-free unit initialization is synthetic and exposes no Storage client", () => {
+  initialize({ NODE_ENV: "test", MENRO_UNIT_TEST_FIREBASE: "true" }, (firebase, calls) => {
+    assert.equal(calls.apps, 1);
+    assert.equal(calls.options.projectId, "demo-menro-phase2");
+    assert.equal(calls.options.credential, undefined);
+    assert.equal(calls.dotenv, 0);
+    assert.throws(() => firebase.getStorageBucket(), /unavailable in credential-free unit-test mode/);
+    assert.equal(calls.storage, 0);
+    assert.equal(calls.operations, 0);
+  });
+});
+
+test("credential-free unit initialization rejects production mode and credential selectors", () => {
+  assert.throws(
+    () => initialize({ NODE_ENV: "production", MENRO_UNIT_TEST_FIREBASE: "true" }, () => {}),
+    /restricted to unit tests/,
+  );
+  assert.throws(
+    () => initialize({ NODE_ENV: "test", MENRO_UNIT_TEST_FIREBASE: "true",
+      FIREBASE_CLIENT_EMAIL: "must-not-be-read@example.invalid" }, () => {}),
+    /cannot use Firebase credentials/,
+  );
+});
+
 test("Auth and Firestore keep the same app/exports; Storage is lazy and absent by default", () => {
   initialize(demo, (firebase, calls, auth, db) => {
     assert.equal(firebase.auth, auth); assert.equal(firebase.db, db);

@@ -5,13 +5,24 @@ const path = require("path");
 const { validateIntegrationEnvironment } = require("./integrationEnvironment");
 const { resolveEvidenceStorageConfig } = require("./evidenceStorage");
 
-if (process.env.MENRO_GCS_DEVELOPMENT !== "true") require("dotenv").config();
+const unitTest = process.env.MENRO_UNIT_TEST_FIREBASE === "true";
+if (unitTest && process.env.NODE_ENV !== "test") {
+  throw new Error("Credential-free Firebase initialization is restricted to unit tests.");
+}
+if (unitTest && ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]
+  .some((key) => process.env[key] !== undefined)) {
+  throw new Error("Unit tests cannot use Firebase credentials or ambient Firebase configuration.");
+}
+
+if (!unitTest && process.env.MENRO_GCS_DEVELOPMENT !== "true") require("dotenv").config();
 
 let credential;
-const integration = validateIntegrationEnvironment();
-const evidenceStorage = resolveEvidenceStorageConfig();
+const integration = unitTest ? { integration: false } : validateIntegrationEnvironment();
+const evidenceStorage = unitTest ? { storageEmulator: false, bucket: null } : resolveEvidenceStorageConfig();
 
-if (integration.integration) {
+if (unitTest) {
+  console.log("[firebase] Credential-free unit-test mode enabled for demo-menro-phase2.");
+} else if (integration.integration) {
   console.log(`[firebase] Emulator integration mode enabled for ${integration.projectId}.`);
 } else if (process.env.NODE_ENV === "production") {
   const {
@@ -56,9 +67,11 @@ if (integration.integration) {
   credential = cert(serviceAccount);
 }
 
-const app = initializeApp(integration.integration
-  ? { projectId: integration.projectId, ...(evidenceStorage.storageEmulator ? { storageBucket: evidenceStorage.bucket } : {}) }
-  : { credential, ...(evidenceStorage.bucket ? { storageBucket: evidenceStorage.bucket } : {}) });
+const app = initializeApp(unitTest
+  ? { projectId: "demo-menro-phase2" }
+  : integration.integration
+    ? { projectId: integration.projectId, ...(evidenceStorage.storageEmulator ? { storageBucket: evidenceStorage.bucket } : {}) }
+    : { credential, ...(evidenceStorage.bucket ? { storageBucket: evidenceStorage.bucket } : {}) });
 
 const db = getFirestore(app);
 const auth = getAuth(app);
@@ -66,6 +79,9 @@ const auth = getAuth(app);
 // Phase 1 exposes a client handle for isolated SDK checks only. No object I/O.
 // Production cloud access stays unavailable until the private adapter is approved.
 function getStorageBucket() {
+  if (unitTest) {
+    throw new Error("Storage client access is unavailable in credential-free unit-test mode.");
+  }
   const current = resolveEvidenceStorageConfig();
   if (current.gcsDevelopment && evidenceStorage.gcsDevelopment && current.cloudRead &&
       current.bucket === evidenceStorage.bucket) {

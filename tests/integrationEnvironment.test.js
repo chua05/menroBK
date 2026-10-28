@@ -34,6 +34,15 @@ test("accepts port 8180 only for the explicit MPDO candidate acceptance gate", (
   assert.throws(() => validateIntegrationEnvironment({ ...mpdoValid(), NODE_ENV: "production" }),
     /disabled in production/);
 });
+
+test("accepts port 8181 only for explicit request-letter acceptance", () => {
+  const env = valid();
+  env.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8181";
+  env.MENRO_REQUEST_LETTER_ACCEPTANCE = "true";
+  assert.equal(validateIntegrationEnvironment(env).requestLetterAcceptance, true);
+  delete env.MENRO_REQUEST_LETTER_ACCEPTANCE;
+  assert.throws(() => validateIntegrationEnvironment(env), /approved loopback/);
+});
 test("requires an isolated temporary upload root", () => {
   const cwd = path.resolve("C:/work/menrobackend");
   assert.throws(() => resolveUploadRoot(valid(), cwd), /MENRO_UPLOAD_ROOT/);

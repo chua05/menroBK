@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test tests/*.test.js",
+    "test": "node --require ./tests/testSetup.js --test tests/*.test.js",
     "test:integration:safety": "node --test --test-isolation=none tests/integrationEnvironment.test.js",
     "integration:seed": "node tests/integration/seedEmulator.js",
     "integration:cleanup": "node tests/integration/seedEmulator.js --cleanup",
@@ -36,10 +36,14 @@
     "helmet": "^8.2.0",
     "morgan": "^1.12.1",
     "multer": "^2.4.0",
+    "pdfjs-dist": "^6.4.299",
     "sharp": "^0.35.5",
-    "uuid": "^14.0.0"
+    "uuid": "^14.0.0",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "pdf-lib": "^1.17.1"
   }
 }

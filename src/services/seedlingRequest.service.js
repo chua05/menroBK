@@ -62,6 +62,12 @@ const {
 const COLLECTION =
   "seedlingRequests";
 
+const deriveSeedlingRequestDocumentId = (participantId, clientSubmissionId) =>
+  clientSubmissionId
+    ? crypto.createHash("sha256").update(`${cleanString(participantId)}:${cleanString(clientSubmissionId)}`)
+      .digest("hex").slice(0, 40)
+    : "";
+
 // Legacy internal callers predate optimistic versions. HTTP controllers require
 // a version; retaining this compatibility here avoids breaking server-side jobs
 // and historical tests that call the service directly.
@@ -82,7 +88,7 @@ const REVIEW_COUNTER_DOCUMENT = "seedlingRequestReviews";
 const REQUEST_NUMBER_PATTERN = /^REQ-(\d{4})-(\d{3,})$/;
 const REVIEW_ID_PATTERN = /^REV-(\d{4})-(\d{3,})$/;
 
-const stripSensitiveIdentification = (request) => {
+const stripSensitiveIdentification = (request, { includePrivateDocument = false } = {}) => {
   const sanitized = { ...request };
   for (const field of [
     "identification",
@@ -94,6 +100,23 @@ const stripSensitiveIdentification = (request) => {
     "iv",
     "authTag",
   ]) delete sanitized[field];
+  if (!includePrivateDocument && sanitized.requestLetter?.privateDocument) {
+    sanitized.requestLetter = require("./requestLetterStorage.service").publicMetadata(sanitized.requestLetter.privateDocument);
+  } else if (sanitized.workflow?.requestLetter) {
+    sanitized.requestLetter = { storageStatus: "legacy_metadata_only",
+      originalName: cleanString(sanitized.workflow.requestLetter.name) || "Request letter" };
+  }
+  if (!includePrivateDocument && Array.isArray(sanitized.requestLetterHistory)) {
+    sanitized.requestLetterHistory = sanitized.requestLetterHistory.map(entry => entry?.privateDocument ? ({
+      ...require("./requestLetterStorage.service").publicMetadata(entry.privateDocument),
+      supersededAt: entry.supersededAt || null,
+    }) : ({
+      storageStatus: "legacy_metadata_only",
+      originalName: cleanString(entry?.legacyMetadata?.name) || "Request letter",
+      supersededAt: entry?.supersededAt || null,
+    }));
+  }
+  if (sanitized.workflow) sanitized.workflow = { ...sanitized.workflow, requestLetter: undefined };
   return sanitized;
 };
 
@@ -351,10 +374,13 @@ const cleanString = (
 
 const normalizeBarangay = (
   value
-) =>
-  cleanString(
-    value
-  ).toLowerCase();
+) => {
+  const cleaned = cleanString(value).toLowerCase().replace(/\s+/g, " ");
+  const match = /^zone\s*(1|2|3|4|5|6|7|8|i|ii|iii|iv|v|vi|vii|viii)(?:\s*poblacion)?$/.exec(cleaned);
+  if (!match) return cleaned;
+  const zones = { "1": "i", "2": "ii", "3": "iii", "4": "iv", "5": "v", "6": "vi", "7": "vii", "8": "viii" };
+  return `zone ${zones[match[1]] || match[1]}`;
+};
 
 // ========================================
 // NORMALIZE REQUEST ITEMS
@@ -641,12 +667,7 @@ const createSeedlingRequest =
     }
 
     const clientSubmissionId = cleanString(data.clientSubmissionId);
-    const documentId = clientSubmissionId
-      ? crypto.createHash("sha256")
-        .update(`${cleanString(data.participantId)}:${clientSubmissionId}`)
-        .digest("hex")
-        .slice(0, 40)
-      : "";
+    const documentId = deriveSeedlingRequestDocumentId(data.participantId, clientSubmissionId);
     const docRef = documentId
       ? db.collection(COLLECTION).doc(documentId)
       : db.collection(COLLECTION).doc();
@@ -675,6 +696,11 @@ const createSeedlingRequest =
       }
       const counterDoc = await transaction.get(counterRef);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+      if (data.requestLetter?.privateDocument) {
+        await require("./requestLetterStorage.service").linkRequestLetterInTransaction(
+          transaction, data.requestLetter.privateDocument, docRef.id, data.participantId,
+        );
+      }
       const currentValue = Math.max(requestSequenceFloor, counterDoc.exists
         ? Number(counterDoc.data()?.lastNumber || 0)
         : 0);
@@ -781,7 +807,7 @@ const getAllSeedlingRequests =
 // ========================================
 
 const getSeedlingRequestById =
-  async (id, { includeIdentification = false } = {}) => {
+  async (id, { includeIdentification = false, includeRequestLetter = false } = {}) => {
     const [doc, allRequestsSnapshot] = await Promise.all([
       db.collection(COLLECTION).doc(id).get(),
       db.collection(COLLECTION).get(),
@@ -810,7 +836,7 @@ const getSeedlingRequestById =
       request,
       distribution?.exists ? { id: distribution.id, ...distribution.data() } : null
     );
-    if (!includeIdentification) return stripSensitiveIdentification(result);
+    if (!includeIdentification) return stripSensitiveIdentification(result, { includePrivateDocument: includeRequestLetter });
     const identifications = await getMaskedIdentifications([id]);
     return withAdminIdentification(result, identifications.get(id));
   };
@@ -1208,6 +1234,18 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
     );
     const nextVersion = requestVersion(request) + 1;
     const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    const replacementDocument = data.requestLetter?.privateDocument;
+    const legacyMetadata = request.workflow?.requestLetter && typeof request.workflow.requestLetter === "object"
+      ? request.workflow.requestLetter
+      : null;
+    const nextWorkflow = data.workflow && typeof data.workflow === "object" ? { ...data.workflow } : {};
+    if (!replacementDocument && legacyMetadata) nextWorkflow.requestLetter = legacyMetadata;
+    if (replacementDocument) nextWorkflow.requestLetter = null;
+    if (replacementDocument) {
+      await require("./requestLetterStorage.service").linkRequestLetterInTransaction(
+        transaction, replacementDocument, id, participantId,
+      );
+    }
 
     transaction.update(requestRef, {
       items: canonicalItems,
@@ -1215,7 +1253,17 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
       purpose: cleanString(data.purpose),
       plantingLocation: cleanString(data.plantingLocation),
       preferredReleaseDate: data.preferredReleaseDate,
-      workflow: data.workflow && typeof data.workflow === "object" ? data.workflow : {},
+      workflow: nextWorkflow,
+      ...(replacementDocument ? {
+        requestLetterHistory: [
+          ...(Array.isArray(request.requestLetterHistory) ? request.requestLetterHistory : []),
+          ...(request.requestLetter?.privateDocument ? [{ ...request.requestLetter, supersededAt: now }] : []),
+          ...(!request.requestLetter?.privateDocument && legacyMetadata
+            ? [{ legacyMetadata, supersededAt: now }]
+            : []),
+        ],
+        requestLetter: data.requestLetter,
+      } : {}),
       eventProposal: {
         eventName: cleanString(proposal.eventName),
         barangay: cleanString(proposal.barangay),
@@ -2348,6 +2396,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
 };
 
 module.exports = {
+  deriveSeedlingRequestDocumentId,
   createSeedlingRequest,
   getAllSeedlingRequests,
   getSeedlingRequestById,
