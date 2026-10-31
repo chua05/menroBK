@@ -54,10 +54,37 @@ const requireExpectedVersion = (body = {}) => {
 };
 
 const isGroupWorkflow = (workflow = {}) => {
+  return getEffectiveRequestType(workflow) === "organization";
+};
+
+const INDIVIDUAL_PURPOSES = new Set([
+  "Backyard / Home Planting",
+  "Fruit-Bearing Tree Planting",
+  "Farm / Agricultural Planting",
+  "Land Rehabilitation / Reforestation",
+  "Replacement Planting",
+  "Environmental Conservation",
+  "Other (Please Specify)",
+]);
+const ORGANIZATION_PURPOSES = new Set([
+  "Tree Planting Activity",
+  "Reforestation / Rehabilitation",
+  "School Activity",
+  "Barangay Activity",
+  "Community Activity",
+  "Replacement Planting",
+  "Environmental Program",
+  "Personal Planting",
+  "Other",
+]);
+
+const getEffectiveRequestType = (workflow = {}) => {
   const sector = cleanString(workflow.sector);
-  return ["Barangay Official", "School / Student", "Private Sector / Business",
+  return (["Barangay Official", "School / Student", "Private Sector / Business",
     "Civic Organization / NGO", "Government Agency"].includes(sector) ||
-    (sector === "Other (please specify)" && workflow.requestingAs === "group");
+    (sector === "Other (please specify)" && workflow.requestingAs === "group"))
+    ? "organization"
+    : "individual";
 };
 
 const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
@@ -69,7 +96,7 @@ const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
     expectedParticipants: eventProposal.expectedParticipants,
   });
 
-const validateWorkflow = (workflow = {}) => {
+const validateWorkflow = (workflow = {}, purpose = "") => {
   const errors = {};
   const requireField = (field, message) => {
     if (!cleanString(workflow[field])) errors[field] = message;
@@ -80,6 +107,29 @@ const validateWorkflow = (workflow = {}) => {
   if (workflow.sector === "Other (please specify)") {
     requireField("sectorOther", "Please specify the sector.");
     if (!["individual", "group"].includes(workflow.requestingAs)) errors.requestingAs = "Select how you are requesting.";
+  }
+  const effectiveRequestType = getEffectiveRequestType(workflow);
+  if (cleanString(workflow.effectiveRequestType) &&
+      cleanString(workflow.effectiveRequestType) !== effectiveRequestType) {
+    errors.effectiveRequestType = "The request type does not match the selected sector.";
+  }
+  // Old stored requests remain readable and can retain their legacy fields. New
+  // wizard submissions send effectiveRequestType and therefore use this contract.
+  if (cleanString(workflow.effectiveRequestType)) {
+    const selectedPurpose = cleanString(workflow.purpose);
+    const allowedPurposes = effectiveRequestType === "organization"
+      ? ORGANIZATION_PURPOSES
+      : INDIVIDUAL_PURPOSES;
+    if (!allowedPurposes.has(selectedPurpose)) {
+      errors.purpose = "Select a purpose for the selected request type.";
+    } else if (["Other", "Other (Please Specify)"].includes(selectedPurpose)) {
+      requireField("purposeOther", "Please specify the purpose.");
+      if (cleanString(purpose) !== cleanString(workflow.purposeOther)) {
+        errors.purpose = "The submitted purpose must match the specified purpose.";
+      }
+    } else if (cleanString(purpose) !== selectedPurpose) {
+      errors.purpose = "The submitted purpose does not match the selected purpose.";
+    }
   }
   ["addressProvince", "addressMunicipality", "addressBarangay", "street", "siteBarangay",
     "areaChoice", "releaseMethod", "caretaker", "carePlan", "monitoringFrequency"]
@@ -102,7 +152,7 @@ const validateWorkflow = (workflow = {}) => {
     error.fieldErrors = errors;
     throw error;
   }
-  return workflow;
+  return effectiveRequestType;
 };
 
 // ========================================
@@ -232,6 +282,7 @@ const validateResubmissionPayload = (body = {}) => {
   }
 
   const validatedItems = validateRequestItems(items);
+  validateWorkflow(workflow, purpose);
   const proposedStartTime =
     eventProposal.proposedStartTime ?? eventProposal.startTime;
   const proposedEndTime =
@@ -280,7 +331,9 @@ const validateResubmissionPayload = (body = {}) => {
     expectedVersion: requireExpectedVersion(body),
     workflow: workflow && typeof workflow === "object" ? workflow : {},
     eventProposal: {
-      eventName: cleanString(eventProposal.eventName),
+      eventName: groupRequest
+        ? cleanString(eventProposal.eventName)
+        : "Individual planting schedule",
       barangay: cleanString(eventProposal.barangay),
       plantingSiteId: cleanString(eventProposal.plantingSiteId),
       proposedDate: eventProposal.proposedDate,
@@ -347,8 +400,8 @@ const submitSeedlingRequest = async (
     }
 
     const validatedIdentification = validateIdentificationInput(identification);
-    validateWorkflow(workflow);
-    const groupRequest = isGroupWorkflow(workflow);
+    const effectiveRequestType = validateWorkflow(workflow, purpose);
+    const groupRequest = effectiveRequestType === "organization";
     const requestLetterStorage = require("../config/requestLetterStorage")
       .resolveRequestLetterStorageConfig();
     let privateRequestLetter = null;
@@ -600,9 +653,9 @@ const submitSeedlingRequest = async (
 
         eventProposal: {
           eventName:
-            cleanString(
-              eventName
-            ),
+            groupRequest
+              ? cleanString(eventName)
+              : "Individual planting schedule",
 
           barangay:
             cleanString(
@@ -1222,4 +1275,9 @@ module.exports = {
   submitLateReleaseProposal,
   returnLateReleaseProposal,
   approveLateReleaseProposal,
+  _test: {
+    getEffectiveRequestType,
+    validateWorkflow,
+    isGroupWorkflow,
+  },
 };

@@ -148,6 +148,45 @@ test("profile reads the authenticated UID and real Firestore name", async () => 
   assert.equal(profileRoute.route.stack.length, 3);
 });
 
+test("sector workflow enforces its effective request type and purpose contract", () => {
+  const validWorkflow = {
+    sector: "Resident / Individual",
+    effectiveRequestType: "individual",
+    purpose: "Farm / Agricultural Planting",
+    addressProvince: "Sorsogon", addressMunicipality: "Bulan", addressBarangay: "Zone VIII",
+    street: "Purok 1", siteBarangay: "Zone VIII", areaChoice: "1 hectare",
+    releaseMethod: "Pick-up", caretaker: "Requester", carePlan: "Water weekly",
+    monitoringFrequency: "Weekly", siteMode: "existing", existingSiteId: "site-1",
+  };
+  assert.equal(seedlingController._test.getEffectiveRequestType(validWorkflow), "individual");
+  assert.doesNotThrow(() => seedlingController._test.validateWorkflow(
+    validWorkflow,
+    "Farm / Agricultural Planting",
+  ));
+  assert.throws(() => seedlingController._test.validateWorkflow({
+    ...validWorkflow,
+    purpose: "School Activity",
+  }, "School Activity"), (error) => Boolean(error.fieldErrors?.purpose));
+  assert.throws(() => seedlingController._test.validateWorkflow({
+    ...validWorkflow,
+    effectiveRequestType: "organization",
+  }, "Farm / Agricultural Planting"), (error) => Boolean(error.fieldErrors?.effectiveRequestType));
+  const groupWorkflow = {
+    ...validWorkflow,
+    sector: "Other (please specify)", sectorOther: "Association", requestingAs: "group",
+    effectiveRequestType: "organization", purpose: "Other", purposeOther: "Watershed cleanup planting",
+    eventName: "Watershed cleanup planting",
+  };
+  assert.equal(seedlingController._test.getEffectiveRequestType(groupWorkflow), "organization");
+  assert.doesNotThrow(() => seedlingController._test.validateWorkflow(
+    groupWorkflow,
+    "Watershed cleanup planting",
+  ));
+  assert.throws(() => seedlingController._test.validateWorkflow({
+    ...groupWorkflow, purposeOther: "",
+  }, ""), (error) => Boolean(error.fieldErrors?.purposeOther));
+});
+
 test("Staff review advances Pending once and retains server-owned inventory details", async () => {
   records.seedlingRequests.set("request-1", { status: "Pending", participantId: "participant-1", preferredReleaseDate: validPreferredReleaseDate, eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" } });
   records.seedlingInventory.set("inventory-1", {
