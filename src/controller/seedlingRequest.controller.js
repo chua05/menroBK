@@ -78,11 +78,16 @@ const ORGANIZATION_PURPOSES = new Set([
   "Other",
 ]);
 
+const REQUEST_TYPE_SELECTABLE_SECTORS = new Set([
+  "School / Student",
+  "Other (please specify)",
+]);
+
 const getEffectiveRequestType = (workflow = {}) => {
   const sector = cleanString(workflow.sector);
-  return (["Barangay Official", "School / Student", "Private Sector / Business",
+  return (["Barangay Official", "Private Sector / Business",
     "Civic Organization / NGO", "Government Agency"].includes(sector) ||
-    (sector === "Other (please specify)" && workflow.requestingAs === "group"))
+    (REQUEST_TYPE_SELECTABLE_SECTORS.has(sector) && workflow.requestingAs === "group"))
     ? "organization"
     : "individual";
 };
@@ -104,8 +109,8 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
   const allowedSectors = new Set(["Resident / Individual", "Barangay Official", "School / Student",
     "Private Sector / Business", "Civic Organization / NGO", "Government Agency", "Other (please specify)"]);
   if (!allowedSectors.has(cleanString(workflow.sector))) errors.sector = "Please select a valid sector.";
-  if (workflow.sector === "Other (please specify)") {
-    requireField("sectorOther", "Please specify the sector.");
+  if (REQUEST_TYPE_SELECTABLE_SECTORS.has(workflow.sector)) {
+    if (workflow.sector === "Other (please specify)") requireField("sectorOther", "Please specify the sector.");
     if (!["individual", "group"].includes(workflow.requestingAs)) errors.requestingAs = "Select how you are requesting.";
   }
   const effectiveRequestType = getEffectiveRequestType(workflow);

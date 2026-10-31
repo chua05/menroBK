@@ -171,6 +171,25 @@ test("sector workflow enforces its effective request type and purpose contract",
     ...validWorkflow,
     effectiveRequestType: "organization",
   }, "Farm / Agricultural Planting"), (error) => Boolean(error.fieldErrors?.effectiveRequestType));
+  const schoolIndividualWorkflow = {
+    ...validWorkflow,
+    sector: "School / Student", requestingAs: "individual",
+    effectiveRequestType: "individual",
+  };
+  assert.doesNotThrow(() => seedlingController._test.validateWorkflow(
+    schoolIndividualWorkflow, "Farm / Agricultural Planting",
+  ));
+  const schoolOrganizationWorkflow = {
+    ...schoolIndividualWorkflow,
+    requestingAs: "group", effectiveRequestType: "organization",
+    purpose: "School Activity", eventName: "School planting event",
+  };
+  assert.doesNotThrow(() => seedlingController._test.validateWorkflow(
+    schoolOrganizationWorkflow, "School Activity",
+  ));
+  assert.throws(() => seedlingController._test.validateWorkflow({
+    ...schoolIndividualWorkflow, requestingAs: "", effectiveRequestType: "individual",
+  }, "Farm / Agricultural Planting"), (error) => Boolean(error.fieldErrors?.requestingAs));
   const groupWorkflow = {
     ...validWorkflow,
     sector: "Other (please specify)", sectorOther: "Association", requestingAs: "group",
