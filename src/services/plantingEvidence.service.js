@@ -6,6 +6,8 @@ const { calculateDistanceMeters, isPointInPolygon } = require("../utils/geo.util
 const { savePlantingPhoto, deletePlantingPhoto } = require("./fileStorage.service");
 const { isPointWithinMunicipality } = require("../config/municipality");
 
+const SITE_GPS_TOLERANCE_METERS = 50;
+
 const contributions = db.collection("plantingContributions");
 const reports = db.collection("plantingReports");
 const events = db.collection("events");
@@ -113,7 +115,7 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
       const hasPolygon = !hasRadius && Array.isArray(site.polygon) && site.polygon.length >= 3;
       const siteValid = hasRadius
         ? siteDistance <= radius
-        : hasPolygon ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon) : siteDistance <= 20;
+        : hasPolygon ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon) : siteDistance <= SITE_GPS_TOLERANCE_METERS;
       const flags = [...verification.suspiciousFlags];
       if (!siteValid) flags.push("OUTSIDE_REGISTERED_SITE");
       const privateEvidence = operation ? await require("./evidenceWorkflow.service").workflow().upload(

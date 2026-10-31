@@ -66,7 +66,7 @@ const contributionCollection = db.collection("plantingContributions");
 const evidenceHashCollection = db.collection("plantingEvidenceHashes");
 
 const SITE_GPS_TOLERANCE_METERS =
-  20;
+  50;
 
 const MAX_EVIDENCE_PHOTOS =
   10;

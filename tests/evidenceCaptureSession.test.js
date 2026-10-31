@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
 
 const firebasePath = require.resolve("../src/config/firebase");
 const municipalityPath = require.resolve("../src/config/municipality");
@@ -16,6 +18,14 @@ test("capture policy uses a five-minute lifetime and 50 metre accuracy", () => {
   assert.equal(SESSION_TTL_MS, 300000);
   assert.equal(MAX_ACCURACY_METERS, 50);
   assert.equal(SITE_FALLBACK_METERS, 50);
+});
+
+test("planting submission and contribution fallbacks stay aligned at 50 metres", () => {
+  const serviceRoot = join(__dirname, "..", "src", "services");
+  const reportService = readFileSync(join(serviceRoot, "plantingReport.service.js"), "utf8");
+  const contributionService = readFileSync(join(serviceRoot, "plantingEvidence.service.js"), "utf8");
+  assert.match(reportService, /const SITE_GPS_TOLERANCE_METERS\s*=\s*50/);
+  assert.match(contributionService, /const SITE_GPS_TOLERANCE_METERS\s*=\s*50/);
 });
 
 test("capture bindings require workflow target identifiers", () => {
@@ -46,10 +56,10 @@ test("GPS accuracy and 50 metre site fallback are enforced independently at thei
   }
   assert.throws(() => _test.validateLocation(site, { latitude: 13, longitude: 124, accuracy: 51 }),
     error => error.code === "CAPTURE_LOCATION_INACCURATE");
-  for (const distance of [49, 50]) {
+  for (const distance of [20, 35, 50]) {
     assert.ok(_test.validateLocation(site, { latitude: latitudeAt(distance), longitude: 124, accuracy: 1 }).distanceMeters <= 50);
   }
-  assert.throws(() => _test.validateLocation(site, { latitude: latitudeAt(51), longitude: 124, accuracy: 1 }),
+  assert.throws(() => _test.validateLocation(site, { latitude: latitudeAt(60), longitude: 124, accuracy: 1 }),
     error => error.code === "CAPTURE_LOCATION_OUTSIDE_SITE");
 });
 

@@ -14,6 +14,8 @@ const {
 const COLLECTION = "evidenceCaptureSessions";
 const SESSION_TTL_MS = 5 * 60 * 1000;
 const MAX_ACCURACY_METERS = 50;
+// Keep camera capture-session validation aligned with Planting Report submission.
+// GPS accuracy has its own, separate 50 m policy.
 const SITE_FALLBACK_METERS = 50;
 const WORKFLOWS = new Set([
   "planting-report",
