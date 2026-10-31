@@ -170,7 +170,8 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     const reportId = `event_${eventId}`;
     table("plantingReports").set(reportId, {
       reportType: "parent", reportNumber: "RPT-2026-100", requestId: `request-${eventId}`,
-      eventId, quantityReleased: 150, quantityPlanted: 150, activeSubmittedQuantity: 150,
+      eventId, siteId: `site-${eventId}`, distributionId: `distribution-${eventId}`,
+      quantityReleased: 150, quantityPlanted: 150, activeSubmittedQuantity: 150,
       acceptedQuantity: 100, pendingReviewQuantity: 50, rejectedQuantity: 0,
       remainingAvailableQuantity: 0, reportingProgress: "Fully Reported — Awaiting Review",
       verificationStatus: "Fully Reported — Awaiting Review", createdAt: new Date(),
@@ -196,6 +197,7 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
   }
 
   test("accepting a contribution completes progress without changing verification", async () => {
+    process.env.VERIFIED_PLANTING_COHORT_ENABLED = "true";
     seedContributionDecision("submission-accept", "event-accept");
     const report = await service.approvePlantingReport("submission-accept", "staff-1", "Reviewed", "Staff Name");
     const submission = table("plantingContributions").get("submission-accept");
@@ -213,6 +215,13 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(notification.recipientUserId, "participant-1");
     assert.equal(notification.relatedRecordId, "event_event-accept");
     assert.equal(notification.relatedSubrecordId, "submission-accept");
+    const cohorts = [...table("verifiedPlantingCohorts").values()];
+    assert.equal(cohorts.length, 1);
+    assert.equal(cohorts[0].source.plantingReportId, "event_event-accept");
+    assert.equal(cohorts[0].source.siteId, "site-event-accept");
+    assert.equal(cohorts[0].source.distributionId, "distribution-event-accept");
+    assert.equal(cohorts[0].verifiedPlantedQuantity, 150);
+    delete process.env.VERIFIED_PLANTING_COHORT_ENABLED;
   });
 
   test("multiple contributors to one report receive distinct idempotent notifications", async () => {

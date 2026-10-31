@@ -6,6 +6,7 @@ const {
 } = require("./notification.service");
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
+const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
 
 const {
   createVerificationLogInTransaction,
@@ -2023,6 +2024,16 @@ const approvePlantingReport =
           updatedAt: now,
           ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
         });
+        await ensureCohortForAuthoritativeReportInTransaction(transaction, {
+          reportId: parentId,
+          report: {
+            ...parent,
+            acceptedQuantity: accepted,
+            reportingProgress,
+            verificationStatus: reportingProgress,
+          },
+          now,
+        });
         if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
           notificationId: `early_monitoring_scheduled_${parentId}`,
           recipientUserId: parent.participantId,
@@ -2121,6 +2132,11 @@ const approvePlantingReport =
             ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
           }
         );
+        await ensureCohortForAuthoritativeReportInTransaction(transaction, {
+          reportId: id,
+          report: { ...currentReport, verificationStatus: "Approved" },
+          now,
+        });
 
         createVerificationLogInTransaction(
           transaction,
