@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 const { Timestamp } = require("firebase-admin/firestore");
 const { db } = require("../config/firebase");
+const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
 const { isPointWithinMunicipality } = require("../config/municipality");
 const {
   calculateDistanceMeters,
@@ -23,6 +24,7 @@ const WORKFLOWS = new Set([
   "monitoring-official",
   "monitoring-resubmit",
   "cohort-baseline",
+  "sample-monitoring",
 ]);
 
 class CaptureSessionError extends Error {
@@ -61,6 +63,11 @@ function parseBinding(workflow, input = {}) {
     if (!binding.cohortId || !binding.siteId || !binding.sampleId || !Number.isSafeInteger(binding.samplingPlanVersion) || binding.samplingPlanVersion < 1) {
       throw problem("CAPTURE_SESSION_INVALID", 400, "Cohort, approved sampling-plan version, and permanent sample ID are required for baseline capture.");
     }
+  } else if (workflow === "sample-monitoring") {
+    binding.cohortId = cleanId(input.cohortId); binding.siteId = cleanId(input.siteId);
+    binding.visitId = cleanId(input.visitId); binding.sampleId = cleanId(input.sampleId);
+    binding.samplingPlanVersion = Number(input.samplingPlanVersion); binding.baselineVersion = Number(input.baselineVersion); binding.visitVersion = Number(input.visitVersion); binding.assessmentRevision = Number(input.assessmentRevision);
+    if (!binding.cohortId || !binding.siteId || !binding.visitId || !binding.sampleId || !Number.isSafeInteger(binding.samplingPlanVersion) || !Number.isSafeInteger(binding.baselineVersion) || !Number.isSafeInteger(binding.visitVersion) || !Number.isSafeInteger(binding.assessmentRevision)) throw problem("CAPTURE_SESSION_INVALID", 400, "Cohort, site, visit, sample, plan, baseline, visit, and assessment versions are required.");
   } else {
     binding.plantingReportId = cleanId(input.plantingReportId);
     binding.siteId = cleanId(input.siteId);
@@ -85,8 +92,9 @@ async function loadBoundResources(actorId, binding) {
   if (binding.workflow === "planting-report") {
     reads.push(db.collection("events").doc(binding.eventId).get());
     reads.push(db.collection("distributions").doc(binding.distributionId).get());
-  } else if (binding.workflow === "cohort-baseline") {
+  } else if (binding.workflow === "cohort-baseline" || binding.workflow === "sample-monitoring") {
     reads.push(db.collection("verifiedPlantingCohorts").doc(binding.cohortId).get());
+    if (binding.workflow === "sample-monitoring") reads.push(db.collection("sampleMonitoringVisits").doc(binding.visitId).get());
   } else {
     reads.push(db.collection("plantingReports").doc(binding.plantingReportId).get());
   }
@@ -115,6 +123,9 @@ async function loadBoundResources(actorId, binding) {
         !plan.selectedSamples?.some(sample => String(sample.permanentId) === binding.sampleId)) {
       throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The baseline capture target is not available for this approved cohort plan.");
     }
+  } else if (binding.workflow === "sample-monitoring") {
+    const cohort = docs[1].data(), visit = docs[2]?.data();
+    if (!docs[1].exists || !docs[2]?.exists || visit.cohortId !== binding.cohortId || visit.siteId !== binding.siteId || visit.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(visit.status) || Number(visit.version) !== binding.visitVersion || Number(cohort?.samplingPlan?.version) !== binding.samplingPlanVersion || Number(cohort?.baselineVersion || 0) !== binding.baselineVersion || cohort?.samplingPlan?.status !== "APPROVED" || cohort?.baseline?.approvalStatus !== "APPROVED" || !cohort.baseline.sampleUnits?.some(unit => unit.permanentId === binding.sampleId)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The permanent sample monitoring capture target is unavailable.");
   } else {
     if (!docs[1].exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Planting report was not found.");
     const report = docs[1].data();
@@ -128,7 +139,8 @@ async function loadBoundResources(actorId, binding) {
 
 async function createCaptureSession({ actorId, actorRole = "participant", workflow, ...input }) {
   if (!cleanId(actorId) || !["participant", "staff"].includes(actorRole)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
-  if (workflow === "cohort-baseline" && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture baseline evidence.");
+  if (workflow === "sample-monitoring" && !resolveVerifiedPlantingCohortConfig().enabled) throw problem("COHORT_WORKFLOW_DISABLED", 409, "Verified planting cohort workflow is disabled.");
+  if (["cohort-baseline", "sample-monitoring"].includes(workflow) && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture cohort evidence.");
   const binding = parseBinding(workflow, input);
   await loadBoundResources(actorId, binding);
   const sessionId = crypto.randomUUID();
