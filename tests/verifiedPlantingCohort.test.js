@@ -69,6 +69,13 @@ test("creates exactly one additive cohort for an authoritative completed parent 
   assert.equal(cohort.samplingWorkflowEnabled, false);
 });
 
+test("baseline evidence uses a deterministic private-storage-safe record identifier", () => {
+  const first = service._test.baselineEvidenceRecordId("VPC-example", "TREE-001");
+  assert.match(first, /^[A-Za-z0-9_-]{8,128}$/);
+  assert.equal(first, service._test.baselineEvidenceRecordId("VPC-example", "TREE-001"));
+  assert.notEqual(first, service._test.baselineEvidenceRecordId("VPC-example", "TREE-002"));
+});
+
 test("does not create cohorts while the feature gate is disabled", async () => {
   reset();
   process.env.VERIFIED_PLANTING_COHORT_ENABLED = "false";

@@ -5,6 +5,7 @@ const DEMO_PROJECT_ID = "demo-menro-phase2";
 const FIRESTORE_HOST = "127.0.0.1:8080";
 const MPDO_FIRESTORE_HOST = "127.0.0.1:8180";
 const REQUEST_LETTER_FIRESTORE_HOST = "127.0.0.1:8181";
+const BASELINE_EVIDENCE_FIRESTORE_HOST = "127.0.0.1:8181";
 const AUTH_HOST = "127.0.0.1:9099";
 const STORAGE_HOST = "127.0.0.1:9199";
 const STORAGE_BUCKET = "demo-menro-phase2.firebasestorage.app";
@@ -19,6 +20,10 @@ function mpdoAcceptanceEnabled(env = process.env) {
 
 function requestLetterAcceptanceEnabled(env = process.env) {
   return String(env.MENRO_REQUEST_LETTER_ACCEPTANCE || "").toLowerCase() === "true";
+}
+
+function baselineEvidenceAcceptanceEnabled(env = process.env) {
+  return String(env.MENRO_BASELINE_EVIDENCE_ACCEPTANCE || "").toLowerCase() === "true";
 }
 
 function validateIntegrationEnvironment(env = process.env) {
@@ -37,12 +42,18 @@ function validateIntegrationEnvironment(env = process.env) {
   }
   const mpdoAcceptance = mpdoAcceptanceEnabled(env);
   const requestLetterAcceptance = requestLetterAcceptanceEnabled(env);
-  if (mpdoAcceptance && requestLetterAcceptance) throw new Error("Integration acceptance gates cannot be combined.");
+  const baselineEvidenceAcceptance = baselineEvidenceAcceptanceEnabled(env);
+  if ([mpdoAcceptance, requestLetterAcceptance, baselineEvidenceAcceptance].filter(Boolean).length > 1) {
+    throw new Error("Integration acceptance gates cannot be combined.");
+  }
   if (env.MENRO_REQUEST_LETTER_ACCEPTANCE !== undefined && !requestLetterAcceptance) {
     throw new Error("MENRO_REQUEST_LETTER_ACCEPTANCE must be exactly true when supplied.");
   }
   if (env.MENRO_MPDO_BOUNDARY_ACCEPTANCE !== undefined && !mpdoAcceptance) {
     throw new Error("MENRO_MPDO_BOUNDARY_ACCEPTANCE must be exactly true when supplied.");
+  }
+  if (env.MENRO_BASELINE_EVIDENCE_ACCEPTANCE !== undefined && !baselineEvidenceAcceptance) {
+    throw new Error("MENRO_BASELINE_EVIDENCE_ACCEPTANCE must be exactly true when supplied.");
   }
   if (mpdoAcceptance && env.MENRO_TEST_BOUNDARY_SOURCE !== "mpdo-candidate") {
     throw new Error("MPDO boundary acceptance requires the inactive MPDO candidate source.");
@@ -50,7 +61,7 @@ function validateIntegrationEnvironment(env = process.env) {
   if (!mpdoAcceptance && env.MENRO_TEST_BOUNDARY_SOURCE === "mpdo-candidate") {
     throw new Error("The MPDO candidate requires the explicit MPDO acceptance gate in integration mode.");
   }
-  const requiredFirestoreHost = requestLetterAcceptance
+  const requiredFirestoreHost = baselineEvidenceAcceptance ? BASELINE_EVIDENCE_FIRESTORE_HOST : requestLetterAcceptance
     ? REQUEST_LETTER_FIRESTORE_HOST
     : mpdoAcceptance ? MPDO_FIRESTORE_HOST : FIRESTORE_HOST;
   if (env.FIRESTORE_EMULATOR_HOST !== requiredFirestoreHost || env.FIREBASE_AUTH_EMULATOR_HOST !== AUTH_HOST) {
@@ -66,7 +77,7 @@ function validateIntegrationEnvironment(env = process.env) {
       throw new Error("Storage integration testing requires the synthetic demo Storage bucket.");
     }
   }
-  return { integration: true, projectId: DEMO_PROJECT_ID, mpdoAcceptance, requestLetterAcceptance };
+  return { integration: true, projectId: DEMO_PROJECT_ID, mpdoAcceptance, requestLetterAcceptance, baselineEvidenceAcceptance };
 }
 
 function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
@@ -84,7 +95,7 @@ function resolveUploadRoot(env = process.env, cwd = process.cwd()) {
 }
 
 module.exports = {
-  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, MPDO_FIRESTORE_HOST, REQUEST_LETTER_FIRESTORE_HOST,
-  STORAGE_HOST, STORAGE_BUCKET, enabled, mpdoAcceptanceEnabled, requestLetterAcceptanceEnabled,
+  AUTH_HOST, DEMO_PROJECT_ID, FIRESTORE_HOST, MPDO_FIRESTORE_HOST, REQUEST_LETTER_FIRESTORE_HOST, BASELINE_EVIDENCE_FIRESTORE_HOST,
+  STORAGE_HOST, STORAGE_BUCKET, enabled, mpdoAcceptanceEnabled, requestLetterAcceptanceEnabled, baselineEvidenceAcceptanceEnabled,
   resolveUploadRoot, validateIntegrationEnvironment,
 };

@@ -1,5 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
+const crypto = require("node:crypto");
 const { UPLOAD_ROOT } = require("../config/uploadRoot");
 const { getPlantingReportById } = require("./plantingReport.service");
 const { db } = require("../config/firebase");
@@ -29,6 +30,10 @@ function cloudEvidence(reference, recordId, evidenceType) {
   cloudRetrieval ||= require("./firebaseEvidenceRetrieval.service").createFirebaseEvidenceRetrieval();
   const token = cloudRetrieval.serverResolvedEvidence({ reference, recordId, evidenceType });
   return { provider: "firebase", streamTo: (response, options) => cloudRetrieval.streamTo(token, response, options) };
+}
+
+function baselineEvidenceRecordId(cohortId, sampleId) {
+  return `VPCB-${crypto.createHash("sha256").update(`${cohortId}\u0000${sampleId}`).digest("hex").slice(0, 48)}`;
 }
 
 function evidenceError(code, message) {
@@ -203,7 +208,7 @@ async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, use
   const sample = (snapshot.data().baseline?.sampleUnits || []).find((entry) => entry.permanentId === sampleId);
   const reference = sample?.photoReferences?.[parseIndex(photoIndex)];
   if (!reference?.privateEvidence) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
-  return cloudEvidence(reference.privateEvidence, `${cohortId}:${sampleId}`, "cohort-baseline");
+  return cloudEvidence(reference.privateEvidence, baselineEvidenceRecordId(cohortId, sampleId), "cohort-baseline");
 }
 
 module.exports = {

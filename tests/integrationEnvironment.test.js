@@ -43,6 +43,14 @@ test("accepts port 8181 only for explicit request-letter acceptance", () => {
   delete env.MENRO_REQUEST_LETTER_ACCEPTANCE;
   assert.throws(() => validateIntegrationEnvironment(env), /approved loopback/);
 });
+test("accepts port 8181 for the separate explicit baseline-evidence acceptance gate", () => {
+  const env = valid();
+  env.FIRESTORE_EMULATOR_HOST = "127.0.0.1:8181";
+  env.MENRO_BASELINE_EVIDENCE_ACCEPTANCE = "true";
+  assert.equal(validateIntegrationEnvironment(env).baselineEvidenceAcceptance, true);
+  assert.throws(() => validateIntegrationEnvironment({ ...env, MENRO_REQUEST_LETTER_ACCEPTANCE: "true" }), /cannot be combined/);
+  assert.throws(() => validateIntegrationEnvironment({ ...env, MENRO_BASELINE_EVIDENCE_ACCEPTANCE: "false" }), /must be exactly true/);
+});
 test("requires an isolated temporary upload root", () => {
   const cwd = path.resolve("C:/work/menrobackend");
   assert.throws(() => resolveUploadRoot(valid(), cwd), /MENRO_UPLOAD_ROOT/);

@@ -23,6 +23,13 @@ function cohortIdFor(reportId) {
   return `VPC-${crypto.createHash("sha256").update(reportId).digest("hex").slice(0, 24)}`;
 }
 
+// Private evidence storage accepts only identifier-safe record IDs. Keep the
+// cohort/sample association deterministic without leaking either identifier to
+// the object namespace or using a delimiter the storage contract rejects.
+function baselineEvidenceRecordId(cohortId, sampleId) {
+  return `VPCB-${crypto.createHash("sha256").update(`${cohortId}\u0000${sampleId}`).digest("hex").slice(0, 48)}`;
+}
+
 function normalizedSpecies(event = {}, report = {}) {
   const items = Array.isArray(event.seedlingItems) ? event.seedlingItems : [];
   const seen = new Set();
@@ -343,8 +350,11 @@ async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGIS
       throw error;
     }
     const now = Timestamp.now();
-    const completeEvidence = workflowOperation ? require("./evidenceWorkflow.service").workflow().prepareLink(transaction, workflowOperation) : null;
-    const consumeCaptures = workflowOperation ? require("./evidenceCaptureSession.service").prepareConsumption(transaction, captureEvidence) : null;
+    // Both helpers perform transaction reads and return write closures. Await
+    // those reads before this transaction starts writing; otherwise Firestore
+    // aborts the baseline link after the private upload has completed.
+    const completeEvidence = workflowOperation ? await require("./evidenceWorkflow.service").workflow().prepareLink(transaction, workflowOperation) : null;
+    const consumeCaptures = workflowOperation ? await require("./evidenceCaptureSession.service").prepareConsumption(transaction, captureEvidence) : null;
     const plannedIds = new Set(plan.selectedSamples.map((sample) => sample.permanentId));
     if (units.length !== plannedIds.size || units.some((unit) => !plannedIds.has(unit.permanentId))) {
       throw new Error("Baseline samples must match the Admin-approved sampling plan. Replacements require a new approved plan.");
@@ -374,6 +384,14 @@ async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, ev
   if (!Array.isArray(files) || !files.length) throw new Error("A verified baseline photo is required for every permanent sample.");
   const manifest = Array.isArray(evidenceManifest) ? evidenceManifest : [];
   const normalizedUnits = Array.isArray(sampleUnits) ? sampleUnits : [];
+  if (manifest.length !== files.length || manifest.length !== normalizedUnits.length) {
+    throw new Error("Baseline evidence does not match the submitted samples.");
+  }
+  const submittedIds = normalizedUnits.map(unit => String(unit?.permanentId || "").trim());
+  if (new Set(submittedIds).size !== submittedIds.length || manifest.some((entry, index) =>
+    String(entry?.sampleId || "").trim() !== submittedIds[index])) {
+    throw new Error("Each baseline sample requires matching evidence.");
+  }
   const payload = { ...rest, cohortId, expectedVersion: Number(rest.expectedVersion), sampleUnits: normalizedUnits.map(unit => ({
     permanentId: unit?.permanentId, unitType: unit?.unitType, latitude: unit?.latitude, longitude: unit?.longitude,
     condition: unit?.condition, heightMeters: unit?.heightMeters, diameterCentimeters: unit?.diameterCentimeters,
@@ -382,9 +400,19 @@ async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, ev
   return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: actorId }, workflow: "cohort-baseline",
     target: cohortId, key: idempotencyKey, payload, files },
   async operation => {
+    // Validate before reserving an object, but inside the idempotency callback:
+    // an acknowledged retry must resolve an already completed workflow even
+    // though its expected baseline version is now stale.
     const cohort = await getVerifiedPlantingCohort(cohortId);
     const plan = cohort.samplingPlan;
     if (!plan || plan.status !== "APPROVED") throw conflict("An approved sampling plan is required before baseline registration.");
+    if (Number(cohort.baselineVersion || 0) !== Number(rest.expectedVersion)) {
+      throw conflict("This baseline changed while you were editing. Refresh and try again.");
+    }
+    const plannedIds = new Set(plan.selectedSamples.map(sample => sample.permanentId));
+    if (submittedIds.length !== plannedIds.size || submittedIds.some(id => !plannedIds.has(id))) {
+      throw new Error("Baseline samples must match the Admin-approved sampling plan. Replacements require a new approved plan.");
+    }
     const sessions = await require("./evidenceCaptureSession.service").resolveSubmissionEvidence({ actorId,
       workflow: "cohort-baseline", binding: { cohortId, samplingPlanVersion: plan.version }, files, manifest });
     if (sessions.length !== files.length || manifest.length !== files.length) throw new Error("Baseline evidence does not match the submitted samples.");
@@ -394,7 +422,7 @@ async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, ev
       if (!sampleId || bySample.has(sampleId)) throw new Error("Each baseline sample requires one distinct verified photo.");
       const session = sessions[index];
       const privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(operation, index, files[index], {
-        recordId: `${cohortId}:${sampleId}`, evidenceType: "cohort-baseline", verification: {
+        recordId: baselineEvidenceRecordId(cohortId, sampleId), evidenceType: "cohort-baseline", verification: {
           capturedAt: session.capturedAtClient?.toDate?.().toISOString?.() || null,
           latitude: session.latitude, longitude: session.longitude, gpsValid: session.insideAssignedSite === true,
           timestampValid: true, evidenceSource: "browser-camera", locationSource: "Browser Capture Session",
@@ -441,5 +469,5 @@ module.exports = {
   registerBaseline,
   registerBaselineWithEvidence,
   approveBaseline,
-  _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples },
+  _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples, baselineEvidenceRecordId },
 };
