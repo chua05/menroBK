@@ -6,6 +6,8 @@ const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlant
 const cohorts = db.collection("verifiedPlantingCohorts");
 const BASELINE_STATUSES = new Set(["NOT_STARTED", "IN_PROGRESS", "REGISTERED"]);
 const CONDITION_VALUES = new Set(["Healthy", "Damaged", "Dead", "Unknown"]);
+const PLAN_STATUSES = new Set(["DRAFT", "PENDING_ADMIN_APPROVAL", "APPROVED", "RETURNED"]);
+const SELECTION_METHODS = new Set(["systematic", "stratified", "documented-manual"]);
 
 function disabledError() {
   const error = new Error("Verified planting cohort workflow is disabled.");
@@ -109,6 +111,146 @@ async function getVerifiedPlantingCohort(id) {
   return safeCohort(doc.id, doc.data());
 }
 
+async function listVerifiedPlantingCohorts() {
+  const snapshot = await cohorts.get();
+  return snapshot.docs.map((doc) => safeCohort(doc.id, doc.data()));
+}
+
+function conflict(message) {
+  const error = new Error(message);
+  error.status = 409;
+  return error;
+}
+
+function asNonEmptyString(value, label, maximum = 240) {
+  const normalized = String(value || "").trim();
+  if (!normalized || normalized.length > maximum) throw new Error(`${label} is required.`);
+  return normalized;
+}
+
+function provisionalTarget(verifiedPlantedQuantity) {
+  const quantity = Number(verifiedPlantedQuantity);
+  return Number.isSafeInteger(quantity) && quantity > 0 ? Math.max(1, Math.ceil(quantity * 0.1)) : 0;
+}
+
+function normalizePlannedSamples(value, target) {
+  if (!Array.isArray(value) || value.length !== target) {
+    throw new Error(`Select exactly the provisional target of ${target} permanent sample trees or plots.`);
+  }
+  const seen = new Set();
+  return value.map((sample) => {
+    const permanentId = asNonEmptyString(sample?.permanentId, "Each permanent sample ID", 80);
+    if (!/^[A-Za-z0-9_-]{3,80}$/.test(permanentId) || seen.has(permanentId)) {
+      throw new Error("Each planned sample must have a unique permanent tree or plot ID.");
+    }
+    seen.add(permanentId);
+    const unitType = String(sample?.unitType || "").trim();
+    if (!new Set(["tree", "plot"]).has(unitType)) throw new Error("Each planned sample must be a tree or plot.");
+    return {
+      permanentId,
+      unitType,
+      species: asNonEmptyString(sample?.species, "Sample species", 120),
+      siteReference: asNonEmptyString(sample?.siteReference, "Sample site or plot reference", 160),
+      selectionReason: asNonEmptyString(sample?.selectionReason, "Sample-selection note", 240),
+    };
+  });
+}
+
+function normalizeDistribution(value, plannedSamples) {
+  const rows = Array.isArray(value) ? value : [];
+  if (!rows.length) throw new Error("Document the species and site distribution used for sample selection.");
+  const plannedIds = new Set(plannedSamples.map((sample) => sample.permanentId));
+  const accounted = new Set();
+  return rows.map((row) => {
+    const sampleIds = Array.isArray(row?.sampleIds) ? row.sampleIds.map((id) => String(id || "").trim()) : [];
+    if (!sampleIds.length || sampleIds.some((id) => !plannedIds.has(id) || accounted.has(id))) {
+      throw new Error("Species/site distribution must account for each selected sample once.");
+    }
+    sampleIds.forEach((id) => accounted.add(id));
+    return {
+      species: asNonEmptyString(row?.species, "Distribution species", 120),
+      siteReference: asNonEmptyString(row?.siteReference, "Distribution site reference", 160),
+      sampleIds,
+    };
+  }).map((row, index, all) => {
+    if (index === all.length - 1 && accounted.size !== plannedIds.size) {
+      throw new Error("Species/site distribution must account for each selected sample once.");
+    }
+    return row;
+  });
+}
+
+function samplingPlanSnapshot(plan) {
+  return {
+    version: plan.version,
+    status: plan.status,
+    provisionalPolicy: plan.provisionalPolicy,
+    provisionalTarget: plan.provisionalTarget,
+    selectionMethod: plan.selectionMethod,
+    selectedSamples: plan.selectedSamples,
+    speciesSiteDistribution: plan.speciesSiteDistribution,
+    notes: plan.notes,
+    submittedBy: plan.submittedBy,
+    submittedAt: plan.submittedAt,
+    reviewedBy: plan.reviewedBy || null,
+    reviewedAt: plan.reviewedAt || null,
+    reviewRemarks: plan.reviewRemarks || null,
+  };
+}
+
+async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionMethod, selectedSamples, speciesSiteDistribution, notes, submitForApproval = false }) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
+  if (!Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 0) throw new Error("A valid expected sampling-plan version is required.");
+  if (!SELECTION_METHODS.has(String(selectionMethod || ""))) throw new Error("Select a documented sample-selection method.");
+  const ref = cohorts.doc(cohortId);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
+    const current = doc.data();
+    const currentPlan = current.samplingPlan || { version: 0, status: "DRAFT" };
+    if (Number(currentPlan.version || 0) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
+    if (currentPlan.status === "APPROVED") throw conflict("An approved sampling plan cannot be replaced. Submit an approved replacement through MENRO policy.");
+    const target = provisionalTarget(current.verifiedPlantedQuantity);
+    if (!target) throw new Error("This cohort has no authoritative planted quantity for sampling.");
+    const samples = normalizePlannedSamples(selectedSamples, target);
+    const distribution = normalizeDistribution(speciesSiteDistribution, samples);
+    const now = Timestamp.now();
+    const plan = {
+      schemaVersion: 1,
+      version: Number(currentPlan.version || 0) + 1,
+      status: submitForApproval ? "PENDING_ADMIN_APPROVAL" : "DRAFT",
+      provisionalPolicy: resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
+      provisionalTarget: target,
+      selectionMethod,
+      selectedSamples: samples,
+      speciesSiteDistribution: distribution,
+      notes: String(notes || "").trim().slice(0, 1000),
+      submittedBy: actorId,
+      submittedAt: now,
+    };
+    const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
+    transaction.update(ref, { samplingPlan: plan, samplingPlanHistory: [...history, samplingPlanSnapshot(plan)], updatedAt: now });
+  });
+  return getVerifiedPlantingCohort(cohortId);
+}
+
+async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
+  const ref = cohorts.doc(cohortId);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
+    const current = doc.data(); const plan = current.samplingPlan;
+    if (!plan || plan.status !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending sampling plan can be reviewed.");
+    if (Number(plan.version) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
+    const now = Timestamp.now();
+    const reviewed = { ...plan, status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
+    const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
+    transaction.update(ref, { samplingPlan: reviewed, samplingPlanHistory: [...history, samplingPlanSnapshot(reviewed)], updatedAt: now });
+  });
+  return getVerifiedPlantingCohort(cohortId);
+}
+
 function parseCoordinate(value, label, min, max) {
   const number = Number(value);
   if (!Number.isFinite(number) || number < min || number > max) {
@@ -140,12 +282,18 @@ function normalizeSampleUnits(value) {
     if (photoReferences.length > 10 || photoReferences.some((photo) => !/^[A-Za-z0-9_-]{3,128}$/.test(String(photo?.evidenceId || "")))) {
       throw new Error("Baseline photo references are invalid.");
     }
+    const remarks = String(unit?.remarks || "").trim();
+    if (remarks.length > 1000) throw new Error("Baseline remarks are too long.");
+    const captureDate = String(unit?.captureDate || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(captureDate)) throw new Error("Baseline capture date is required.");
+    if (!photoReferences.length) throw new Error("At least one baseline photo reference is required for every sample.");
     return {
       permanentId, unitType,
       latitude: parseCoordinate(unit?.latitude, "Baseline latitude", -90, 90),
       longitude: parseCoordinate(unit?.longitude, "Baseline longitude", -180, 180),
       condition, heightMeters, diameterCentimeters,
       photoReferences: photoReferences.map((photo) => ({ evidenceId: String(photo.evidenceId), capturedAt: photo.capturedAt || null })),
+      remarks, captureDate,
     };
   });
 }
@@ -167,18 +315,44 @@ async function registerBaseline({ cohortId, expectedVersion, status = "REGISTERE
       throw error;
     }
     const current = doc.data();
+    const plan = current.samplingPlan;
+    if (!plan || plan.status !== "APPROVED") throw conflict("An approved sampling plan is required before baseline registration.");
     if (Number(current.baselineVersion || 0) !== Number(expectedVersion)) {
       const error = new Error("This baseline changed while you were editing. Refresh and try again.");
       error.status = 409;
       throw error;
     }
     const now = Timestamp.now();
+    const plannedIds = new Set(plan.selectedSamples.map((sample) => sample.permanentId));
+    if (units.length !== plannedIds.size || units.some((unit) => !plannedIds.has(unit.permanentId))) {
+      throw new Error("Baseline samples must match the Admin-approved sampling plan. Replacements require a new approved plan.");
+    }
+    const baseline = { registeredBy: actorId, registeredAt: now, sampleUnits: units, approvalStatus: "PENDING_ADMIN_APPROVAL" };
+    const history = Array.isArray(current.baselineHistory) ? current.baselineHistory : [];
     transaction.update(ref, {
-      baselineStatus: status,
+      baselineStatus: status === "IN_PROGRESS" ? "IN_PROGRESS" : "REGISTERED",
       baselineVersion: Number(current.baselineVersion || 0) + 1,
-      baseline: { registeredBy: actorId, registeredAt: now, sampleUnits: units },
+      baseline,
+      baselineHistory: [...history, { version: Number(current.baselineVersion || 0) + 1, status: "PENDING_ADMIN_APPROVAL", registeredBy: actorId, registeredAt: now, sampleUnits: units }],
       updatedAt: now,
     });
+  });
+  return getVerifiedPlantingCohort(cohortId);
+}
+
+async function approveBaseline({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
+  const ref = cohorts.doc(cohortId);
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
+    const current = doc.data();
+    if (Number(current.baselineVersion || 0) !== Number(expectedVersion)) throw conflict("This baseline changed while you were editing. Refresh and try again.");
+    if (!current.baseline || current.baseline.approvalStatus !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending baseline can be reviewed.");
+    const now = Timestamp.now();
+    const baseline = { ...current.baseline, approvalStatus: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
+    const history = Array.isArray(current.baselineHistory) ? current.baselineHistory : [];
+    transaction.update(ref, { baseline, baselineHistory: [...history, { version: current.baselineVersion, status: baseline.approvalStatus, reviewedBy: actorId, reviewedAt: now, reviewRemarks: baseline.reviewRemarks }], updatedAt: now });
   });
   return getVerifiedPlantingCohort(cohortId);
 }
@@ -186,7 +360,11 @@ async function registerBaseline({ cohortId, expectedVersion, status = "REGISTERE
 module.exports = {
   cohortIdFor,
   ensureCohortForAuthoritativeReportInTransaction,
+  listVerifiedPlantingCohorts,
   getVerifiedPlantingCohort,
+  saveSamplingPlan,
+  approveSamplingPlan,
   registerBaseline,
-  _test: { authoritativeQuantity, normalizeSampleUnits },
+  approveBaseline,
+  _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples },
 };

@@ -82,19 +82,67 @@ test("Staff baseline registration stores permanent sample identifiers and detect
   reset();
   const cohortId = service.cohortIdFor("report-baseline");
   table("verifiedPlantingCohorts").set(cohortId, {
-    source: { plantingReportId: "report-baseline" }, baselineStatus: "NOT_STARTED", baselineVersion: 0,
+    source: { plantingReportId: "report-baseline" }, verifiedPlantedQuantity: 10,
+    baselineStatus: "NOT_STARTED", baselineVersion: 0,
   });
+  await service.saveSamplingPlan({ cohortId, actorId: "staff-1", expectedVersion: 0,
+    selectionMethod: "documented-manual", submitForApproval: true,
+    selectedSamples: [{ permanentId: "TREE-001", unitType: "tree", species: "Narra", siteReference: "Plot A", selectionReason: "Marked permanent sample" }],
+    speciesSiteDistribution: [{ species: "Narra", siteReference: "Plot A", sampleIds: ["TREE-001"] }],
+  });
+  await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true });
   const saved = await service.registerBaseline({ cohortId, actorId: "staff-1", expectedVersion: 0,
     status: "REGISTERED", sampleUnits: [{ permanentId: "TREE-001", unitType: "tree", latitude: 12.66,
       longitude: 123.93, condition: "Healthy", heightMeters: 0.8, diameterCentimeters: 1.2,
-      photoReferences: [{ evidenceId: "baseline-photo-001" }] }],
+      photoReferences: [{ evidenceId: "baseline-photo-001" }], captureDate: "2026-11-01" }],
   });
   assert.equal(saved.baselineStatus, "REGISTERED");
   assert.equal(saved.baselineVersion, 1);
   assert.equal(saved.baseline.sampleUnits[0].permanentId, "TREE-001");
   await assert.rejects(() => service.registerBaseline({ cohortId, actorId: "staff-1", expectedVersion: 0,
-    status: "REGISTERED", sampleUnits: [{ permanentId: "TREE-002", unitType: "tree", latitude: 12.66, longitude: 123.93 }],
+    status: "REGISTERED", sampleUnits: [{ permanentId: "TREE-001", unitType: "tree", latitude: 12.66, longitude: 123.93,
+      condition: "Healthy", captureDate: "2026-11-01", photoReferences: [{ evidenceId: "baseline-photo-002" }] }],
   }), /changed while you were editing/);
+});
+
+test("Phase 2 uses a documented test-only ten percent target and preserves plan revisions", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("report-plan");
+  table("verifiedPlantingCohorts").set(cohortId, { verifiedPlantedQuantity: 35, baselineVersion: 0 });
+  const plan = await service.saveSamplingPlan({ cohortId, actorId: "staff-1", expectedVersion: 0,
+    selectionMethod: "stratified", submitForApproval: true,
+    selectedSamples: [
+      { permanentId: "TREE-001", unitType: "tree", species: "Narra", siteReference: "North", selectionReason: "Species stratum" },
+      { permanentId: "TREE-002", unitType: "tree", species: "Narra", siteReference: "North", selectionReason: "Species stratum" },
+      { permanentId: "TREE-003", unitType: "tree", species: "Mahogany", siteReference: "South", selectionReason: "Species stratum" },
+      { permanentId: "TREE-004", unitType: "tree", species: "Mahogany", siteReference: "South", selectionReason: "Species stratum" },
+    ],
+    speciesSiteDistribution: [
+      { species: "Narra", siteReference: "North", sampleIds: ["TREE-001", "TREE-002"] },
+      { species: "Mahogany", siteReference: "South", sampleIds: ["TREE-003", "TREE-004"] },
+    ], notes: "Provisional test plan",
+  });
+  assert.equal(plan.samplingPlan.provisionalTarget, 4);
+  assert.equal(plan.samplingPlan.provisionalPolicy, "test-only-ceil-10-percent-min-1-v1");
+  const reviewed = await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true });
+  assert.equal(reviewed.samplingPlan.status, "APPROVED");
+  assert.equal(reviewed.samplingPlanHistory.length, 2);
+});
+
+test("Phase 2 rejects unapproved sample replacements and preserves baseline review history", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("report-replacement");
+  table("verifiedPlantingCohorts").set(cohortId, { verifiedPlantedQuantity: 1, baselineVersion: 0,
+    samplingPlan: { version: 1, status: "APPROVED", selectedSamples: [{ permanentId: "TREE-001" }] }, samplingPlanHistory: [] });
+  await assert.rejects(() => service.registerBaseline({ cohortId, actorId: "staff-1", expectedVersion: 0, sampleUnits: [{
+    permanentId: "TREE-002", unitType: "tree", latitude: 12.66, longitude: 123.93, condition: "Healthy", captureDate: "2026-11-01", photoReferences: [{ evidenceId: "photo-001" }],
+  }] }), /must match the Admin-approved sampling plan/);
+  await service.registerBaseline({ cohortId, actorId: "staff-1", expectedVersion: 0, sampleUnits: [{
+    permanentId: "TREE-001", unitType: "tree", latitude: 12.66, longitude: 123.93, condition: "Healthy", captureDate: "2026-11-01", photoReferences: [{ evidenceId: "photo-001" }],
+  }] });
+  const approved = await service.approveBaseline({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true });
+  assert.equal(approved.baseline.approvalStatus, "APPROVED");
+  assert.equal(approved.baselineHistory.length, 2);
 });
 
 test("baseline route remains Staff-only", async () => {
@@ -104,6 +152,19 @@ test("baseline route remains Staff-only", async () => {
   let allowed = false;
   let responseCode = 0;
   authorize({ user: { uid: "participant-1", role: "participant" } }, {
+    status(code) { responseCode = code; return this; }, json() {},
+  }, () => { allowed = true; });
+  assert.equal(allowed, false);
+  assert.equal(responseCode, 403);
+});
+
+test("sampling-plan approval route remains Admin-only", () => {
+  const route = routes.stack.find((layer) => layer.route?.path === "/:id/sampling-plan/approve");
+  assert.ok(route);
+  const authorize = route.route.stack[1].handle;
+  let allowed = false;
+  let responseCode = 0;
+  authorize({ user: { uid: "staff-1", role: "staff" } }, {
     status(code) { responseCode = code; return this; }, json() {},
   }, () => { allowed = true; });
   assert.equal(allowed, false);
