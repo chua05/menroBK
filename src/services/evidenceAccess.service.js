@@ -2,6 +2,7 @@ const fs = require("fs/promises");
 const path = require("path");
 const { UPLOAD_ROOT } = require("../config/uploadRoot");
 const { getPlantingReportById } = require("./plantingReport.service");
+const { db } = require("../config/firebase");
 const {
   getMonitoringRecordById,
   getRawMonitoringRecordById,
@@ -193,9 +194,22 @@ async function monitoringRevisionEvidenceForUser(recordId, observationId, revisi
   return resolveStoredEvidence(revision.evidenceRef.photoUrl, "monitoring");
 }
 
+async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, user) {
+  if (!["admin", "staff"].includes(user?.role)) throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(String(cohortId || "")) ||
+      !/^[A-Za-z0-9_-]{3,80}$/.test(String(sampleId || ""))) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const snapshot = await db.collection("verifiedPlantingCohorts").doc(cohortId).get();
+  if (!snapshot.exists) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const sample = (snapshot.data().baseline?.sampleUnits || []).find((entry) => entry.permanentId === sampleId);
+  const reference = sample?.photoReferences?.[parseIndex(photoIndex)];
+  if (!reference?.privateEvidence) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  return cloudEvidence(reference.privateEvidence, `${cohortId}:${sampleId}`, "cohort-baseline");
+}
+
 module.exports = {
   plantingEvidenceForUser,
   monitoringEvidenceForUser,
   monitoringRevisionEvidenceForUser,
+  cohortBaselineEvidenceForUser,
   resolveStoredEvidence,
 };

@@ -34,6 +34,11 @@ test("capture bindings require workflow target identifiers", () => {
     eventId: "event-1", distributionId: "dist-1" });
   assert.throws(() => _test.parseBinding("monitoring-resubmit", { siteId: "site-1",
     plantingReportId: "report-1" }), /observation and version/i);
+  assert.deepEqual(_test.parseBinding("cohort-baseline", { cohortId: "cohort-1", siteId: "site-1",
+    sampleId: "TREE-001", samplingPlanVersion: 2 }), { workflow: "cohort-baseline", cohortId: "cohort-1",
+    siteId: "site-1", sampleId: "TREE-001", samplingPlanVersion: 2 });
+  assert.throws(() => _test.parseBinding("cohort-baseline", { cohortId: "cohort-1", siteId: "site-1", sampleId: "TREE-001" }),
+    /sampling-plan version/i);
 });
 
 test("location validation rejects inaccurate, outside-Bulan, and outside-site captures", () => {

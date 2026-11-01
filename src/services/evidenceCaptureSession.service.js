@@ -22,6 +22,7 @@ const WORKFLOWS = new Set([
   "monitoring-early",
   "monitoring-official",
   "monitoring-resubmit",
+  "cohort-baseline",
 ]);
 
 class CaptureSessionError extends Error {
@@ -52,6 +53,14 @@ function parseBinding(workflow, input = {}) {
     if (!binding.siteId || !binding.eventId || !binding.distributionId) {
       throw problem("CAPTURE_SESSION_INVALID", 400, "Site, event, and distribution are required for camera capture.");
     }
+  } else if (workflow === "cohort-baseline") {
+    binding.cohortId = cleanId(input.cohortId);
+    binding.siteId = cleanId(input.siteId);
+    binding.sampleId = cleanId(input.sampleId);
+    binding.samplingPlanVersion = Number(input.samplingPlanVersion);
+    if (!binding.cohortId || !binding.siteId || !binding.sampleId || !Number.isSafeInteger(binding.samplingPlanVersion) || binding.samplingPlanVersion < 1) {
+      throw problem("CAPTURE_SESSION_INVALID", 400, "Cohort, approved sampling-plan version, and permanent sample ID are required for baseline capture.");
+    }
   } else {
     binding.plantingReportId = cleanId(input.plantingReportId);
     binding.siteId = cleanId(input.siteId);
@@ -76,6 +85,8 @@ async function loadBoundResources(actorId, binding) {
   if (binding.workflow === "planting-report") {
     reads.push(db.collection("events").doc(binding.eventId).get());
     reads.push(db.collection("distributions").doc(binding.distributionId).get());
+  } else if (binding.workflow === "cohort-baseline") {
+    reads.push(db.collection("verifiedPlantingCohorts").doc(binding.cohortId).get());
   } else {
     reads.push(db.collection("plantingReports").doc(binding.plantingReportId).get());
   }
@@ -95,6 +106,15 @@ async function loadBoundResources(actorId, binding) {
         String(distribution.status || "") !== "Released") {
       throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The camera capture target is not available to this workflow.");
     }
+  } else if (binding.workflow === "cohort-baseline") {
+    if (!docs[1].exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Verified planting cohort was not found.");
+    const cohort = docs[1].data();
+    const plan = cohort.samplingPlan;
+    if (String(cohort.source?.siteId || "") !== binding.siteId || plan?.status !== "APPROVED" ||
+        Number(plan.version) !== binding.samplingPlanVersion ||
+        !plan.selectedSamples?.some(sample => String(sample.permanentId) === binding.sampleId)) {
+      throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The baseline capture target is not available for this approved cohort plan.");
+    }
   } else {
     if (!docs[1].exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Planting report was not found.");
     const report = docs[1].data();
@@ -106,8 +126,9 @@ async function loadBoundResources(actorId, binding) {
   return site;
 }
 
-async function createCaptureSession({ actorId, workflow, ...input }) {
-  if (!cleanId(actorId)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated participant is required.");
+async function createCaptureSession({ actorId, actorRole = "participant", workflow, ...input }) {
+  if (!cleanId(actorId) || !["participant", "staff"].includes(actorRole)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
+  if (workflow === "cohort-baseline" && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture baseline evidence.");
   const binding = parseBinding(workflow, input);
   await loadBoundResources(actorId, binding);
   const sessionId = crypto.randomUUID();
@@ -116,7 +137,7 @@ async function createCaptureSession({ actorId, workflow, ...input }) {
   await db.collection(COLLECTION).doc(sessionId).create({
     schemaVersion: 1,
     actorId,
-    actorRole: "participant",
+    actorRole,
     ...binding,
     bindingHash: sha256(canonical(binding)),
     nonceHash: sha256(nonce),
@@ -214,7 +235,8 @@ async function verifyCaptureSession({ actorId, sessionId, nonce, file, capturedA
   }
   const duplicate = await db.collection("plantingEvidenceHashes").doc(imageSha256).get();
   const monitoringDuplicate = await db.collection("monitoringEvidenceHashes").doc(imageSha256).get();
-  if (duplicate.exists || monitoringDuplicate.exists) throw problem("DUPLICATE_EVIDENCE", 409, "Duplicate evidence image detected.");
+  const baselineDuplicate = await db.collection("baselineEvidenceHashes").doc(imageSha256).get();
+  if (duplicate.exists || monitoringDuplicate.exists || baselineDuplicate.exists) throw problem("DUPLICATE_EVIDENCE", 409, "Duplicate evidence image detected.");
   const verificationId = crypto.randomUUID();
   const update = {
     state: "VERIFIED",
@@ -268,11 +290,13 @@ async function resolveSubmissionEvidence({ actorId, workflow, binding, files, ma
     if (!sessionId) throw problem("CAPTURE_SESSION_INVALID", 400, "Camera capture descriptor is invalid.");
     const snapshot = await db.collection(COLLECTION).doc(sessionId).get();
     const session = snapshot.data();
+    const expectedSampleId = workflow === "cohort-baseline" ? cleanId(entry.sampleId) : "";
     if (!snapshot.exists || session.actorId !== actorId || session.workflow !== workflow ||
         !["VERIFIED", "CONSUMED"].includes(session.state) ||
         !nonceMatches(session.nonceHash, entry.nonce) || !nonceMatches(session.verificationIdHash, entry.verificationId) ||
         generateImageHash(files[index].buffer) !== session.imageSha256 ||
-        Object.entries(binding).some(([key, value]) => value && String(session[key] || "") !== String(value))) {
+        Object.entries(binding).some(([key, value]) => value && String(session[key] || "") !== String(value)) ||
+        (workflow === "cohort-baseline" && (!expectedSampleId || session.sampleId !== expectedSampleId))) {
       throw problem("CAPTURE_IMAGE_MISMATCH", 409, "Verified camera evidence no longer matches this submission.");
     }
     if (session.state === "VERIFIED" && timestampMillis(session.expiresAt) <= Date.now()) {

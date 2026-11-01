@@ -41,7 +41,7 @@ function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
     const storageConfig = resolveEvidenceStorageConfig();
     if ((storageConfig.gcsDevelopment || storageConfig.gcsProduction) && key === undefined) throw problem("INVALID_IDEMPOTENCY_KEY", 400);
     if (key !== undefined && (typeof key !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(key))) throw problem("INVALID_IDEMPOTENCY_KEY", 400);
-    if (!["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "monitoring-resubmit"].includes(workflow) ||
+    if (!["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "monitoring-resubmit", "cohort-baseline"].includes(workflow) ||
         !actor || Object.keys(actor).length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(actor.uid ?? actor.guestParticipantId ?? "") ||
         typeof target !== "string" || target.length > 256 || !Array.isArray(files) || files.length > 10) throw problem("INVALID_WORKFLOW_CONTEXT", 400);
     const images = [];

@@ -97,8 +97,22 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   return { id: ref.id, ...data, created: true };
 }
 
+function safePhotoReference(reference = {}) {
+  const { privateEvidence, ...safe } = reference;
+  return safe;
+}
+
 function safeCohort(id, data) {
-  return { id, ...data };
+  const redactBaselineEntry = (entry) => ({ ...entry, sampleUnits: Array.isArray(entry?.sampleUnits)
+    ? entry.sampleUnits.map(unit => ({ ...unit, photoReferences: (unit.photoReferences || []).map(safePhotoReference) }))
+    : entry?.sampleUnits });
+  const baseline = data?.baseline ? {
+    ...data.baseline,
+    sampleUnits: (data.baseline.sampleUnits || []).map(unit => ({ ...unit,
+      photoReferences: (unit.photoReferences || []).map(safePhotoReference) })),
+  } : data?.baseline;
+  return { id, ...data, baseline,
+    baselineHistory: Array.isArray(data?.baselineHistory) ? data.baselineHistory.map(redactBaselineEntry) : data?.baselineHistory };
 }
 
 async function getVerifiedPlantingCohort(id) {
@@ -298,17 +312,23 @@ function normalizeSampleUnits(value) {
   });
 }
 
-async function registerBaseline({ cohortId, expectedVersion, status = "REGISTERED", sampleUnits, actorId }) {
+async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGISTERED", sampleUnits, actorId, workflowOperation = null, captureEvidence = [], uploadedReferences = new Map() }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   if (!BASELINE_STATUSES.has(status)) throw new Error("Baseline status is invalid.");
   if (!Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 0) {
     throw new Error("A valid expected baseline version is required.");
   }
-  const units = normalizeSampleUnits(sampleUnits);
+  let units = normalizeSampleUnits(sampleUnits);
+  if (uploadedReferences.size) units = units.map(unit => ({ ...unit,
+    photoReferences: uploadedReferences.get(unit.permanentId) || unit.photoReferences }));
   if (status === "REGISTERED" && !units.length) throw new Error("At least one baseline sample is required to register a baseline.");
   const ref = cohorts.doc(cohortId);
   await db.runTransaction(async (transaction) => {
-    const doc = await transaction.get(ref);
+    const duplicateRefs = workflowOperation ? [...uploadedReferences.values()].flat().map(reference =>
+      db.collection("baselineEvidenceHashes").doc(reference.imageSha256)) : [];
+    const reads = await Promise.all([transaction.get(ref), ...duplicateRefs.map((duplicateRef) => transaction.get(duplicateRef))]);
+    const doc = reads[0];
+    if (reads.slice(1).some((duplicate) => duplicate.exists)) throw conflict("A baseline photo was already used by another sample.");
     if (!doc.exists) {
       const error = new Error("Verified planting cohort not found.");
       error.status = 404;
@@ -323,6 +343,8 @@ async function registerBaseline({ cohortId, expectedVersion, status = "REGISTERE
       throw error;
     }
     const now = Timestamp.now();
+    const completeEvidence = workflowOperation ? require("./evidenceWorkflow.service").workflow().prepareLink(transaction, workflowOperation) : null;
+    const consumeCaptures = workflowOperation ? require("./evidenceCaptureSession.service").prepareConsumption(transaction, captureEvidence) : null;
     const plannedIds = new Set(plan.selectedSamples.map((sample) => sample.permanentId));
     if (units.length !== plannedIds.size || units.some((unit) => !plannedIds.has(unit.permanentId))) {
       throw new Error("Baseline samples must match the Admin-approved sampling plan. Replacements require a new approved plan.");
@@ -336,9 +358,61 @@ async function registerBaseline({ cohortId, expectedVersion, status = "REGISTERE
       baselineHistory: [...history, { version: Number(current.baselineVersion || 0) + 1, status: "PENDING_ADMIN_APPROVAL", registeredBy: actorId, registeredAt: now, sampleUnits: units }],
       updatedAt: now,
     });
+    if (workflowOperation) {
+      for (const [sampleId, references] of uploadedReferences) for (const reference of references) {
+        const duplicateRef = db.collection("baselineEvidenceHashes").doc(reference.imageSha256);
+        transaction.create(duplicateRef, { cohortId, sampleId, createdAt: now });
+      }
+      consumeCaptures?.(cohortId);
+      completeEvidence?.({ cohortId });
+    }
   });
   return getVerifiedPlantingCohort(cohortId);
 }
+
+async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, evidenceManifest, files, idempotencyKey, ...rest }) {
+  if (!Array.isArray(files) || !files.length) throw new Error("A verified baseline photo is required for every permanent sample.");
+  const manifest = Array.isArray(evidenceManifest) ? evidenceManifest : [];
+  const normalizedUnits = Array.isArray(sampleUnits) ? sampleUnits : [];
+  const payload = { ...rest, cohortId, expectedVersion: Number(rest.expectedVersion), sampleUnits: normalizedUnits.map(unit => ({
+    permanentId: unit?.permanentId, unitType: unit?.unitType, latitude: unit?.latitude, longitude: unit?.longitude,
+    condition: unit?.condition, heightMeters: unit?.heightMeters, diameterCentimeters: unit?.diameterCentimeters,
+    remarks: unit?.remarks, captureDate: unit?.captureDate,
+  })), evidenceManifest: manifest.map(entry => ({ source: entry?.source, sampleId: entry?.sampleId, captureSessionId: entry?.captureSessionId })) };
+  return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: actorId }, workflow: "cohort-baseline",
+    target: cohortId, key: idempotencyKey, payload, files },
+  async operation => {
+    const cohort = await getVerifiedPlantingCohort(cohortId);
+    const plan = cohort.samplingPlan;
+    if (!plan || plan.status !== "APPROVED") throw conflict("An approved sampling plan is required before baseline registration.");
+    const sessions = await require("./evidenceCaptureSession.service").resolveSubmissionEvidence({ actorId,
+      workflow: "cohort-baseline", binding: { cohortId, samplingPlanVersion: plan.version }, files, manifest });
+    if (sessions.length !== files.length || manifest.length !== files.length) throw new Error("Baseline evidence does not match the submitted samples.");
+    const bySample = new Map();
+    for (let index = 0; index < sessions.length; index += 1) {
+      const sampleId = String(manifest[index]?.sampleId || "").trim();
+      if (!sampleId || bySample.has(sampleId)) throw new Error("Each baseline sample requires one distinct verified photo.");
+      const session = sessions[index];
+      const privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(operation, index, files[index], {
+        recordId: `${cohortId}:${sampleId}`, evidenceType: "cohort-baseline", verification: {
+          capturedAt: session.capturedAtClient?.toDate?.().toISOString?.() || null,
+          latitude: session.latitude, longitude: session.longitude, gpsValid: session.insideAssignedSite === true,
+          timestampValid: true, evidenceSource: "browser-camera", locationSource: "Browser Capture Session",
+          locationAccuracyMeters: session.accuracyMeters, verificationPolicyVersion: session.verificationPolicyVersion || 1,
+        },
+      });
+      bySample.set(sampleId, [{ evidenceId: session.id, capturedAt: session.capturedAtClient || null,
+        imageSha256: session.imageSha256, contentType: session.contentType, sizeBytes: session.sizeBytes,
+        latitude: session.latitude, longitude: session.longitude, accuracyMeters: session.accuracyMeters,
+        distanceMeters: session.distanceMeters, boundaryRule: session.boundaryRule,
+        verificationStatus: session.insideAssignedSite ? "VERIFIED" : "NEEDS_REVIEW", privateEvidence }]);
+    }
+    const enriched = normalizedUnits.map(unit => ({ ...unit, photoReferences: bySample.get(String(unit?.permanentId || "")) || [] }));
+    return registerBaselineImpl({ cohortId, actorId, sampleUnits: enriched, workflowOperation: operation, captureEvidence: sessions, uploadedReferences: bySample, ...rest });
+  }, link => getVerifiedPlantingCohort(link.cohortId));
+}
+
+async function registerBaseline(data) { return registerBaselineImpl(data); }
 
 async function approveBaseline({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
@@ -365,6 +439,7 @@ module.exports = {
   saveSamplingPlan,
   approveSamplingPlan,
   registerBaseline,
+  registerBaselineWithEvidence,
   approveBaseline,
   _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples },
 };

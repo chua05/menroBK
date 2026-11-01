@@ -3,7 +3,7 @@ const {
   getVerifiedPlantingCohort,
   saveSamplingPlan: saveSamplingPlanRecord,
   approveSamplingPlan: approveSamplingPlanRecord,
-  registerBaseline,
+  registerBaselineWithEvidence,
   approveBaseline: approveBaselineRecord,
 } = require("../services/verifiedPlantingCohort.service");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
@@ -53,7 +53,14 @@ async function approveSamplingPlan(req, res) {
 async function saveBaseline(req, res) {
   try {
     if (gate(res)) return;
-    const data = await registerBaseline({ cohortId: req.params.id, actorId: req.user.uid, ...req.body });
+    const parse = (value, fallback) => {
+      if (value === undefined) return fallback;
+      if (typeof value !== "string") return value;
+      try { return JSON.parse(value); } catch { const error = new Error("Baseline submission data is invalid."); error.status = 400; throw error; }
+    };
+    const data = await registerBaselineWithEvidence({ cohortId: req.params.id, actorId: req.user.uid,
+      ...req.body, sampleUnits: parse(req.body?.sampleUnits, []), evidenceManifest: parse(req.body?.evidenceManifest, []),
+      files: req.files || [], idempotencyKey: req.get("Idempotency-Key") });
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });

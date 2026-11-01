@@ -7,7 +7,7 @@ const { evidenceUploadMaintenanceGate } = require("../middleware/evidenceUploadM
 const controller = require("../controller/evidenceCaptureSession.controller");
 
 const router = express.Router();
-const guards = [verifyToken, authorizeRoles("participant"), evidenceUploadMaintenanceGate, uploadLimiter];
+const guards = [verifyToken, authorizeRoles("participant", "staff"), evidenceUploadMaintenanceGate, uploadLimiter];
 router.post("/", ...guards, controller.create);
 router.post("/:sessionId/verify", ...guards, uploadConcurrencyGuard,
   uploadPlantingPhoto.single("photo"), controller.verify);

@@ -2,6 +2,7 @@ const {
   plantingEvidenceForUser,
   monitoringEvidenceForUser,
   monitoringRevisionEvidenceForUser,
+  cohortBaselineEvidenceForUser,
 } = require("../services/evidenceAccess.service");
 const { sendError } = require("../utils/response.util");
 
@@ -74,4 +75,12 @@ async function getMonitoringRevisionEvidence(req, res) {
   }
 }
 
-module.exports = { getPlantingEvidence, getMonitoringEvidence, getMonitoringRevisionEvidence };
+async function getCohortBaselineEvidence(req, res) {
+  try {
+    return await sendEvidence(res, await cohortBaselineEvidenceForUser(req.params.cohortId, req.params.sampleId, req.params.photoIndex, req.user));
+  } catch (error) {
+    return handleEvidenceError(res, error);
+  }
+}
+
+module.exports = { getPlantingEvidence, getMonitoringEvidence, getMonitoringRevisionEvidence, getCohortBaselineEvidence };

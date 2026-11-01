@@ -11,7 +11,7 @@ const { resolveEvidenceStorageConfig } = require("../config/evidenceStorage");
 const { matchesEvidenceObject } = require('../config/developmentGcs');
 
 const MAX_BYTES = 10 * 1024 * 1024;
-const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official"]);
+const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "cohort-baseline"]);
 const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
 const sha = value => createHash("sha256").update(value).digest("hex");
 const identifier = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value) && !value.includes("..");
