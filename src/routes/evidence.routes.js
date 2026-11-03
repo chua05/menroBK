@@ -5,6 +5,7 @@ const {
   getMonitoringEvidence,
   getMonitoringRevisionEvidence,
   getCohortBaselineEvidence,
+  getSampleMonitoringEvidence,
 } = require("../controller/evidence.controller");
 
 router.use(verifyToken);
@@ -16,5 +17,6 @@ router.get(
   getMonitoringRevisionEvidence
 );
 router.get("/verified-planting-cohorts/:cohortId/baseline/:sampleId/photos/:photoIndex", getCohortBaselineEvidence);
+router.get("/sample-monitoring/visits/:visitId/samples/:sampleId/evidence/:evidenceIndex", getSampleMonitoringEvidence);
 
 module.exports = router;

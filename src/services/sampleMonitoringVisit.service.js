@@ -1,26 +1,230 @@
 const crypto = require("node:crypto");
-const { Timestamp } = require("firebase-admin/firestore");
-const { db } = require("../config/firebase");
-const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
+const {
+  Timestamp
+} = require("firebase-admin/firestore");
+const {
+  db
+} = require("../config/firebase");
+const {
+  resolveVerifiedPlantingCohortConfig
+} = require("../config/verifiedPlantingCohort");
 const CONDITIONS = new Set(["Healthy", "Damaged", "Dead", "Needs Rechecking"]);
 const INVESTIGATION_OUTCOMES = new Set(["Not Located After Rechecking"]);
-const disabled=()=>Object.assign(new Error("Verified planting cohort workflow is disabled."),{status:409,code:"COHORT_WORKFLOW_DISABLED"});
-const conflict=m=>Object.assign(new Error(m),{status:409});
-const id=(cohortId,date)=>`VPMV-${crypto.createHash("sha256").update(`${cohortId}\0${date}`).digest("hex").slice(0,28)}`;
-const visitRef=visitId=>db.collection("sampleMonitoringVisits").doc(visitId);
+const disabled = () => Object.assign(new Error("Verified planting cohort workflow is disabled."), {
+  status: 409,
+  code: "COHORT_WORKFLOW_DISABLED"
+});
+const conflict = m => Object.assign(new Error(m), {
+  status: 409
+});
+const id = (cohortId, date) => `VPMV-${crypto.createHash("sha256").update(`${cohortId}\0${date}`).digest("hex").slice(0, 28)}`;
+const visitRef = visitId => db.collection("sampleMonitoringVisits").doc(visitId);
 async function priorApprovedVisit(cohortId, siteId, planVersion, baselineVersion, visitDate) {
   const snapshot = await db.collection("sampleMonitoringVisits").where("cohortId", "==", cohortId).where("status", "==", "APPROVED").get();
-  const candidates = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(visit =>
-    visit.siteId === siteId && Number(visit.samplingPlanVersion) === Number(planVersion) &&
-    Number(visit.baselineVersion) === Number(baselineVersion) && String(visit.visitDate) < String(visitDate));
+  const candidates = snapshot.docs.map(doc => ({
+    id: doc.id,
+    ...doc.data()
+  })).filter(visit => visit.siteId === siteId && Number(visit.samplingPlanVersion) === Number(planVersion) && Number(visit.baselineVersion) === Number(baselineVersion) && String(visit.visitDate) < String(visitDate));
   candidates.sort((a, b) => String(a.visitDate).localeCompare(String(b.visitDate)) || String(a.id).localeCompare(String(b.id)));
   if (candidates.length > 1 && candidates.at(-1).visitDate === candidates.at(-2).visitDate) throw conflict("Ambiguous prior approved monitoring visits require MENRO review.");
   return candidates.at(-1) || null;
 }
-function summary(assessments){return assessments.reduce((r,a)=>{if(a.condition==="Healthy")r.healthy++;else if(a.condition==="Damaged")r.damaged++;else if(a.condition==="Dead")r.dead++;else r.needsRechecking++;return r;},{healthy:0,damaged:0,dead:0,needsRechecking:0});}
-function normalize(items, samples){if(!Array.isArray(items)||items.length!==samples.length)throw new Error("Every approved sample requires an assessment.");const allowed=new Set(samples.map(s=>s.permanentId));const seen=new Set();return items.map(a=>{const sampleId=String(a?.sampleId||"");if(!allowed.has(sampleId)||seen.has(sampleId)||!CONDITIONS.has(a?.condition))throw new Error("Assessment does not match an approved sample.");seen.add(sampleId);const remarks=String(a?.remarks||"").trim().slice(0,1000),outcome=String(a?.investigationOutcome||"").trim();if(a.condition==="Needs Rechecking"&&!remarks)throw new Error("Needs Rechecking requires remarks.");if(outcome&&!INVESTIGATION_OUTCOMES.has(outcome))throw new Error("Invalid investigation outcome.");if(outcome&&a.condition!=="Needs Rechecking")throw new Error("An investigation outcome requires Needs Rechecking.");if(outcome&&!String(a?.searchFindings||"").trim())throw new Error("Not Located After Rechecking requires documented search findings.");return {sampleId,condition:a.condition,remarks,heightCentimeters:a.heightCentimeters===""?null:Number(a.heightCentimeters),diameterCentimeters:a.diameterCentimeters===""?null:Number(a.diameterCentimeters),baselineReference:a.baselineReference||null,previousAssessmentReference:a.previousAssessmentReference||null,investigationOutcome:outcome||null,searchFindings:outcome?String(a.searchFindings).trim().slice(0,1000):null,recheckQueued:a.condition==="Needs Rechecking"&&!outcome};});}
-async function create({cohortId,actorId,visitDate,testOnly=false}){if(!resolveVerifiedPlantingCohortConfig().enabled)throw disabled();if(!testOnly)throw conflict("Future visit scheduling requires MENRO policy approval.");const snap=await db.collection("verifiedPlantingCohorts").doc(cohortId).get(),c=snap.data(),plan=c?.samplingPlan,units=c?.baseline?.sampleUnits;if(!snap.exists||plan?.status!=="APPROVED"||c?.baseline?.approvalStatus!=="APPROVED"||!Array.isArray(units)||!units.length)throw conflict("Approved cohort, plan, and baseline are required.");const baselineVersion=Number(c.baselineVersion||0),prior=await priorApprovedVisit(cohortId,c.source.siteId,plan.version,baselineVersion,visitDate),unresolved=new Map((prior?.sampleAssessments||[]).filter(a=>a.recheckQueued||a.condition==="Needs Rechecking").map(a=>[a.sampleId,a]));const visitId=id(cohortId,visitDate),ref=visitRef(visitId);await db.runTransaction(async tx=>{const old=await tx.get(ref);if(!old.exists)tx.create(ref,{schemaVersion:1,cohortId,siteId:c.source.siteId,samplingPlanVersion:plan.version,baselineVersion,visitDate,status:"DRAFT",version:0,createdBy:actorId,priorVisitId:prior?.id||null,sampleAssessments:units.map(u=>{const previous=unresolved.get(u.permanentId);return {sampleId:u.permanentId,condition:null,remarks:"",baselineReference:{sampleId:u.permanentId},recheckRequired:Boolean(previous),previousAssessmentReference:previous?{visitId:prior.id,sampleId:previous.sampleId,condition:previous.condition,remarks:previous.remarks||"",investigationOutcome:previous.investigationOutcome||null}:null}}),history:[],createdAt:Timestamp.now()});});return get(visitId);}
-async function get(visitId){const s=await visitRef(visitId).get();if(!s.exists)throw Object.assign(new Error("Monitoring visit not found."),{status:404});return {id:s.id,...s.data()};}
-async function save({visitId,actorId,expectedVersion,assessments,submit=false}){if(!resolveVerifiedPlantingCohortConfig().enabled)throw disabled();const ref=visitRef(visitId);await db.runTransaction(async tx=>{const doc=await tx.get(ref);if(!doc.exists)throw Object.assign(new Error("Monitoring visit not found."),{status:404});const cur=doc.data();if(cur.createdBy!==actorId||!["DRAFT","RETURNED"].includes(cur.status)||Number(cur.version)!==Number(expectedVersion))throw conflict("This monitoring visit is no longer editable.");const cohort=(await tx.get(db.collection("verifiedPlantingCohorts").doc(cur.cohortId))).data(),samples=cohort?.baseline?.sampleUnits||[];if(cohort?.samplingPlan?.status!=="APPROVED"||cohort?.baseline?.approvalStatus!=="APPROVED"||Number(cohort.samplingPlan.version)!==Number(cur.samplingPlanVersion))throw conflict("Approved cohort, plan, and baseline are required.");const values=normalize(assessments,samples);if(submit&&values.some(a=>!a.condition))throw conflict("Every approved sample requires an assessment before submission.");const version=Number(cur.version)+1,status=submit?"PENDING_ADMIN_APPROVAL":"DRAFT",now=Timestamp.now();tx.update(ref,{sampleAssessments:values,summary:summary(values),status,version,recheckQueue:values.filter(a=>a.recheckQueued).map(a=>a.sampleId),officialKpiEligible:false,history:[...(cur.history||[]),{version,status,updatedBy:actorId,updatedAt:now,summary:summary(values)}],updatedAt:now});});return get(visitId);}
-async function review({visitId,actorId,expectedVersion,approve,reasons=""}){if(!resolveVerifiedPlantingCohortConfig().enabled)throw disabled();const ref=visitRef(visitId);await db.runTransaction(async tx=>{const d=await tx.get(ref);if(!d.exists||d.data().status!=="PENDING_ADMIN_APPROVAL"||Number(d.data().version)!==Number(expectedVersion))throw conflict("Monitoring visit is not ready for review.");const now=Timestamp.now(),status=approve?"APPROVED":"RETURNED";tx.update(ref,{status,reviewedBy:actorId,reviewReasons:String(reasons).trim().slice(0,1000),reviewedAt:now,history:[...(d.data().history||[]),{version:d.data().version,status,reviewedBy:actorId,reviewedAt:now}]});});return get(visitId);}
-module.exports={create,get,save,review,_test:{summary,normalize,id,priorApprovedVisit}};
+function summary(assessments) {
+  return assessments.reduce((r, a) => {
+    if (a.condition === "Healthy") r.healthy++;else if (a.condition === "Damaged") r.damaged++;else if (a.condition === "Dead") r.dead++;else r.needsRechecking++;
+    return r;
+  }, {
+    healthy: 0,
+    damaged: 0,
+    dead: 0,
+    needsRechecking: 0
+  });
+}
+function normalize(items, samples) {
+  if (!Array.isArray(items) || items.length !== samples.length) throw new Error("Every approved sample requires an assessment.");
+  const allowed = new Set(samples.map(s => s.permanentId));
+  const seen = new Set();
+  return items.map(a => {
+    const sampleId = String(a?.sampleId || "");
+    if (!allowed.has(sampleId) || seen.has(sampleId) || !CONDITIONS.has(a?.condition)) throw new Error("Assessment does not match an approved sample.");
+    seen.add(sampleId);
+    const remarks = String(a?.remarks || "").trim().slice(0, 1000),
+      outcome = String(a?.investigationOutcome || "").trim();
+    if (a.condition === "Needs Rechecking" && !remarks) throw new Error("Needs Rechecking requires remarks.");
+    if (outcome && !INVESTIGATION_OUTCOMES.has(outcome)) throw new Error("Invalid investigation outcome.");
+    if (outcome && a.condition !== "Needs Rechecking") throw new Error("An investigation outcome requires Needs Rechecking.");
+    if (outcome && !String(a?.searchFindings || "").trim()) throw new Error("Not Located After Rechecking requires documented search findings.");
+    return {
+      sampleId,
+      condition: a.condition,
+      remarks,
+      heightCentimeters: a.heightCentimeters === "" ? null : Number(a.heightCentimeters),
+      diameterCentimeters: a.diameterCentimeters === "" ? null : Number(a.diameterCentimeters),
+      baselineReference: a.baselineReference || null,
+      previousAssessmentReference: a.previousAssessmentReference || null,
+      investigationOutcome: outcome || null,
+      searchFindings: outcome ? String(a.searchFindings).trim().slice(0, 1000) : null,
+      recheckQueued: a.condition === "Needs Rechecking" && !outcome
+    };
+  });
+}
+async function create({
+  cohortId,
+  actorId,
+  visitDate,
+  testOnly = false
+}) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  if (!testOnly) throw conflict("Future visit scheduling requires MENRO policy approval.");
+  const snap = await db.collection("verifiedPlantingCohorts").doc(cohortId).get(),
+    c = snap.data(),
+    plan = c?.samplingPlan,
+    units = c?.baseline?.sampleUnits;
+  if (!snap.exists || plan?.status !== "APPROVED" || c?.baseline?.approvalStatus !== "APPROVED" || !Array.isArray(units) || !units.length) throw conflict("Approved cohort, plan, and baseline are required.");
+  const baselineVersion = Number(c.baselineVersion || 0),
+    prior = await priorApprovedVisit(cohortId, c.source.siteId, plan.version, baselineVersion, visitDate),
+    unresolved = new Map((prior?.sampleAssessments || []).filter(a => a.recheckQueued || a.condition === "Needs Rechecking").map(a => [a.sampleId, a]));
+  const visitId = id(cohortId, visitDate),
+    ref = visitRef(visitId);
+  await db.runTransaction(async tx => {
+    const old = await tx.get(ref);
+    if (!old.exists) tx.create(ref, {
+      schemaVersion: 1,
+      cohortId,
+      siteId: c.source.siteId,
+      samplingPlanVersion: plan.version,
+      baselineVersion,
+      visitDate,
+      status: "DRAFT",
+      version: 0,
+      createdBy: actorId,
+      priorVisitId: prior?.id || null,
+      sampleAssessments: units.map(u => {
+        const previous = unresolved.get(u.permanentId);
+        return {
+          sampleId: u.permanentId,
+          condition: null,
+          remarks: "",
+          baselineReference: {
+            sampleId: u.permanentId
+          },
+          recheckRequired: Boolean(previous),
+          previousAssessmentReference: previous ? {
+            visitId: prior.id,
+            sampleId: previous.sampleId,
+            condition: previous.condition,
+            remarks: previous.remarks || "",
+            investigationOutcome: previous.investigationOutcome || null
+          } : null
+        };
+      }),
+      history: [],
+      createdAt: Timestamp.now()
+    });
+  });
+  return get(visitId);
+}
+async function get(visitId) {
+  const s = await visitRef(visitId).get();
+  if (!s.exists) throw Object.assign(new Error("Monitoring visit not found."), {
+    status: 404
+  });
+  return {
+    id: s.id,
+    ...s.data()
+  };
+}
+async function save({
+  visitId,
+  actorId,
+  expectedVersion,
+  assessments,
+  submit = false
+}) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  const ref = visitRef(visitId);
+  await db.runTransaction(async tx => {
+    const doc = await tx.get(ref);
+    if (!doc.exists) throw Object.assign(new Error("Monitoring visit not found."), {
+      status: 404
+    });
+    const cur = doc.data();
+    if (cur.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(cur.status) || Number(cur.version) !== Number(expectedVersion)) throw conflict("This monitoring visit is no longer editable.");
+    const cohort = (await tx.get(db.collection("verifiedPlantingCohorts").doc(cur.cohortId))).data();
+    const samples = cohort?.baseline?.sampleUnits || [];
+    if (cohort?.samplingPlan?.status !== "APPROVED" || cohort?.baseline?.approvalStatus !== "APPROVED" || Number(cohort.samplingPlan.version) !== Number(cur.samplingPlanVersion)) throw conflict("Approved cohort, plan, and baseline are required.");
+    const priorBySampleId = new Map((cur.sampleAssessments || []).map(entry => [entry.sampleId, entry]));
+    const values = normalize(assessments, samples).map(entry => {
+      const prior = priorBySampleId.get(entry.sampleId);
+      const comparable = value => value && ({ condition: value.condition, remarks: value.remarks || "", heightCentimeters: value.heightCentimeters ?? null, diameterCentimeters: value.diameterCentimeters ?? null, investigationOutcome: value.investigationOutcome || null, searchFindings: value.searchFindings || null, recheckQueued: Boolean(value.recheckQueued) });
+      const correctedAfterReturn = cur.status === "RETURNED" && JSON.stringify(comparable(entry)) !== JSON.stringify(comparable(prior));
+      return {
+        ...entry,
+        assessmentRevision: Number(prior?.assessmentRevision || 0) + (correctedAfterReturn ? 1 : 0),
+        evidenceHistory: Array.isArray(prior?.evidenceHistory) ? prior.evidenceHistory : []
+      };
+    });
+    if (submit && values.some(entry => !entry.condition)) throw conflict("Every approved sample requires an assessment before submission.");
+    const version = Number(cur.version) + 1;
+    const status = submit ? "PENDING_ADMIN_APPROVAL" : "DRAFT";
+    const now = Timestamp.now();
+    tx.update(ref, {
+      sampleAssessments: values,
+      summary: summary(values),
+      status,
+      version,
+      recheckQueue: values.filter(entry => entry.recheckQueued).map(entry => entry.sampleId),
+      officialKpiEligible: false,
+      history: [...(cur.history || []), {
+        version,
+        status,
+        updatedBy: actorId,
+        updatedAt: now,
+        summary: summary(values)
+      }],
+      updatedAt: now
+    });
+  });
+  return get(visitId);
+}
+async function review({
+  visitId,
+  actorId,
+  expectedVersion,
+  approve,
+  reasons = ""
+}) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  const ref = visitRef(visitId);
+  await db.runTransaction(async tx => {
+    const d = await tx.get(ref);
+    if (!d.exists || d.data().status !== "PENDING_ADMIN_APPROVAL" || Number(d.data().version) !== Number(expectedVersion)) throw conflict("Monitoring visit is not ready for review.");
+    const now = Timestamp.now(),
+      status = approve ? "APPROVED" : "RETURNED";
+    tx.update(ref, {
+      status,
+      reviewedBy: actorId,
+      reviewReasons: String(reasons).trim().slice(0, 1000),
+      reviewedAt: now,
+      history: [...(d.data().history || []), {
+        version: d.data().version,
+        status,
+        reviewedBy: actorId,
+        reviewedAt: now
+      }]
+    });
+  });
+  return get(visitId);
+}
+module.exports = {
+  create,
+  get,
+  save,
+  review,
+  _test: {
+    summary,
+    normalize,
+    id,
+    priorApprovedVisit
+  }
+};

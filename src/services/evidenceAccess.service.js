@@ -36,6 +36,10 @@ function baselineEvidenceRecordId(cohortId, sampleId) {
   return `VPCB-${crypto.createHash("sha256").update(`${cohortId}\u0000${sampleId}`).digest("hex").slice(0, 48)}`;
 }
 
+function sampleMonitoringEvidenceRecordId(visitId, sampleId, revision) {
+  return `VPME-${crypto.createHash("sha256").update(`${visitId}\u0000${sampleId}\u0000${revision}`).digest("hex").slice(0, 48)}`;
+}
+
 function evidenceError(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -211,10 +215,34 @@ async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, use
   return cloudEvidence(reference.privateEvidence, baselineEvidenceRecordId(cohortId, sampleId), "cohort-baseline");
 }
 
+async function sampleMonitoringEvidenceForUser(visitId, sampleId, evidenceIndex, user) {
+  if (!require("../config/verifiedPlantingCohort").resolveVerifiedPlantingCohortConfig().enabled) {
+    throw evidenceError("COHORT_WORKFLOW_DISABLED", "Verified planting cohort workflow is disabled.");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(String(visitId || "")) ||
+      !/^[A-Za-z0-9_-]{3,80}$/.test(String(sampleId || ""))) {
+    throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  }
+  const snapshot = await db.collection("sampleMonitoringVisits").doc(visitId).get();
+  if (!snapshot.exists) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const visit = snapshot.data();
+  if (user?.role !== "admin" && !(user?.role === "staff" && visit.createdBy === user.uid)) {
+    throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
+  }
+  const assessment = (visit.sampleAssessments || []).find(entry => entry.sampleId === sampleId);
+  const reference = assessment?.evidenceHistory?.[parseIndex(evidenceIndex)];
+  if (!reference?.privateEvidence || !Number.isInteger(Number(reference.revision))) {
+    throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  }
+  return cloudEvidence(reference.privateEvidence,
+    sampleMonitoringEvidenceRecordId(visitId, sampleId, reference.revision), "sample-monitoring");
+}
+
 module.exports = {
   plantingEvidenceForUser,
   monitoringEvidenceForUser,
   monitoringRevisionEvidenceForUser,
   cohortBaselineEvidenceForUser,
+  sampleMonitoringEvidenceForUser,
   resolveStoredEvidence,
 };

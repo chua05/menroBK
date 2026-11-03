@@ -59,6 +59,26 @@ test("same-key same-payload resolves one durable business operation, including a
   for (let i = 0; i < 3; i++) assert.deepEqual(await f.service.run(f.request, () => assert.fail("must not run twice"), f.resolve), first);
   assert.equal(f.creates(), 1); assert.equal(f.records(COLLECTION).size, 1);
 });
+test("completed operation resolver is read-only and requires its immutable binding", async () => {
+  const f = fixture();
+  const binding = { cohortId: "COHORT-1", visitId: "VISIT-1", sampleId: "TREE-001", assessmentRevision: 0, captureSessionId: "capture-1" };
+  const request = { ...f.request, workflow: "sample-monitoring", target: "VISIT-1", binding };
+  const result = await f.service.run(request, f.perform, f.resolve);
+  const before = JSON.stringify([...f.records(COLLECTION)]);
+  assert.deepEqual(await f.service.resolveCompletedOperation(request, f.resolve), result);
+  assert.equal(JSON.stringify([...f.records(COLLECTION)]), before);
+  await assert.rejects(() => f.service.resolveCompletedOperation({ ...request,
+    binding: { ...binding, sampleId: "TREE-002" } }, f.resolve), { code: "IDEMPOTENCY_CONFLICT", status: 409 });
+  await assert.rejects(() => f.service.resolveCompletedOperation({ ...request,
+    payload: { ...request.payload, totalMonitored: 26 } }, f.resolve), { code: "IDEMPOTENCY_CONFLICT", status: 409 });
+});
+test("legacy completed operations without a binding fail closed for a bound resolver", async () => {
+  const f = fixture();
+  await f.service.run(f.request, f.perform, f.resolve);
+  await assert.rejects(() => f.service.resolveCompletedOperation({ ...f.request,
+    binding: { cohortId: "COHORT-1", visitId: "VISIT-1", sampleId: "TREE-001", assessmentRevision: 0, captureSessionId: "capture-1" } }, f.resolve),
+  { code: "IDEMPOTENCY_CONFLICT", status: 409 });
+});
 test("same-key different payload conflicts before business processing", async () => {
   const f = fixture(); await f.service.run(f.request, f.perform, f.resolve);
   await assert.rejects(() => f.service.run({ ...f.request, payload: { ...f.request.payload, totalMonitored: 26 } },
