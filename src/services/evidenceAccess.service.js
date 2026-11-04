@@ -1,5 +1,6 @@
 const fs = require("fs/promises");
 const path = require("path");
+const release = require("../config/permanentSampleRelease");
 const crypto = require("node:crypto");
 const { UPLOAD_ROOT } = require("../config/uploadRoot");
 const { getPlantingReportById } = require("./plantingReport.service");
@@ -205,6 +206,7 @@ async function monitoringRevisionEvidenceForUser(recordId, observationId, revisi
 
 async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, user) {
   if (!["admin", "staff"].includes(user?.role)) throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
+  release.assertScope(user.uid, cohortId);
   if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(String(cohortId || "")) ||
       !/^[A-Za-z0-9_-]{3,80}$/.test(String(sampleId || ""))) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   const snapshot = await db.collection("verifiedPlantingCohorts").doc(cohortId).get();
@@ -230,6 +232,7 @@ async function sampleMonitoringEvidenceForUser(visitId, sampleId, evidenceIndex,
     throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
   }
   const assessment = (visit.sampleAssessments || []).find(entry => entry.sampleId === sampleId);
+  release.assertScope(user.uid, visit.cohortId);
   const reference = assessment?.evidenceHistory?.[parseIndex(evidenceIndex)];
   if (!reference?.privateEvidence || !Number.isInteger(Number(reference.revision))) {
     throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");

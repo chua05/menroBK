@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const release = require("../config/permanentSampleRelease");
 const {
   Timestamp
 } = require("firebase-admin/firestore");
@@ -37,6 +38,7 @@ async function upload({
     status: 409,
     code: "COHORT_WORKFLOW_DISABLED"
   });
+  release.assertUser(actorId); release.assertWrite();
   if (!files?.length || files.length !== 1) throw Object.assign(new Error("One verified assessment photo is required."), {
     status: 400
   });
@@ -44,6 +46,7 @@ async function upload({
   // Ownership/scope is checked before a historical operation can be read, but
   // editability is intentionally checked after an exact completed retry.
   if (!visit || visit.createdBy !== actorId) throw bad("This monitoring visit is no longer editable.");
+  release.assertScope(actorId, visit.cohortId);
   const assessment = visit.sampleAssessments?.find(a => a.sampleId === sampleId);
   if (!assessment) throw bad("Permanent sample is not part of this visit.");
   const cohort = (await db.collection("verifiedPlantingCohorts").doc(visit.cohortId).get()).data();
@@ -135,6 +138,7 @@ async function upload({
       });
       const complete = await workflow().prepareLink(tx, op),
         consume = await capture.prepareConsumption(tx, sessions);
+      release.writeScope(actorId, visit.cohortId);
       tx.update(vr, {
         sampleAssessments: items,
         updatedAt: Timestamp.now()

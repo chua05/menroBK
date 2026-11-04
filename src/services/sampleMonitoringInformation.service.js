@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const release = require("../config/permanentSampleRelease");
 
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const text = (value, max) => {
@@ -10,7 +11,7 @@ const validId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.t
 const safe = (id, row) => ({ id, visitId: row.visitId, cohortId: row.cohortId, siteId: row.siteId,
   question: row.question, status: row.status, version: row.version, createdAt: row.createdAt,
   answeredAt: row.answeredAt || null, answer: row.answer || null,
-  history: (row.history || []).map(({ action, at, role }) => ({ action, at, role })) });
+  history: (row.history || []).map(({ action, at, role }) => ({ action, at, role })), writesPaused: release.resolve().paused });
 
 // Dependencies are injected only by credential-free tests; production uses the
 // same Firebase database and transactional notification writer as other flows.
@@ -23,12 +24,14 @@ function createService({ db, notify, now, enabled }) {
     if (!enabled()) fail(409, "Monitoring information requests are disabled.");
     if (!actor?.actorId) fail(401, "Authentication required.");
     if (!["staff", "admin", "participant"].includes(actor.actorRole)) fail(403, "Access denied.");
+    release.assertUser(actor.actorId);
   };
   async function visit(read, visitId, actor) {
     const snapshot = await read(ref("sampleMonitoringVisits", visitId));
     if (!snapshot.exists) fail(404, "Visit not found.");
     const row = snapshot.data();
     if (actor.actorRole === "participant" || (actor.actorRole === "staff" && row.createdBy !== actor.actorId)) fail(404, "Visit not found.");
+    release.assertScope(actor.actorId, row.cohortId);
     return row;
   }
   async function recipient(read, row) {
@@ -53,6 +56,7 @@ function createService({ db, notify, now, enabled }) {
     const snapshot = await read(ref("sampleMonitoringInformationRequests", requestId));
     if (!snapshot.exists) fail(404, "Information request not found.");
     const row = snapshot.data();
+    release.assertScope(actor.actorId, row.cohortId);
     if (actor.actorRole === "participant") {
       if (row.recipientUserId !== actor.actorId) fail(404, "Information request not found.");
       const current = await recipient(read, row);
@@ -67,12 +71,14 @@ function createService({ db, notify, now, enabled }) {
     async create({ visitId, question, key, ...actor }) {
       gate(actor);
       if (!["staff", "admin"].includes(actor.actorRole)) fail(403, "Access denied.");
+      release.assertWrite();
       question = text(question, 2000); key = text(key, 120);
       const id = `VPMI-${digest([visitId, actor.actorId, key])}`;
       return db.runTransaction(async tx => {
         const read = r => tx.get(r);
         const current = await visit(read, visitId, actor);
         const target = await recipient(read, current);
+        release.assertScope(target.uid, current.cohortId);
         const doc = ref("sampleMonitoringInformationRequests", id);
         const existing = await read(doc);
         const fingerprint = digest([question, target.uid, target.requestId, target.plantingReportId, current.cohortId, current.siteId]);
@@ -86,6 +92,7 @@ function createService({ db, notify, now, enabled }) {
           sourceRequestId: target.requestId, plantingReportId: target.plantingReportId, fingerprint,
           question, status: "OPEN", version: 0, createdAt: at,
           history: [{ action: "REQUESTED", role: actor.actorRole, actorId: actor.actorId, at }] };
+        release.writeScope(actor.actorId, row.cohortId);
         tx.create(doc, row);
         notify(tx, { notificationId: `${id}-question`, recipientUserId: target.uid,
           type: "sample_monitoring_information", title: "Monitoring information requested",
@@ -103,7 +110,7 @@ function createService({ db, notify, now, enabled }) {
       const size = Number(limit);
       if (!Number.isInteger(size) || size < 1 || size > 50) fail(400, "Limit must be 1–50.");
       let query = db.collection("sampleMonitoringInformationRequests");
-      if (actor.actorRole === "participant") query = query.where("recipientUserId", "==", actor.actorId);
+      if (actor.actorRole === "participant") query = release.scopeQuery(query.where("recipientUserId", "==", actor.actorId));
       else {
         await visit(r => r.get(), visitId, actor);
         query = query.where("visitId", "==", visitId);
@@ -112,7 +119,7 @@ function createService({ db, notify, now, enabled }) {
       if (cursor) {
         if (!validId(cursor)) fail(400, "Invalid information cursor.");
         const doc = await ref("sampleMonitoringInformationRequests", cursor).get();
-        if (!doc.exists || (actor.actorRole === "participant" ? doc.data().recipientUserId !== actor.actorId : doc.data().visitId !== visitId)) fail(400, "Invalid information cursor.");
+        if (!doc.exists || !release.allowsCohort(doc.data().cohortId) || (actor.actorRole === "participant" ? doc.data().recipientUserId !== actor.actorId : doc.data().visitId !== visitId)) fail(400, "Invalid information cursor.");
         query = query.startAfter(doc);
       }
       const snapshot = await query.limit(size + 1).get();
@@ -126,6 +133,7 @@ function createService({ db, notify, now, enabled }) {
     async answer({ requestId, answer, expectedVersion, key, ...actor }) {
       gate(actor);
       if (actor.actorRole !== "participant") fail(403, "Only the intended requester may answer.");
+      release.assertWrite();
       answer = text(answer, 4000); key = text(key, 120);
       if (!Number.isInteger(expectedVersion) || expectedVersion < 0) fail(400, "Expected version is required.");
       return db.runTransaction(async tx => {
@@ -139,6 +147,8 @@ function createService({ db, notify, now, enabled }) {
         const at = now();
         const updated = { ...row, answer, answerFingerprint: fingerprint, answeredAt: at, status: "ANSWERED", version: row.version + 1,
           history: [...row.history, { action: "ANSWERED", role: "participant", actorId: actor.actorId, at }] };
+        release.assertScope(row.requestedBy, row.cohortId);
+        release.writeScope(actor.actorId, row.cohortId);
         tx.set(ref("sampleMonitoringInformationRequests", requestId), updated);
         notify(tx, { notificationId: `${requestId}-answer`, recipientUserId: row.requestedBy,
           type: "sample_monitoring_information_answer", title: "Monitoring information received",

@@ -6,6 +6,11 @@ const path = require("node:path");
 const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
 const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true";
 const evidenceReadOnly = process.env.MENRO_PHASE3D4_EVIDENCE_READ_ONLY === "true";
+const releaseAcceptance = process.env.MENRO_PERMANENT_SAMPLE_RELEASE_ACCEPTANCE;
+if (releaseAcceptance !== undefined && (!extended || !isolated || !["paused", "pilot"].includes(releaseAcceptance))) throw new Error("Release acceptance requires an explicit isolated Phase 3D/4 fixture.");
+if (releaseAcceptance) for (const name of ["PERMANENT_SAMPLE_WRITE_PAUSED", "PERMANENT_SAMPLE_PILOT_ENABLED", "PERMANENT_SAMPLE_PILOT_USER_IDS", "PERMANENT_SAMPLE_PILOT_COHORT_IDS"]) {
+  if (process.env[name] !== undefined) throw new Error("Release acceptance owns its process-local control values.");
+}
 if (evidenceReadOnly && (!extended || !isolated)) throw new Error("Read-only evidence acceptance requires isolated Phase 3D/4 mode.");
 if (extended && !isolated) throw new Error("Phase 3D/4 acceptance requires isolated emulators.");
 if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true", PERMANENT_SAMPLE_ANALYTICS_ENABLED: "true" });
@@ -86,7 +91,13 @@ async function main() {
     baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001", condition: "Healthy" }] }, testFixture: prefix });
   const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
   assert.equal(visit.status, "DRAFT");
+  const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
+  if (releaseAcceptance === "paused") process.env.PERMANENT_SAMPLE_WRITE_PAUSED = "true";
+  if (releaseAcceptance === "pilot") Object.assign(process.env, { PERMANENT_SAMPLE_PILOT_ENABLED: "true",
+    PERMANENT_SAMPLE_PILOT_USER_IDS: JSON.stringify([ids.staff, ids.admin, ids.participant]), PERMANENT_SAMPLE_PILOT_COHORT_IDS: JSON.stringify([cohortId]) });
+  require("../../src/config/permanentSampleRelease").resolve();
   await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project,
+    releaseAcceptance, ...releaseFixture,
     evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
     password, visitId: visit.id, diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));

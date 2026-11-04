@@ -1,4 +1,5 @@
 const CONDITIONS = ["Healthy", "Damaged", "Dead", "Needs Rechecking"];
+const release = require("../config/permanentSampleRelease");
 const error = (status, message) => Object.assign(new Error(message), { status });
 const safeId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value);
 
@@ -66,11 +67,13 @@ function createService({ db, enabled }) {
     if (!enabled()) throw error(409, "Permanent sample analytics are disabled.");
     if (!actorId) throw error(401, "Authentication required.");
     if (!["staff", "admin"].includes(actorRole)) throw error(403, "Access denied.");
+    release.assertUser(actorId);
   };
-  const queryFor = (actorId, actorRole) => {
+  const queryFor = (actorId, actorRole, cohortId) => {
     let query = db.collection("sampleMonitoringVisits").where("status", "==", "APPROVED");
     if (actorRole === "staff") query = query.where("createdBy", "==", actorId);
-    return query;
+    if (cohortId) { release.assertScope(actorId, cohortId); return query.where("cohortId", "==", cohortId); }
+    return release.scopeQuery(query);
   };
   return {
     async filters({ actorId, actorRole, cursor = "", limit = 50 }) {
@@ -81,7 +84,7 @@ function createService({ db, enabled }) {
       if (cursor) {
         if (!safeId(cursor)) throw error(400, "Invalid filter cursor.");
         const doc = await db.collection("sampleMonitoringVisits").doc(cursor).get();
-        if (!doc.exists || doc.data().status !== "APPROVED" || actorRole === "staff" && doc.data().createdBy !== actorId) throw error(400, "Invalid filter cursor.");
+        if (!doc.exists || !release.allowsCohort(doc.data().cohortId) || doc.data().status !== "APPROVED" || actorRole === "staff" && doc.data().createdBy !== actorId) throw error(400, "Invalid filter cursor.");
         query = query.startAfter(doc);
       }
       const snapshot = await query.select("cohortId", "siteId").limit(size + 1).get();
@@ -95,8 +98,7 @@ function createService({ db, enabled }) {
     async get({ actorId, actorRole, cohortId, siteId }) {
     authorize(actorId, actorRole);
     for (const id of [cohortId, siteId]) if (id !== undefined && !safeId(id)) throw error(400, "Invalid analytics filter.");
-    let query = queryFor(actorId, actorRole);
-    if (cohortId) query = query.where("cohortId", "==", cohortId);
+    let query = queryFor(actorId, actorRole, cohortId);
     if (siteId) query = query.where("siteId", "==", siteId);
     // Fail closed instead of silently presenting a truncated population.
     const snapshot = await query.limit(1001).get();

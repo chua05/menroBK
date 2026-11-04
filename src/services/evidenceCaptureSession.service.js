@@ -137,15 +137,19 @@ async function loadBoundResources(actorId, binding) {
   return site;
 }
 
+const release = require("../config/permanentSampleRelease");
+const permanentWorkflow = workflow => ["cohort-baseline", "sample-monitoring"].includes(workflow);
 async function createCaptureSession({ actorId, actorRole = "participant", workflow, ...input }) {
   if (!cleanId(actorId) || !["participant", "staff"].includes(actorRole)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
   if (workflow === "sample-monitoring" && !resolveVerifiedPlantingCohortConfig().enabled) throw problem("COHORT_WORKFLOW_DISABLED", 409, "Verified planting cohort workflow is disabled.");
   if (["cohort-baseline", "sample-monitoring"].includes(workflow) && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture cohort evidence.");
   const binding = parseBinding(workflow, input);
+  if (permanentWorkflow(workflow)) release.writeScope(actorId, binding.cohortId);
   await loadBoundResources(actorId, binding);
   const sessionId = crypto.randomUUID();
   const nonce = crypto.randomBytes(32).toString("base64url");
   const now = Date.now();
+  if (permanentWorkflow(workflow)) release.writeScope(actorId, binding.cohortId);
   await db.collection(COLLECTION).doc(sessionId).create({
     schemaVersion: 1,
     actorId,
@@ -216,7 +220,7 @@ function validateLocation(site, input) {
   };
 }
 
-async function verifyCaptureSession({ actorId, sessionId, nonce, file, capturedAt, ...location }) {
+async function verifyCaptureSession({ actorId, actorRole, sessionId, nonce, file, capturedAt, ...location }) {
   if (!file?.buffer) throw problem("CAPTURE_SESSION_INVALID", 400, "A captured photo is required.");
   const validSessionId = cleanId(sessionId);
   if (!validSessionId) throw problem("CAPTURE_SESSION_INVALID", 400, "Camera capture session is invalid.");
@@ -225,6 +229,10 @@ async function verifyCaptureSession({ actorId, sessionId, nonce, file, capturedA
   if (!snapshot.exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Camera capture session was not found.");
   const session = snapshot.data();
   if (session.actorId !== actorId) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Camera capture session belongs to another user.");
+  if (permanentWorkflow(session.workflow)) {
+    if (actorRole !== undefined && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can verify cohort evidence.");
+    release.writeScope(actorId, session.cohortId);
+  }
   if (session.state !== "OPEN") throw problem("CAPTURE_SESSION_REPLAYED", 409, "Camera capture session has already been used.");
   const now = Date.now();
   if (timestampMillis(session.expiresAt) <= now) throw problem("CAPTURE_SESSION_EXPIRED", 410, "Camera capture session expired. Please try again.");
@@ -270,6 +278,7 @@ async function verifyCaptureSession({ actorId, sessionId, nonce, file, capturedA
     if (!current.exists || current.data().state !== "OPEN") {
       throw problem("CAPTURE_SESSION_REPLAYED", 409, "Camera capture session has already been used.");
     }
+    if (permanentWorkflow(session.workflow)) release.writeScope(actorId, session.cohortId);
     transaction.update(ref, update);
   });
   return { verificationId, captureSessionId: sessionId, imageSha256,

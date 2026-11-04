@@ -8,6 +8,7 @@ const {
 const { sendError } = require("../utils/response.util");
 
 function evidenceStatus(error) {
+  if (["PERMANENT_SAMPLE_PILOT_FORBIDDEN", "PERMANENT_SAMPLE_RELEASE_CONFIGURATION_INVALID"].includes(error.code)) return error.status;
   if (error.code === "EVIDENCE_FORBIDDEN") return 403;
   if (error.code === "COHORT_WORKFLOW_DISABLED") return 409;
   if (["EVIDENCE_NOT_FOUND", "INVALID_EVIDENCE_PATH"].includes(error.code) ||

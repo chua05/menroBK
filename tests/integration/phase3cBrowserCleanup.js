@@ -21,6 +21,10 @@ async function main() {
   const prefix = explicitPrefix || fixture?.prefix || fixture?.emails?.staff?.slice("staff.".length, -"@example.test".length);
   if (fixture?.project) assert.equal(fixture.project, topology.project);
   if (!prefix) return console.log(JSON.stringify({ noActiveFixture: true }));
+  if (process.env.MENRO_VERIFY_RELEASE_NO_WRITES === "true") {
+    const visitId = require("../../src/services/sampleMonitoringVisit.service")._test.id(`${prefix}-cohort`, "2099-01-01");
+    console.log(JSON.stringify(await require("./permanentSampleReleaseFixture").verify(prefix, visitId)));
+  }
   console.log(JSON.stringify(await cleanupFixture(prefix)));
 }
 main().catch(error => {

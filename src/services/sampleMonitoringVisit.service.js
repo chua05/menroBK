@@ -1,5 +1,6 @@
 const crypto = require("node:crypto");
 const validation = require("./sampleMonitoringValidation");
+const release = require("../config/permanentSampleRelease");
 const {
   Timestamp
 } = require("firebase-admin/firestore");
@@ -74,6 +75,7 @@ async function create({
   testOnly = false
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  release.writeScope(actorId, cohortId);
   if (!testOnly) throw conflict("Future visit scheduling requires MENRO policy approval.");
   const snap = await db.collection("verifiedPlantingCohorts").doc(cohortId).get(),
     c = snap.data(),
@@ -87,6 +89,7 @@ async function create({
     ref = visitRef(visitId);
   await db.runTransaction(async tx => {
     const old = await tx.get(ref);
+    release.writeScope(actorId, cohortId);
     if (!old.exists) tx.create(ref, {
       schemaVersion: 1,
       cohortId,
@@ -131,33 +134,37 @@ async function get(visitId, { actorId, actorRole } = {}) {
   const value = s.data();
   if (actorRole && !['staff', 'admin'].includes(actorRole)) throw Object.assign(new Error('Monitoring visit not found.'), { status: 404 });
   if (actorRole === 'staff' && value.createdBy !== actorId) throw Object.assign(new Error('Monitoring visit not found.'), { status: 404 });
+  if (actorRole) release.assertScope(actorId, value.cohortId);
   return {
     id: s.id,
-    ...value
+    ...value,
+    writesPaused: release.resolve().paused,
   };
 }
 async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   if (!['staff', 'admin'].includes(actorRole)) throw Object.assign(new Error('Monitoring visits are restricted to MENRO Staff and Admin.'), { status: 403 });
+  const policy = release.assertUser(actorId);
   const size = Math.max(1, Math.min(Number(limit) || 25, 50));
   let query = db.collection('sampleMonitoringVisits');
   if (actorRole === 'staff') query = query.where('createdBy', '==', actorId);
+  query = release.scopeQuery(query, policy);
   if (status) query = query.where('status', '==', String(status));
   query = query.orderBy('visitDate', 'desc').orderBy('__name__').limit(size + 1);
   if (cursor) {
     const cursorDoc = await db.collection('sampleMonitoringVisits').doc(String(cursor)).get();
-    if (!cursorDoc.exists || (actorRole === 'staff' && cursorDoc.data().createdBy !== actorId)) throw Object.assign(new Error('Invalid monitoring visit cursor.'), { status: 400 });
+    if (!cursorDoc.exists || !release.allowsCohort(cursorDoc.data().cohortId, policy) || (actorRole === 'staff' && cursorDoc.data().createdBy !== actorId)) throw Object.assign(new Error('Invalid monitoring visit cursor.'), { status: 400 });
     query = query.startAfter(cursorDoc);
   }
   const snapshot = await query.get();
   const visits = snapshot.docs.slice(0, size).map(doc => {
     const value = doc.data(); const assessments = value.sampleAssessments || [];
     const completed = assessments.filter(item => item.condition).length;
-    const editable = actorRole === 'staff' && value.createdBy === actorId && ['DRAFT', 'RETURNED'].includes(value.status);
+    const editable = !policy.paused && actorRole === 'staff' && value.createdBy === actorId && ['DRAFT', 'RETURNED'].includes(value.status);
     return { id: doc.id, cohortId: value.cohortId, siteId: value.siteId, visitDate: value.visitDate, status: value.status,
       version: value.version, samplingPlanVersion: value.samplingPlanVersion, baselineVersion: value.baselineVersion,
       progress: { completed, total: assessments.length, rechecking: assessments.filter(item => item.recheckRequired || item.recheckQueued).length },
-      actions: { view: true, saveDraft: editable, submit: editable, review: actorRole === 'admin' && value.status === 'PENDING_ADMIN_APPROVAL' } };
+      actions: { view: true, saveDraft: editable, submit: editable, review: !policy.paused && actorRole === 'admin' && value.status === 'PENDING_ADMIN_APPROVAL' } };
   });
   return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null };
 }
@@ -171,6 +178,7 @@ async function save({
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   validation.version(expectedVersion);
   validation.boolean(submit, "submit");
+  release.assertUser(actorId); release.assertWrite();
   const ref = visitRef(visitId);
   await db.runTransaction(async tx => {
     const doc = await tx.get(ref);
@@ -178,6 +186,7 @@ async function save({
       status: 404
     });
     const cur = doc.data();
+    release.assertScope(actorId, cur.cohortId);
     if (cur.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(cur.status) || Number(cur.version) !== Number(expectedVersion)) throw conflict("This monitoring visit is no longer editable.");
     const cohort = (await tx.get(db.collection("verifiedPlantingCohorts").doc(cur.cohortId))).data();
     const samples = cohort?.baseline?.sampleUnits || [];
@@ -200,6 +209,7 @@ async function save({
     const version = Number(cur.version) + 1;
     const status = submit ? "PENDING_ADMIN_APPROVAL" : "DRAFT";
     const now = Timestamp.now();
+    release.writeScope(actorId, cur.cohortId);
     tx.update(ref, {
       sampleAssessments: values,
       summary: summary(values),
@@ -229,6 +239,7 @@ async function review({
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   validation.version(expectedVersion);
   validation.boolean(approve, "approve");
+  release.assertUser(actorId); release.assertWrite();
   if (typeof reasons !== "string" || reasons.trim().length > 1000 || !approve && !reasons.trim()) {
     throw validation.invalid("Return requires a nonblank reason (maximum 1000 characters).");
   }
@@ -237,6 +248,7 @@ async function review({
     const d = await tx.get(ref);
     if (!d.exists || d.data().status !== "PENDING_ADMIN_APPROVAL" || Number(d.data().version) !== Number(expectedVersion)) throw conflict("Monitoring visit is not ready for review.");
     const cohort = await tx.get(db.collection("verifiedPlantingCohorts").doc(d.data().cohortId));
+    release.assertScope(actorId, d.data().cohortId);
     validation.cohortBinding(cohort.data(), d.data());
     if (approve) {
       normalize(d.data().sampleAssessments, cohort.data().baseline.sampleUnits || []);
@@ -245,6 +257,7 @@ async function review({
     }
     const now = Timestamp.now(),
       status = approve ? "APPROVED" : "RETURNED";
+    release.writeScope(actorId, d.data().cohortId);
     tx.update(ref, {
       status,
       reviewedBy: actorId,
