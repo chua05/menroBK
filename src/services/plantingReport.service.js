@@ -7,6 +7,7 @@ const {
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
 const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
+const { progressFor } = require("../utils/plantingBalance.util");
 
 const {
   createVerificationLogInTransaction,
@@ -1533,7 +1534,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         }
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
         const reserved = Number(event.pendingSeedlingsByInventory?.[inventoryId] || 0);
-        const remaining = Math.max(0, Number(currentAllocation.quantity) - current - reserved);
+        const remaining = Math.max(0, Number(currentAllocation.quantity) - current - reserved - Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0));
         if (quantityPlanted > remaining) {
           throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
         }
@@ -1566,6 +1567,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         recorded[inventoryId] = current + quantityPlanted;
         transaction.update(eventRef, {
           recordedSeedlingsByInventory: recorded,
+          officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
           recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + quantityPlanted,
           remainingSeedlingQuantity: Number(event.seedlingTotalQuantity || 0) -
             Number(event.recordedSeedlingQuantity || 0) - quantityPlanted,
@@ -1576,17 +1578,14 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           const nextAccepted = Number(parent.data.acceptedQuantity || 0);
           const nextPending = Number(parent.data.pendingReviewQuantity || 0) + quantityPlanted;
           const totalReleased = Number(event.seedlingTotalQuantity || parent.data.quantityReleased || 0);
-          const nextProgress = nextActive >= totalReleased && nextPending > 0
-            ? "Fully Reported — Awaiting Review"
-            : nextAccepted >= totalReleased && nextPending === 0
-              ? "Completed"
-              : nextActive > 0 ? "Partial" : "Awaiting Submission";
+          const nextProgress = progressFor({ released: totalReleased, active: nextActive, accepted: nextAccepted, pending: nextPending,
+            leftovers: Number(parent.data.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.data.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.data.pendingReviewLeftoverQuantity || 0) });
           transaction.update(parent.ref, {
             quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
             activeSubmittedQuantity: nextActive,
             acceptedQuantity: nextAccepted,
             pendingReviewQuantity: nextPending,
-            remainingAvailableQuantity: Math.max(0, totalReleased - nextActive),
+            remainingAvailableQuantity: Math.max(0, totalReleased - nextActive - Number(parent.data.declaredLeftoverQuantity || 0)),
             reportingProgress: nextProgress,
             verificationStatus: nextProgress,
             submittedAt: now,
@@ -1978,6 +1977,7 @@ const approvePlantingReport =
     const contributionRef = contributionCollection.doc(id);
     const contributionDoc = await contributionRef.get();
     if (contributionDoc.exists) {
+      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission({ uid: approvedBy, fullName: reviewedByName, role: reviewerRole }, id, true, remarks);
       let parentId = "";
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
@@ -1999,11 +1999,8 @@ const approvePlantingReport =
         const pending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || 0);
         const active = Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0);
-        const reportingProgress = released > 0 && accepted >= released && pending === 0
-          ? "Completed"
-          : released > 0 && active >= released && pending > 0
-            ? "Fully Reported — Awaiting Review"
-            : active > 0 ? "Partial" : "Awaiting Submission";
+        const reportingProgress = progressFor({ released, active, accepted, pending,
+          leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) });
         const now = Timestamp.now();
         const earlyMonitoring = reportingProgress === "Completed" && !parent.earlyMonitoring
           ? buildEarlyMonitoringPolicy({
@@ -2079,6 +2076,8 @@ const approvePlantingReport =
 
         const currentReport =
           reportDoc.data();
+
+        if (currentReport.officialPlantingWorkflow === true) throw Object.assign(new Error("Review each official Staff submission through its Admin decision."), { status: 409 });
 
         if (currentReport.staffApprovalRequired === true && reviewerRole !== "staff") {
           throw new Error("New planting reports may only be approved by MENRO Staff.");
@@ -2213,6 +2212,7 @@ const rejectPlantingReport =
     const contributionRef = contributionCollection.doc(id);
     const contributionDoc = await contributionRef.get();
     if (contributionDoc.exists) {
+      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission({ uid: rejectedBy, fullName: reviewedByName, role: reviewerRole }, id, false, remarks);
       let parentId = "";
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
@@ -2241,13 +2241,8 @@ const rejectPlantingReport =
         const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
         const accepted = Number(parent.acceptedQuantity || 0);
-        const reportingProgress = released > 0 && accepted >= released && nextPending === 0
-          ? "Completed"
-          : released > 0 && nextActive >= released && nextPending > 0
-            ? "Fully Reported — Awaiting Review"
-            : nextActive === 0 && accepted === 0
-              ? "Awaiting Submission"
-              : nextActive > 0 ? "Partial" : "Awaiting Submission";
+        const reportingProgress = progressFor({ released, active: nextActive, accepted, pending: nextPending,
+          leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) });
         const now = Timestamp.now();
         transaction.update(contributionRef, {
           staffReviewStatus: "Rejected", reviewedBy: rejectedBy,
@@ -2257,6 +2252,7 @@ const rejectPlantingReport =
         transaction.update(eventRef, {
           recordedSeedlingsByInventory: recorded,
           recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
+          officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
           remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
             Number(event.remainingSeedlingQuantity || 0) + quantity),
           updatedAt: now,
@@ -2265,7 +2261,7 @@ const rejectPlantingReport =
           quantityPlanted: nextActive, activeSubmittedQuantity: nextActive,
           pendingReviewQuantity: nextPending,
           rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity,
-          remainingAvailableQuantity: Math.max(0, released - nextActive),
+          remainingAvailableQuantity: Math.max(0, released - nextActive - Number(parent.declaredLeftoverQuantity || 0)),
           reportingProgress,
           verificationStatus: reportingProgress,
           updatedAt: now,

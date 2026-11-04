@@ -143,7 +143,7 @@ test("all evidence-writing routes place maintenance before upload processing", (
   const fs = require("node:fs");
   const path = require("node:path");
   const sources = [
-    ["plantingReport.routes.js", 1],
+    ["plantingReport.routes.js", 2],
     ["event.routes.js", 1],
     ["guestEvent.routes.js", 1],
     ["monitoring.routes.js", 3],

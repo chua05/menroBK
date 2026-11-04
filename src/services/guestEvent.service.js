@@ -137,7 +137,7 @@ async function publicEvent(eventId, event) {
         species: item.species || item.commonName || "Tree / Seedling",
         allocated,
         recorded: Math.min(allocated, recordedQuantity),
-        remaining: Math.max(0, allocated - recordedQuantity),
+        remaining: Math.max(0, allocated - recordedQuantity - Number(event.pendingSeedlingsByInventory?.[item.inventoryId] || 0) - Number(event.leftoverSeedlingsByInventory?.[item.inventoryId] || 0)),
       };
     })
     : [];

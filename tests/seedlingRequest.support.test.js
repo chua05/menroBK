@@ -252,6 +252,27 @@ test("Staff review confirmation requires no findings or observation", async () =
   assert.equal(res.result.body.data.reviewedByName, "Staff Name");
 });
 
+test("blank proposed-site area waits for authenticated Staff verification before Admin approval", async () => {
+  const id = "proposed-site-review";
+  records.seedlingRequests.set(id, {
+    status: "Pending", participantId: "participant-site", requestVersion: 0,
+    preferredReleaseDate: validPreferredReleaseDate,
+    eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" },
+    workflow: { siteMode: "proposed", areaChoice: "", exactArea: "", siteReviewRequired: true, latitude: "12.65", longitude: "123.91" },
+  });
+  records.seedlingInventory.set("site-inventory", { species: "Narra" });
+  const payload = { items: [{ inventoryId: "site-inventory", quantity: 2 }], purpose: "Planting", plantingLocation: "Bical, Bulan", preferredReleaseDate: validPreferredReleaseDate, expectedVersion: 0, reviewedBy: "staff-real", reviewedByName: "Staff Name" };
+  await assert.rejects(service.reviewSeedlingRequest(id, payload), error => Boolean(error.fieldErrors?.verifiedAreaHectares && error.fieldErrors?.verifiedMaximumCapacity));
+  assert.equal(records.seedlingRequests.get(id).status, "Pending");
+  const reviewed = await service.reviewSeedlingRequest(id, { ...payload, siteVerification: { areaHectares: "0.5", maximumCapacity: "30", reviewedBy: "spoof" } });
+  assert.equal(reviewed.proposedSiteVerification.areaHectares, .5);
+  assert.equal(reviewed.proposedSiteVerification.maximumCapacity, 30);
+  assert.equal(reviewed.proposedSiteVerification.reviewedBy, "staff-real");
+  assert.equal(reviewed.workflow.latitude, "12.65"); assert.equal(reviewed.workflow.longitude, "123.91");
+  assert.equal(reviewed.status, "Reviewed"); assert.equal(reviewed.requestVersion, 1);
+  await assert.rejects(service.reviewSeedlingRequest(id, { ...payload, expectedVersion: 0 }), /updated by another action/);
+});
+
 test("Staff cannot complete review with unchanged expired legacy schedule", async () => {
   records.seedlingRequests.set("request-expired", {
     status: "Pending", participantId: "participant-1", requestVersion: 0,
@@ -735,7 +756,7 @@ test("submission reports unavailable secure identification storage as a service 
       },
       identification: {
         identificationType: "national_id",
-        idNumber: "1234-5678-9012",
+        idNumber: "1234-5678-9012-3456",
         confirmed: true,
       },
       eventProposal: {

@@ -111,6 +111,7 @@ const submitPlantingReport = async (
         success: false,
         message:
           "Please add at least one planting evidence photo before submitting the report.",
+        fieldErrors: { photos: "Add at least one verified planting evidence photo." },
       });
     }
 
@@ -121,6 +122,7 @@ const submitPlantingReport = async (
         success: false,
         message:
           "A maximum of 10 planting evidence photos is allowed.",
+        fieldErrors: { photos: "A maximum of 10 planting evidence photos is allowed." },
       });
     }
 
@@ -144,11 +146,13 @@ const submitPlantingReport = async (
         success: false,
         message:
           "Please complete all required planting report fields.",
+        fieldErrors: Object.fromEntries(Object.entries({ distributionId, siteId, barangay, eventId, quantityPlanted, plantingDate, plantingLocation, submittedByName, submittedBySector, submittedByContactNumber })
+          .filter(([, value]) => value == null || !String(value).trim()).map(([key]) => [key, "This field is required."])),
       });
     }
 
     if (!PARTICIPANT_SECTORS.has(String(submittedBySector).trim())) {
-      return res.status(400).json({ success: false, message: "Please select a valid sector." });
+      return res.status(400).json({ success: false, message: "Please select a valid sector.", fieldErrors: { submittedBySector: "Select a valid sector." } });
     }
 
     if (String(submittedByName).trim().length > 120 || String(submittedByContactNumber).trim().length > 30) {
@@ -156,7 +160,7 @@ const submitPlantingReport = async (
     }
 
     if (!/^(?:\+63|0)9\d{9}$/.test(String(submittedByContactNumber).replace(/[\s-]/g, ""))) {
-      return res.status(400).json({ success: false, message: "Please enter a valid Philippine mobile number." });
+      return res.status(400).json({ success: false, message: "Please enter a valid Philippine mobile number.", fieldErrors: { submittedByContactNumber: "Enter a valid Philippine mobile number." } });
     }
 
 
@@ -176,6 +180,7 @@ const submitPlantingReport = async (
         success: false,
         message:
           "Please enter a valid quantity of planted seedlings.",
+        fieldErrors: { quantityPlanted: "Enter a positive whole number of planted seedlings." },
       });
     }
 
@@ -483,7 +488,7 @@ const approveReport = async (
       data: report,
     });
   } catch (error) {
-    const statusCode = error.message === "Planting report not found."
+    const statusCode = error.status || (error.message === "Planting report not found."
       ? 404
       : error.message === "Invalid planting report ID."
         ? 400
@@ -493,7 +498,7 @@ const approveReport = async (
           : ["New planting report submissions may only be accepted by MENRO Staff.",
               "New planting reports may only be approved by MENRO Staff."].includes(error.message)
             ? 403
-          : 500;
+          : 500);
     if (statusCode === 500) console.error(error);
 
     return res.status(
@@ -545,7 +550,7 @@ const rejectReport = async (
       data: report,
     });
   } catch (error) {
-    const statusCode = error.message === "Planting report not found."
+    const statusCode = error.status || (error.message === "Planting report not found."
       ? 404
       : error.message === "Invalid planting report ID."
         ? 400
@@ -557,7 +562,7 @@ const rejectReport = async (
             ? 403
           : error.message === "Rejection reason is required."
             ? 400
-            : 500;
+            : 500);
     if (statusCode === 500) console.error(error);
 
     return res.status(

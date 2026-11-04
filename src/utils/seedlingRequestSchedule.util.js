@@ -1,5 +1,8 @@
 const MANILA_TIME_ZONE = "Asia/Manila";
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const calendar = require("../data/request-processing-holidays.json");
+const holidays = new Set(calendar.dates);
+const PROCESSING_ADVISORY = "MENRO requires 5 working days (Monday to Friday, excluding holidays) to review and process seedling requests. Your selected date is earlier than the standard processing period. You may continue, but MENRO may adjust your requested schedule.";
 
 function clean(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -17,7 +20,7 @@ function manilaDateOnly(value = new Date()) {
 
 function assertDateOnly(value, label) {
   const date = clean(value);
-  if (!DATE_ONLY.test(date) || Number.isNaN(new Date(`${date}T00:00:00+08:00`).getTime())) {
+  if (!DATE_ONLY.test(date) || Number.isNaN(new Date(`${date}T00:00:00Z`).getTime()) || new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) !== date) {
     const error = new Error(`${label} must be a valid date.`);
     error.code = "INVALID_SCHEDULE";
     throw error;
@@ -26,6 +29,7 @@ function assertDateOnly(value, label) {
 }
 
 function addWorkingDays(dateOnly, count) {
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error("Working-day count must be a nonnegative integer.");
   const date = new Date(`${assertDateOnly(dateOnly, "Submission date")}T12:00:00+08:00`);
   let added = 0;
   while (added < count) {
@@ -34,21 +38,27 @@ function addWorkingDays(dateOnly, count) {
       timeZone: MANILA_TIME_ZONE,
       weekday: "short",
     }).format(date);
-    if (weekday !== "Sat" && weekday !== "Sun") added += 1;
+    const day = manilaDateOnly(date);
+    if (!calendar.coverageYears.includes(Number(day.slice(0, 4)))) throw new Error("The published processing calendar needs an update.");
+    if (weekday !== "Sat" && weekday !== "Sun" && !holidays.has(day)) added += 1;
   }
   return manilaDateOnly(date);
 }
 
 function buildProcessingEstimate(timestamp = new Date()) {
   const submittedDate = manilaDateOnly(timestamp);
+  let standardDate = null;
+  try { standardDate = addWorkingDays(submittedDate, 5); } catch { /* Advisory dates must not be invented outside published calendar coverage. */ }
   return {
     timezone: MANILA_TIME_ZONE,
     submittedDate,
-    earliestDate: addWorkingDays(submittedDate, 3),
-    latestDate: addWorkingDays(submittedDate, 7),
-    workingDaysMinimum: 3,
-    workingDaysMaximum: 7,
-    holidayExclusionsApplied: false,
+    earliestDate: standardDate,
+    latestDate: standardDate,
+    workingDaysMinimum: 5,
+    workingDaysMaximum: 5,
+    holidayExclusionsApplied: standardDate !== null,
+    calendarVersion: calendar.version,
+    calendarBasis: "currently-proclaimed-holidays",
     advisory: true,
   };
 }
@@ -128,6 +138,7 @@ function assertExpectedVersion(request, expectedVersion) {
 }
 
 module.exports = {
+  PROCESSING_ADVISORY,
   MANILA_TIME_ZONE,
   manilaDateOnly,
   addWorkingDays,

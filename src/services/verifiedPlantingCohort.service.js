@@ -41,7 +41,8 @@ function normalizedSpecies(event = {}, report = {}) {
     const key = `${inventoryId}|${species}`;
     if ((!inventoryId && !species) || seen.has(key)) continue;
     seen.add(key);
-    output.push({ inventoryId, species, releasedQuantity: Number(item?.quantity || 0) || 0 });
+    output.push({ inventoryId, species, releasedQuantity: Number(item?.quantity || 0) || 0,
+      ...(report.officialPlantingWorkflow === true ? { verifiedPlantedQuantity: Number(report.acceptedSeedlingsByInventory?.[inventoryId] || 0) } : {}) });
   }
   if (!output.length && String(report.species || "").trim()) {
     output.push({ inventoryId: String(report.inventoryId || "").trim(), species: String(report.species).trim(), releasedQuantity: 0 });
@@ -95,6 +96,7 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
       distributionId: String(report.distributionId || report.requestId || "").trim(),
       siteId: String(report.siteId || event.plantingSiteId || "").trim(),
       species: normalizedSpecies(event, report),
+      ...(report.officialPlantingWorkflow === true ? { confirmationBases: report.confirmationBases || [] } : {}),
     },
     verifiedPlantedQuantity,
     authoritativeAt: now,

@@ -5,6 +5,8 @@ const path = require("node:path");
 
 const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
 const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true";
+const combinedWorkflow = process.env.MENRO_COMBINED_WORKFLOW_ACCEPTANCE === "true";
+if (combinedWorkflow && !isolated) throw new Error("Combined workflow acceptance requires isolated demo emulators.");
 const evidenceReadOnly = process.env.MENRO_PHASE3D4_EVIDENCE_READ_ONLY === "true";
 const releaseAcceptance = process.env.MENRO_PERMANENT_SAMPLE_RELEASE_ACCEPTANCE;
 if (releaseAcceptance !== undefined && (!extended || !isolated || !["paused", "pilot"].includes(releaseAcceptance))) throw new Error("Release acceptance requires an explicit isolated Phase 3D/4 fixture.");
@@ -74,12 +76,12 @@ async function main() {
   await fs.writeFile(diagnosticPath, "", { encoding: "utf8", flag: "wx" });
   diagnosticReady = true;
   const visitId = visitService._test.id(cohortId, "2099-01-01");
-  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId }), { encoding: "utf8", flag: "wx" });
+  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId, combinedWorkflow }), { encoding: "utf8", flag: "wx" });
   for (const [role, uid] of Object.entries(ids)) {
     const email = `${role}.${prefix}@example.test`;
     await auth.createUser({ uid, email, password, emailVerified: true });
     await db.collection("users").doc(uid).set({ role: role === "otherStaff" ? "staff" : role, status: "active", profileComplete: true, testFixture: prefix,
-      ...(extended ? { fullName: "Isolated acceptance user", username: `${role}-${prefix}`, contactNumber: "09123456789", userType: "Other", userTypeDetail: "Disposable emulator fixture" } : {}) });
+      ...(extended || combinedWorkflow ? { fullName: "Isolated acceptance user", username: `${role}-${prefix}`, contactNumber: "09123456789", userType: "Other", userTypeDetail: "Disposable emulator fixture" } : {}) });
   }
   await db.collection("sites").doc(siteId).set({ siteName: "Phase 3C browser fixture", latitude: 12.662301, longitude: 123.932983, coverageRadiusMeters: 50, status: "Active", testFixture: prefix });
   if (extended) {
@@ -91,13 +93,14 @@ async function main() {
     baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001", condition: "Healthy" }] }, testFixture: prefix });
   const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
   assert.equal(visit.status, "DRAFT");
+  const workflowFixture = combinedWorkflow ? await require("./combinedWorkflowFixture").seed(prefix) : {};
   const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
   if (releaseAcceptance === "paused") process.env.PERMANENT_SAMPLE_WRITE_PAUSED = "true";
   if (releaseAcceptance === "pilot") Object.assign(process.env, { PERMANENT_SAMPLE_PILOT_ENABLED: "true",
     PERMANENT_SAMPLE_PILOT_USER_IDS: JSON.stringify([ids.staff, ids.admin, ids.participant]), PERMANENT_SAMPLE_PILOT_COHORT_IDS: JSON.stringify([cohortId]) });
   require("../../src/config/permanentSampleRelease").resolve();
   await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project,
-    releaseAcceptance, ...releaseFixture,
+    releaseAcceptance, ...releaseFixture, ...workflowFixture,
     evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
     password, visitId: visit.id, diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));

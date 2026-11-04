@@ -1,4 +1,5 @@
 const crypto = require("crypto");
+const { identificationFormatError } = require("../utils/identificationFormat.util");
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 
@@ -37,6 +38,9 @@ const ALLOWED_INPUT_FIELDS = new Set([
 function clean(value) {
   return typeof value === "string" ? value.trim() : "";
 }
+function invalidField(field, message) {
+  return Object.assign(new Error(message), { status: 400, fieldErrors: { [field]: message } });
+}
 
 function validateIdentificationInput(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
@@ -49,30 +53,32 @@ function validateIdentificationInput(input) {
 
   const identificationType = clean(input.identificationType);
   if (!Object.hasOwn(IDENTIFICATION_TYPES, identificationType)) {
-    throw new Error("Identification Type is required.");
+    throw invalidField("identificationType", "Identification Type is required.");
   }
   if (typeof input.idNumber !== "string") {
-    throw new Error("ID Number is required.");
+    throw invalidField("idNumber", "ID Number is required.");
   }
   const idNumber = input.idNumber.trim();
   const minimumLength = identificationType === "school_id" ? 2 : 4;
   const maximumLength = identificationType === "school_id" ? 50 : 40;
   if (idNumber.length < minimumLength || idNumber.length > maximumLength) {
-    throw new Error(`ID Number must be between ${minimumLength} and ${maximumLength} characters.`);
+    throw invalidField("idNumber", `ID Number must be between ${minimumLength} and ${maximumLength} characters.`);
   }
   if (!SAFE_ID_PATTERN.test(idNumber)) {
-    throw new Error("ID Number contains unsupported characters.");
+    throw invalidField("idNumber", "ID Number contains unsupported characters.");
   }
+  const formatError = identificationFormatError(identificationType, idNumber);
+  if (formatError) throw Object.assign(new Error(formatError), { status: 400, fieldErrors: { idNumber: formatError } });
 
   const schoolInstitutionName = clean(input.schoolInstitutionName);
   if (identificationType === "school_id" && !schoolInstitutionName) {
-    throw new Error("School / Institution Name is required.");
+    throw invalidField("schoolInstitutionName", "School / Institution Name is required.");
   }
   if (schoolInstitutionName.length > 120 || /[\u0000-\u001F\u007F]/.test(schoolInstitutionName)) {
-    throw new Error("School / Institution Name is invalid.");
+    throw invalidField("schoolInstitutionName", "School / Institution Name is invalid.");
   }
   if (input.confirmed !== true) {
-    throw new Error("Please confirm that the information provided is correct.");
+    throw invalidField("confirmed", "Please confirm that the information provided is correct.");
   }
 
   return {

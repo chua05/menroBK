@@ -121,13 +121,16 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
     const doc = await db.collection(collection).doc(id).get();
     if (doc.exists) { assert.equal(doc.data().testFixture, prefix); sourceRecords.push(doc); }
   }
+  const combined = manifest?.combinedWorkflow ? await require("./combinedWorkflowFixture").inspect(prefix) : null;
+  if (combined) for (const id of combined.intentIds) intentIds.add(id);
   for (const doc of quota.docs) assert.ok(intentIds.has(doc.data().uploadIntentId));
   const docs = [...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs,
-    ...information.docs, ...informationNotifications, ...sourceRecords];
+    ...information.docs, ...informationNotifications, ...sourceRecords, ...(combined?.docs || [])];
   if (dryRun) return { records: docs.length, users: users.filter(item => item.user).length, objects: objects.size, ownershipVerified: true };
   // No mutation precedes the ownership checks above. Errors other than absent
   // resources remain failures, so cleanup can never silently claim success.
   await Promise.all([...objects].map(name => bucket.file(name).delete({ ignoreNotFound: true })));
+  if (combined) await require("./combinedWorkflowFixture").cleanupObjects(combined);
   const recordRefs = [...docs.map(doc => doc.ref), visitRef, cohortRef, siteRef, ...users.map(item => item.profileRef)];
   assert.ok(recordRefs.length <= 500, "Fixture cleanup exceeds its bounded atomic batch");
   const batch = db.batch();
@@ -139,7 +142,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   await Promise.all(users.map(async ({ uid }) => assert.equal(await auth.getUser(uid).catch(missing), null)));
   const current = await fs.readFile(fixturePath, "utf8").then(JSON.parse).catch(error => { if (error.code === "ENOENT") return null; throw error; });
   if (current?.visitId === visitId) await fs.rm(fixturePath, { force: true });
-  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: integration.projectId, visitId, cleaned: true }), "utf8");
+  await fs.writeFile(manifestPath(prefix), JSON.stringify({ ...manifest, prefix, project: integration.projectId, visitId, cleaned: true }), "utf8");
   return { recordsRemoved: docs.length + [site, cohort, visit].filter(doc => doc.exists).length,
     usersRemoved: users.filter(item => item.user).length, objectsRemoved: existingObjects.size, verified: true };
 }
