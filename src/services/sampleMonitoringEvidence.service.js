@@ -19,6 +19,10 @@ const bad = m => Object.assign(new Error(m), {
 const rid = (visitId, sampleId, revision) => `VPME-${crypto.createHash("sha256").update(`${visitId}\0${sampleId}\0${revision}`).digest("hex").slice(0, 48)}`;
 const captureSessionIdFrom = manifest => typeof manifest?.[0]?.captureSessionId === "string"
   ? manifest[0].captureSessionId : "";
+const browserDiagnostic = (value) => {
+  if (process.env.NODE_ENV === "test" && process.env.MENRO_INTEGRATION_TEST === "true" &&
+      process.env.MENRO_PHASE3C_BROWSER_ACCEPTANCE === "true") console.info("[phase3c-evidence-linkage]", value);
+};
 async function upload({
   visitId,
   sampleId,
@@ -110,7 +114,16 @@ async function upload({
       const current = v.data(),
         cohort = c.data(),
         latest = current?.sampleAssessments?.find(a => a.sampleId === sampleId);
-      if (!v.exists || !c.exists || h.exists || Number(current.version) !== Number(expectedVisitVersion) || current.cohortId !== visit.cohortId || current.siteId !== visit.siteId || Number(current.samplingPlanVersion) !== Number(visit.samplingPlanVersion) || Number(current.baselineVersion) !== Number(visit.baselineVersion) || cohort?.samplingPlan?.status !== "APPROVED" || Number(cohort?.samplingPlan?.version) !== Number(current.samplingPlanVersion) || cohort?.baseline?.approvalStatus !== "APPROVED" || Number(cohort?.baselineVersion || 0) !== Number(current.baselineVersion) || !latest || Number(latest.assessmentRevision || 0) !== Number(assessmentRevision)) throw bad("Assessment evidence changed while uploading.");
+      const failed = { missingVisit: !v.exists, missingCohort: !c.exists, existingHash: h.exists,
+        visitVersion: Number(current?.version) !== Number(expectedVisitVersion), cohortId: current?.cohortId !== visit.cohortId,
+        siteId: current?.siteId !== visit.siteId, planVersion: Number(current?.samplingPlanVersion) !== Number(visit.samplingPlanVersion),
+        baselineVersion: Number(current?.baselineVersion) !== Number(visit.baselineVersion), planStatus: cohort?.samplingPlan?.status !== "APPROVED",
+        cohortPlanVersion: Number(cohort?.samplingPlan?.version) !== Number(current?.samplingPlanVersion), baselineStatus: cohort?.baseline?.approvalStatus !== "APPROVED",
+        cohortBaselineVersion: Number(cohort?.baselineVersion || 0) !== Number(current?.baselineVersion), missingAssessment: !latest,
+        assessmentRevision: Number(latest?.assessmentRevision || 0) !== Number(assessmentRevision) };
+      const hashBinding = h.exists ? h.data() : null;
+      const existingHashMatchesCurrentBinding = Boolean(hashBinding && hashBinding.visitId === visitId && hashBinding.sampleId === sampleId && Number(hashBinding.assessmentRevision) === Number(assessmentRevision));
+      if (Object.values(failed).some(Boolean)) { browserDiagnostic({ visitId, sampleId, expectedVisitVersion, assessmentRevision, existingHashMatchesCurrentBinding, failed }); throw bad("Assessment evidence changed while uploading."); }
       const items = current.sampleAssessments.map(a => a.sampleId !== sampleId ? a : {
         ...a,
         evidenceHistory: [...(a.evidenceHistory || []), {

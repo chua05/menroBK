@@ -29,6 +29,9 @@ const app = require("../../src/app");
 const visitService = require("../../src/services/sampleMonitoringVisit.service");
 const prefix = `sample-monitoring-fixture-${randomUUID()}`;
 const ids = Object.fromEntries(["admin", "staff", "otherStaff", "participant"].map(role => [role, `${prefix}-${role}`]));
+const cleanupCreated = require("../helpers/emulatorCreatedResources").trackEmulatorCreatedResources({
+  db, auth, getBucket: getStorageBucket, prefix, users: ids,
+});
 const password = "Fixture-Only-2026!";
 const siteId = `${prefix}-site`;
 const cohortId = `${prefix}-cohort`;
@@ -68,7 +71,10 @@ test.before(async () => {
   await new Promise(resolve => server.once("listening", resolve));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { if (server) await new Promise(resolve => server.close(resolve)); });
+test.after(async () => {
+  if (server) await new Promise(resolve => server.close(resolve));
+  await cleanupCreated();
+});
 
 test("seeds a consistent Staff-owned visit recognized by capture-session preconditions", async () => {
   const visit = await visitService.get(visitService._test.id(cohortId, "2099-01-01"));

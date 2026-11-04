@@ -46,7 +46,7 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
   db ||= firebase.db;
   getBucket ||= firebase.getStorageBucket;
   const initial = resolveEvidenceStorageConfig();
-  const expectedProject = initial.gcsProduction?.projectId || "demo-menro-phase2";
+  const expectedProject = initial.gcsProduction?.projectId || require("../config/integrationEnvironment").validateIntegrationEnvironment().projectId;
   if (db.projectId !== expectedProject) throw failure("EMULATOR_REQUIRED");
   const intents = db.collection(COLLECTION);
   const contexts = new WeakSet();
@@ -60,8 +60,10 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
     guard(); // Configuration may have been revoked during keyless authentication.
     const config = resolveEvidenceStorageConfig();
     if (result.name !== config.bucket) throw failure("EMULATOR_REQUIRED");
-    if (result.storage && String(result.storage.apiEndpoint).replace(/\/$/, "") !==
-        ((config.gcsDevelopment || config.gcsProduction) ? 'https://storage.googleapis.com' : "http://127.0.0.1:9199")) {
+    const expectedEndpoint = (config.gcsDevelopment || config.gcsProduction)
+      ? "https://storage.googleapis.com"
+      : `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}`;
+    if (result.storage && String(result.storage.apiEndpoint).replace(/\/$/, "") !== expectedEndpoint) {
       throw failure("EMULATOR_REQUIRED");
     }
     return result;

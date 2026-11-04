@@ -39,7 +39,8 @@ function enabled() { return resolveEvidenceStorageConfig().cloudWorkflow === tru
 function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
   if (!enabled()) throw problem("CLOUD_WORKFLOW_DISABLED");
   db ||= require("../config/firebase").db;
-  const expectedProject = resolveEvidenceStorageConfig().gcsProduction?.projectId || "demo-menro-phase2";
+  const expectedProject = resolveEvidenceStorageConfig().gcsProduction?.projectId ||
+    require("../config/integrationEnvironment").validateIntegrationEnvironment().projectId;
   if (db.projectId !== expectedProject) throw problem("CLOUD_WORKFLOW_DISABLED");
   storage ||= require("./firebaseEvidenceStorage.service").createFirebaseEvidenceStorage();
   const operations = db.collection(COLLECTION), capabilities = new WeakSet();

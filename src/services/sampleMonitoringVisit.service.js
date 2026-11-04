@@ -124,15 +124,43 @@ async function create({
   });
   return get(visitId);
 }
-async function get(visitId) {
+async function get(visitId, { actorId, actorRole } = {}) {
   const s = await visitRef(visitId).get();
   if (!s.exists) throw Object.assign(new Error("Monitoring visit not found."), {
     status: 404
   });
+  const value = s.data();
+  if (actorRole && !['staff', 'admin'].includes(actorRole)) throw Object.assign(new Error('Monitoring visit not found.'), { status: 404 });
+  if (actorRole === 'staff' && value.createdBy !== actorId) throw Object.assign(new Error('Monitoring visit not found.'), { status: 404 });
   return {
     id: s.id,
-    ...s.data()
+    ...value
   };
+}
+async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
+  if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  if (!['staff', 'admin'].includes(actorRole)) throw Object.assign(new Error('Monitoring visits are restricted to MENRO Staff and Admin.'), { status: 403 });
+  const size = Math.max(1, Math.min(Number(limit) || 25, 50));
+  let query = db.collection('sampleMonitoringVisits');
+  if (actorRole === 'staff') query = query.where('createdBy', '==', actorId);
+  if (status) query = query.where('status', '==', String(status));
+  query = query.orderBy('visitDate', 'desc').orderBy('__name__').limit(size + 1);
+  if (cursor) {
+    const cursorDoc = await db.collection('sampleMonitoringVisits').doc(String(cursor)).get();
+    if (!cursorDoc.exists || (actorRole === 'staff' && cursorDoc.data().createdBy !== actorId)) throw Object.assign(new Error('Invalid monitoring visit cursor.'), { status: 400 });
+    query = query.startAfter(cursorDoc);
+  }
+  const snapshot = await query.get();
+  const visits = snapshot.docs.slice(0, size).map(doc => {
+    const value = doc.data(); const assessments = value.sampleAssessments || [];
+    const completed = assessments.filter(item => item.condition).length;
+    const editable = actorRole === 'staff' && value.createdBy === actorId && ['DRAFT', 'RETURNED'].includes(value.status);
+    return { id: doc.id, cohortId: value.cohortId, siteId: value.siteId, visitDate: value.visitDate, status: value.status,
+      version: value.version, samplingPlanVersion: value.samplingPlanVersion, baselineVersion: value.baselineVersion,
+      progress: { completed, total: assessments.length, rechecking: assessments.filter(item => item.recheckRequired || item.recheckQueued).length },
+      actions: { view: true, saveDraft: editable, submit: editable, review: actorRole === 'admin' && value.status === 'PENDING_ADMIN_APPROVAL' } };
+  });
+  return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null };
 }
 async function save({
   visitId,
@@ -218,6 +246,7 @@ async function review({
 }
 module.exports = {
   create,
+  list,
   get,
   save,
   review,

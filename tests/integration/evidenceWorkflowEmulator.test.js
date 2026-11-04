@@ -5,6 +5,13 @@ const { randomUUID, createHash } = require("node:crypto");
 const http = require("node:http"), https = require("node:https");
 const fs = require("node:fs/promises"), os = require("node:os"), path = require("node:path");
 const { resolveEvidenceStorageConfig } = require("../../src/config/evidenceStorage");
+const {
+  BASELINE_EVIDENCE_FIRESTORE_HOST,
+  FIRESTORE_HOST,
+  MPDO_FIRESTORE_HOST,
+  REQUEST_LETTER_FIRESTORE_HOST,
+  validateIntegrationEnvironment,
+} = require("../../src/config/integrationEnvironment");
 // emulators:exec injects demo SDK discovery metadata. It is not an application
 // credential; validate it before removing it from this isolated test child.
 if (process.env.FIREBASE_CONFIG) {
@@ -15,9 +22,22 @@ if (process.env.FIREBASE_CONFIG) {
   if (config.databaseURL) assert.equal(config.databaseURL, "https://demo-menro-phase2.firebaseio.com");
   delete process.env.FIREBASE_CONFIG;
 }
+for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL"]) {
+  assert.equal(process.env[key], undefined, `Integration test must not receive ${key}`);
+}
 if (!resolveEvidenceStorageConfig().cloudWorkflow) throw Error("Explicit credential-free demo cloud gate required");
-const approvedFirestorePort = process.env.MENRO_MPDO_BOUNDARY_ACCEPTANCE === "true" ? "8180" : "8080";
-assert.equal(process.env.FIRESTORE_EMULATOR_HOST, `127.0.0.1:${approvedFirestorePort}`);
+const integration = validateIntegrationEnvironment();
+assert.equal(integration.integration, true);
+const approvedFirestoreHost = integration.baselineEvidenceAcceptance ? BASELINE_EVIDENCE_FIRESTORE_HOST
+  : integration.requestLetterAcceptance ? REQUEST_LETTER_FIRESTORE_HOST
+  : integration.mpdoAcceptance ? MPDO_FIRESTORE_HOST
+  : FIRESTORE_HOST;
+assert.equal(process.env.FIRESTORE_EMULATOR_HOST, approvedFirestoreHost);
+assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST, "127.0.0.1:9099");
+assert.equal(process.env.FIREBASE_STORAGE_EMULATOR_HOST, "127.0.0.1:9199");
+assert.equal(process.env.GCLOUD_PROJECT, "demo-menro-phase2");
+assert.equal(process.env.FIREBASE_PROJECT_ID, "demo-menro-phase2");
+const approvedFirestorePort = approvedFirestoreHost.split(":")[1];
 const allowedPorts = new Set([approvedFirestorePort, "9099", "9199"]);
 const nativeRequest = http.request, nativeFetch = globalThis.fetch;
 http.request = function (input, ...args) {
@@ -42,6 +62,9 @@ const app = require("../../src/app");
 const prefix = `phase5-${randomUUID()}`;
 const today = dateOnlyInManila();
 const users = {}, tokens = {};
+const cleanupCreated = require("../helpers/emulatorCreatedResources").trackEmulatorCreatedResources({
+  db, auth, getBucket: getStorageBucket, prefix, users,
+});
 let server, base;
 const hash = value => createHash("sha256").update(value).digest("hex");
 async function api(role, method, route, body, key) {
@@ -147,7 +170,10 @@ test.before(async () => {
   server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   allowedPorts.add(String(server.address().port)); base = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await deleteApp(firebaseApp); });
+test.after(async () => {
+  if (server) await new Promise(resolve => server.close(resolve));
+  try { await cleanupCreated(); } finally { await deleteApp(firebaseApp); }
+});
 test("authenticated planting upload, retry/filename independence, private retrieval and ownership", async () => {
   const fields = await plantingFixture(), bytes = await image(fields.plantingDate), key = randomUUID();
   const first = ok(await api("participant", "POST", "/planting-reports", form(fields, bytes, "photos"), key));
