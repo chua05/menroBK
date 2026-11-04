@@ -98,22 +98,30 @@ function createService({ db, notify, now, enabled }) {
       gate(actor);
       return safe(requestId, await authorized(r => r.get(), requestId, actor));
     },
-    async list({ visitId, ...actor }) {
+    async list({ visitId, cursor = "", limit = 50, paged = false, ...actor }) {
       gate(actor);
+      const size = Number(limit);
+      if (!Number.isInteger(size) || size < 1 || size > 50) fail(400, "Limit must be 1–50.");
       let query = db.collection("sampleMonitoringInformationRequests");
       if (actor.actorRole === "participant") query = query.where("recipientUserId", "==", actor.actorId);
       else {
         await visit(r => r.get(), visitId, actor);
         query = query.where("visitId", "==", visitId);
       }
-      // Bounded inbox. Direct links remain independently authorized.
-      const snapshot = await query.orderBy("createdAt", "desc").limit(50).get();
+      query = query.orderBy("createdAt", "desc").orderBy("__name__", "desc");
+      if (cursor) {
+        if (!validId(cursor)) fail(400, "Invalid information cursor.");
+        const doc = await ref("sampleMonitoringInformationRequests", cursor).get();
+        if (!doc.exists || (actor.actorRole === "participant" ? doc.data().recipientUserId !== actor.actorId : doc.data().visitId !== visitId)) fail(400, "Invalid information cursor.");
+        query = query.startAfter(doc);
+      }
+      const snapshot = await query.limit(size + 1).get();
       const rows = [];
-      for (const doc of snapshot.docs) {
+      for (const doc of snapshot.docs.slice(0, size)) {
         try { rows.push(safe(doc.id, await authorized(r => r.get(), doc.id, actor))); }
         catch (error) { if (error.status !== 404 && error.status !== 409) throw error; }
       }
-      return rows;
+      return paged ? { requests: rows, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null } : rows;
     },
     async answer({ requestId, answer, expectedVersion, key, ...actor }) {
       gate(actor);

@@ -5,6 +5,8 @@ const path = require("node:path");
 
 const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
 const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true";
+const evidenceReadOnly = process.env.MENRO_PHASE3D4_EVIDENCE_READ_ONLY === "true";
+if (evidenceReadOnly && (!extended || !isolated)) throw new Error("Read-only evidence acceptance requires isolated Phase 3D/4 mode.");
 if (extended && !isolated) throw new Error("Phase 3D/4 acceptance requires isolated emulators.");
 if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true", PERMANENT_SAMPLE_ANALYTICS_ENABLED: "true" });
 const topology = isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
@@ -17,6 +19,7 @@ Object.assign(process.env, {
   VERIFIED_PLANTING_COHORT_ENABLED: "true", MENRO_PHASE3C_BROWSER_ACCEPTANCE: "true", MENRO_UPLOAD_ROOT: path.join(os.tmpdir(), `menro-phase3c-browser-${process.pid}`),
 });
 for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]) delete process.env[key];
+if (evidenceReadOnly) process.env.EVIDENCE_CLOUD_WORKFLOW_ENABLED = "false";
 
 const assert = require("node:assert/strict");
 const { auth, db } = require("../../src/config/firebase");
@@ -83,7 +86,9 @@ async function main() {
     baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001", condition: "Healthy" }] }, testFixture: prefix });
   const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
   assert.equal(visit.status, "DRAFT");
-  await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project, password, visitId: visit.id, diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
+  await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project,
+    evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
+    password, visitId: visit.id, diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));
 }
 async function stop(code = 0) {

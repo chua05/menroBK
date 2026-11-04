@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const validation = require("./sampleMonitoringValidation");
 const {
   Timestamp
 } = require("firebase-admin/firestore");
@@ -58,10 +59,8 @@ function normalize(items, samples) {
       sampleId,
       condition: a.condition,
       remarks,
-      heightCentimeters: a.heightCentimeters === "" ? null : Number(a.heightCentimeters),
-      diameterCentimeters: a.diameterCentimeters === "" ? null : Number(a.diameterCentimeters),
-      baselineReference: a.baselineReference || null,
-      previousAssessmentReference: a.previousAssessmentReference || null,
+      heightCentimeters: validation.measurement(a.heightCentimeters),
+      diameterCentimeters: validation.measurement(a.diameterCentimeters),
       investigationOutcome: outcome || null,
       searchFindings: outcome ? String(a.searchFindings).trim().slice(0, 1000) : null,
       recheckQueued: a.condition === "Needs Rechecking" && !outcome
@@ -170,6 +169,8 @@ async function save({
   submit = false
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  validation.version(expectedVersion);
+  validation.boolean(submit, "submit");
   const ref = visitRef(visitId);
   await db.runTransaction(async tx => {
     const doc = await tx.get(ref);
@@ -180,7 +181,9 @@ async function save({
     if (cur.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(cur.status) || Number(cur.version) !== Number(expectedVersion)) throw conflict("This monitoring visit is no longer editable.");
     const cohort = (await tx.get(db.collection("verifiedPlantingCohorts").doc(cur.cohortId))).data();
     const samples = cohort?.baseline?.sampleUnits || [];
-    if (cohort?.samplingPlan?.status !== "APPROVED" || cohort?.baseline?.approvalStatus !== "APPROVED" || Number(cohort.samplingPlan.version) !== Number(cur.samplingPlanVersion)) throw conflict("Approved cohort, plan, and baseline are required.");
+    validation.cohortBinding(cohort, cur);
+    const priorVisit = await validation.historicalVisit(id => tx.get(visitRef(id)), cur);
+    const inputBySampleId = new Map((assessments || []).map(row => [row?.sampleId, row]));
     const priorBySampleId = new Map((cur.sampleAssessments || []).map(entry => [entry.sampleId, entry]));
     const values = normalize(assessments, samples).map(entry => {
       const prior = priorBySampleId.get(entry.sampleId);
@@ -188,6 +191,7 @@ async function save({
       const correctedAfterReturn = cur.status === "RETURNED" && JSON.stringify(comparable(entry)) !== JSON.stringify(comparable(prior));
       return {
         ...entry,
+        ...validation.references(inputBySampleId.get(entry.sampleId), entry.sampleId, priorVisit, cur.priorVisitId),
         assessmentRevision: Number(prior?.assessmentRevision || 0) + (correctedAfterReturn ? 1 : 0),
         evidenceHistory: Array.isArray(prior?.evidenceHistory) ? prior.evidenceHistory : []
       };
@@ -223,10 +227,22 @@ async function review({
   reasons = ""
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  validation.version(expectedVersion);
+  validation.boolean(approve, "approve");
+  if (typeof reasons !== "string" || reasons.trim().length > 1000 || !approve && !reasons.trim()) {
+    throw validation.invalid("Return requires a nonblank reason (maximum 1000 characters).");
+  }
   const ref = visitRef(visitId);
   await db.runTransaction(async tx => {
     const d = await tx.get(ref);
     if (!d.exists || d.data().status !== "PENDING_ADMIN_APPROVAL" || Number(d.data().version) !== Number(expectedVersion)) throw conflict("Monitoring visit is not ready for review.");
+    const cohort = await tx.get(db.collection("verifiedPlantingCohorts").doc(d.data().cohortId));
+    validation.cohortBinding(cohort.data(), d.data());
+    if (approve) {
+      normalize(d.data().sampleAssessments, cohort.data().baseline.sampleUnits || []);
+      const prior = await validation.historicalVisit(id => tx.get(visitRef(id)), d.data());
+      for (const row of d.data().sampleAssessments) validation.references(row, row.sampleId, prior, d.data().priorVisitId);
+    }
     const now = Timestamp.now(),
       status = approve ? "APPROVED" : "RETURNED";
     tx.update(ref, {
