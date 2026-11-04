@@ -4,6 +4,9 @@ const os = require("node:os");
 const path = require("node:path");
 
 const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
+const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true";
+if (extended && !isolated) throw new Error("Phase 3D/4 acceptance requires isolated emulators.");
+if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true", PERMANENT_SAMPLE_ANALYTICS_ENABLED: "true" });
 const topology = isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
 Object.assign(process.env, {
   NODE_ENV: "test", MENRO_INTEGRATION_TEST: "true", MENRO_REQUEST_LETTER_ACCEPTANCE: "true",
@@ -67,10 +70,15 @@ async function main() {
   for (const [role, uid] of Object.entries(ids)) {
     const email = `${role}.${prefix}@example.test`;
     await auth.createUser({ uid, email, password, emailVerified: true });
-    await db.collection("users").doc(uid).set({ role: role === "otherStaff" ? "staff" : role, status: "active", profileComplete: true, testFixture: prefix });
+    await db.collection("users").doc(uid).set({ role: role === "otherStaff" ? "staff" : role, status: "active", profileComplete: true, testFixture: prefix,
+      ...(extended ? { fullName: "Isolated acceptance user", username: `${role}-${prefix}`, contactNumber: "09123456789", userType: "Other", userTypeDetail: "Disposable emulator fixture" } : {}) });
   }
   await db.collection("sites").doc(siteId).set({ siteName: "Phase 3C browser fixture", latitude: 12.662301, longitude: 123.932983, coverageRadiusMeters: 50, status: "Active", testFixture: prefix });
-  await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report` }, baselineVersion: 1,
+  if (extended) {
+    await db.collection("seedlingRequests").doc(`${prefix}-source`).set({ participantId: ids.participant, testFixture: prefix });
+    await db.collection("plantingReports").doc(`${prefix}-report`).set({ requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: 10, testFixture: prefix });
+  }
+  await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, ...(extended ? { requestId: `${prefix}-source` } : {}) }, baselineVersion: 1,
     samplingPlan: { status: "APPROVED", version: 1, selectedSamples: [{ permanentId: "TREE-001" }] },
     baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001", condition: "Healthy" }] }, testFixture: prefix });
   const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });

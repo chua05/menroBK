@@ -5,17 +5,18 @@ const crypto = require("node:crypto");
 const path = require("node:path");
 const os = require("node:os");
 const sharp = require("sharp");
+const topology = require("../helpers/emulatorTestTopology");
 
 Object.assign(process.env, {
   NODE_ENV: "test",
   MENRO_INTEGRATION_TEST: "true",
   MENRO_BASELINE_EVIDENCE_ACCEPTANCE: "true",
-  GCLOUD_PROJECT: "demo-menro-phase2",
-  FIREBASE_PROJECT_ID: "demo-menro-phase2",
-  FIRESTORE_EMULATOR_HOST: "127.0.0.1:8181",
-  FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9099",
-  FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9199",
-  FIREBASE_STORAGE_BUCKET: "demo-menro-phase2.firebasestorage.app",
+  GCLOUD_PROJECT: topology.project,
+  FIREBASE_PROJECT_ID: topology.project,
+  FIRESTORE_EMULATOR_HOST: topology.firestore,
+  FIREBASE_AUTH_EMULATOR_HOST: topology.auth,
+  FIREBASE_STORAGE_EMULATOR_HOST: topology.storage,
+  FIREBASE_STORAGE_BUCKET: topology.bucket,
   EVIDENCE_STORAGE_PROVIDER: "firebase",
   EVIDENCE_CLOUD_WORKFLOW_ENABLED: "true",
   EVIDENCE_CLOUD_READ_ENABLED: "true",
@@ -41,7 +42,7 @@ const tokens = {};
 let firstCapture, firstBytes, firstUploadKey;
 
 async function signIn(email) {
-  const response = await fetch("http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo", {
+  const response = await fetch(`http://${topology.auth}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password, returnSecureToken: true }),
   });
@@ -51,10 +52,10 @@ async function signIn(email) {
 }
 
 test.before(async () => {
-  assert.equal(process.env.GCLOUD_PROJECT, "demo-menro-phase2");
-  assert.equal(process.env.FIRESTORE_EMULATOR_HOST, "127.0.0.1:8181");
-  assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST, "127.0.0.1:9099");
-  assert.equal(process.env.FIREBASE_STORAGE_EMULATOR_HOST, "127.0.0.1:9199");
+  assert.equal(process.env.GCLOUD_PROJECT, topology.project);
+  assert.equal(process.env.FIRESTORE_EMULATOR_HOST, topology.firestore);
+  assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST, topology.auth);
+  assert.equal(process.env.FIREBASE_STORAGE_EMULATOR_HOST, topology.storage);
   for (const [role, uid] of Object.entries(ids)) {
     const email = `${uid}@example.test`;
     await auth.createUser({ uid, email, password, emailVerified: true });

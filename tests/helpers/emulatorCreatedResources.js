@@ -55,12 +55,14 @@ function trackEmulatorCreatedResources({ db, auth, getBucket, prefix, users }) {
     prototype.create = originalCreate;
     db.runTransaction = originalTransaction;
     db.collection = originalCollection;
-    assert.equal(db.projectId, "demo-menro-phase2");
+    const integration = require("../../src/config/integrationEnvironment").validateIntegrationEnvironment();
+    assert.equal(integration.integration, true);
+    assert.equal(db.projectId, integration.projectId);
     const snapshots = await Promise.all([...created.values()].map(ref => ref.get()));
     const intents = snapshots.filter(doc => doc.exists && doc.ref.parent.id === "evidenceUploadIntents");
     const actorIds = new Set([...Object.values(users), ...snapshots.filter(doc => doc.ref.parent.id === "users" || doc.ref.parent.id === "eventParticipants").map(doc => doc.id)]);
     const bucket = getBucket();
-    assert.equal(bucket.name, "demo-menro-phase2.firebasestorage.app");
+    assert.equal(bucket.name, `${integration.projectId}.firebasestorage.app`);
     for (const doc of intents) {
       const intent = doc.data();
       assert.ok(actorIds.has(intent.actorId));

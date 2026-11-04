@@ -100,8 +100,30 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   const quota = await db.collection("evidenceQuotaReservations").where("actorKey", "==", quotaActor).get();
   const days = await db.collection("evidenceQuotaDays").where("actorKey", "==", quotaActor).get();
   const audits = await db.collection("evidenceQuotaAudit").where("actorKey", "==", quotaActor).get();
+  const information = await db.collection("sampleMonitoringInformationRequests").where("visitId", "==", visitId).get();
+  const informationNotifications = [];
+  for (const doc of information.docs) {
+    const row = doc.data();
+    assert.equal(row.cohortId, cohortId); assert.equal(row.siteId, siteId);
+    assert.ok([staffId, `${prefix}-admin`].includes(row.requestedBy));
+    assert.equal(row.recipientUserId, `${prefix}-participant`);
+    assert.equal(row.sourceRequestId, `${prefix}-source`);
+    assert.equal(row.plantingReportId, `${prefix}-report`);
+    const notices = await db.collection("notifications").where("relatedRecordId", "==", doc.id).get();
+    for (const notice of notices.docs) {
+      assert.equal(notice.data().relatedRecordType, "sampleMonitoringInformation");
+      assert.ok([row.requestedBy, row.recipientUserId].includes(notice.data().recipientUserId));
+      informationNotifications.push(notice);
+    }
+  }
+  const sourceRecords = [];
+  for (const [collection, id] of [["seedlingRequests", `${prefix}-source`], ["plantingReports", `${prefix}-report`]]) {
+    const doc = await db.collection(collection).doc(id).get();
+    if (doc.exists) { assert.equal(doc.data().testFixture, prefix); sourceRecords.push(doc); }
+  }
   for (const doc of quota.docs) assert.ok(intentIds.has(doc.data().uploadIntentId));
-  const docs = [...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs];
+  const docs = [...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs,
+    ...information.docs, ...informationNotifications, ...sourceRecords];
   if (dryRun) return { records: docs.length, users: users.filter(item => item.user).length, objects: objects.size, ownershipVerified: true };
   // No mutation precedes the ownership checks above. Errors other than absent
   // resources remain failures, so cleanup can never silently claim success.
