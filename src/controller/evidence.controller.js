@@ -3,11 +3,14 @@ const {
   monitoringEvidenceForUser,
   monitoringRevisionEvidenceForUser,
   cohortBaselineEvidenceForUser,
+  sampleMonitoringEvidenceForUser,
 } = require("../services/evidenceAccess.service");
 const { sendError } = require("../utils/response.util");
 
 function evidenceStatus(error) {
+  if (["PERMANENT_SAMPLE_PILOT_FORBIDDEN", "PERMANENT_SAMPLE_RELEASE_CONFIGURATION_INVALID"].includes(error.code)) return error.status;
   if (error.code === "EVIDENCE_FORBIDDEN") return 403;
+  if (error.code === "COHORT_WORKFLOW_DISABLED") return 409;
   if (["EVIDENCE_NOT_FOUND", "INVALID_EVIDENCE_PATH"].includes(error.code) ||
       ["Planting report not found.", "Monitoring record not found."].includes(error.message)) {
     return 404;
@@ -83,4 +86,14 @@ async function getCohortBaselineEvidence(req, res) {
   }
 }
 
-module.exports = { getPlantingEvidence, getMonitoringEvidence, getMonitoringRevisionEvidence, getCohortBaselineEvidence };
+async function getSampleMonitoringEvidence(req, res) {
+  try {
+    return await sendEvidence(res, await sampleMonitoringEvidenceForUser(
+      req.params.visitId, req.params.sampleId, req.params.evidenceIndex, req.user
+    ));
+  } catch (error) {
+    return handleEvidenceError(res, error);
+  }
+}
+
+module.exports = { getPlantingEvidence, getMonitoringEvidence, getMonitoringRevisionEvidence, getCohortBaselineEvidence, getSampleMonitoringEvidence };

@@ -7,15 +7,15 @@ function sendError(res, error) {
 
 async function create(req, res) {
   try {
-    const data = await service.createCaptureSession({ actorId: req.user.uid, actorRole: req.user.role, ...(req.body || {}) });
+    const data = await service.createCaptureSession({ ...(req.body || {}), actorId: req.user.uid, actorRole: req.user.role });
     return res.status(201).json({ success: true, data });
   } catch (error) { return sendError(res, error); }
 }
 
 async function verify(req, res) {
   try {
-    const data = await service.verifyCaptureSession({ actorId: req.user.uid, actorRole: req.user.role,
-      sessionId: req.params.sessionId, file: req.file, ...(req.body || {}) });
+    const data = await service.verifyCaptureSession({ ...(req.body || {}), actorId: req.user.uid, actorRole: req.user.role,
+      sessionId: req.params.sessionId, file: req.file });
     return res.status(200).json({ success: true, data });
   } catch (error) { return sendError(res, error); }
 }

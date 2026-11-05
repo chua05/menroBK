@@ -122,8 +122,12 @@ const createCorsOptions = (env = process.env) => ({
   },
   credentials: true,
   methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Authorization", "Content-Type", ...(env.EVIDENCE_CLOUD_WORKFLOW_ENABLED === "true" &&
-    require("./evidenceStorage").resolveEvidenceStorageConfig(env).cloudWorkflow ? ["Idempotency-Key"] : [])],
+  // A header is not authorization. Requester communication has independent
+  // write gates and must retain idempotency during evidence-write rollback.
+  allowedHeaders: ["Authorization", "Content-Type", ...(
+    env.MONITORING_INFORMATION_ENABLED === "true" && require("./verifiedPlantingCohort").resolveVerifiedPlantingCohortConfig(env).enabled ||
+    env.EVIDENCE_CLOUD_WORKFLOW_ENABLED === "true" && require("./evidenceStorage").resolveEvidenceStorageConfig(env).cloudWorkflow
+      ? ["Idempotency-Key"] : [])],
   optionsSuccessStatus: 204,
 });
 

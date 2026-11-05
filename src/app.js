@@ -26,6 +26,9 @@ const searchRoutes = require("./routes/search.routes");
 const evidenceRoutes = require("./routes/evidence.routes");
 const evidenceCaptureSessionRoutes = require("./routes/evidenceCaptureSession.routes");
 const verifiedPlantingCohortRoutes = require("./routes/verifiedPlantingCohort.routes");
+const sampleMonitoringVisitRoutes = require("./routes/sampleMonitoringVisit.routes");
+const sampleMonitoringInformationRoutes = require("./routes/sampleMonitoringInformation.routes");
+const permanentSampleAnalyticsRoutes = require("./routes/permanentSampleAnalytics.routes");
 
 const app = express();
 
@@ -101,6 +104,9 @@ app.use("/api/search", searchRoutes);
 app.use("/api/evidence", evidenceRoutes);
 app.use("/api/evidence-capture-sessions", evidenceCaptureSessionRoutes);
 app.use("/api/verified-planting-cohorts", verifiedPlantingCohortRoutes);
+app.use("/api/verified-sample-monitoring", sampleMonitoringVisitRoutes);
+app.use("/api/sample-monitoring-information", sampleMonitoringInformationRoutes);
+app.use("/api/permanent-sample-analytics", permanentSampleAnalyticsRoutes);
 
 // ---------------------------------------------
 // 404

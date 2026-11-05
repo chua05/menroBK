@@ -1,0 +1,44 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const { queryMemory } = require("./helpers/queryMemory");
+const { createService: information } = require("../src/services/sampleMonitoringInformation.service");
+const { createService: analytics, summarize } = require("../src/services/permanentSampleAnalytics.service");
+test("information pages have stable tied-time boundaries, owner scope and backward compatibility", async () => {
+  const f = queryMemory(); const put = (name, id, row) => f.records(name).set(id, row);
+  put("sampleMonitoringVisits", "visit", { createdBy: "staff", cohortId: "cohort", siteId: "site" });
+  put("verifiedPlantingCohorts", "cohort", { source: { siteId: "site", requestId: "source", plantingReportId: "report" } });
+  put("plantingReports", "report", { requestId: "source", verificationStatus: "Approved", quantityPlanted: 5 });
+  put("seedlingRequests", "source", { participantId: "person" }); put("users", "person", { role: "participant", status: "active" });
+  for (let i = 0; i < 7; i++) put("sampleMonitoringInformationRequests", `Q${i}`, { visitId: "visit", cohortId: "cohort", siteId: "site", recipientUserId: "person", sourceRequestId: "source", plantingReportId: "report", createdAt: 1, question: `Question ${i}` });
+  put("sampleMonitoringInformationRequests", "foreign", { visitId: "other", recipientUserId: "other", createdAt: 2 });
+  const service = information({ db: f.db, enabled: () => true });
+  const actor = { actorId: "person", actorRole: "participant", paged: true, limit: 3 };
+  const first = await service.list(actor), second = await service.list({ ...actor, cursor: first.nextCursor }), third = await service.list({ ...actor, cursor: second.nextCursor });
+  assert.deepEqual([...first.requests, ...second.requests, ...third.requests].map(row => row.id), ["Q6", "Q5", "Q4", "Q3", "Q2", "Q1", "Q0"]);
+  assert.equal(third.nextCursor, null);
+  await assert.rejects(service.list({ ...actor, cursor: "foreign" }), { status: 400 });
+  await assert.rejects(service.list({ ...actor, limit: 51 }), { status: 400 });
+  await assert.rejects(service.list({ actorId: "other", actorRole: "staff", visitId: "visit", paged: true }), { status: 404 });
+  assert.equal((await service.list({ actorId: "staff", actorRole: "staff", visitId: "visit" })).length, 7);
+});
+test("authorized filter discovery remains usable above 1000 visits and scoped aggregation narrows first", async () => {
+  const f = queryMemory();
+  const base = { createdBy: "staff", status: "APPROVED", siteId: "site", cohortId: "large" };
+  for (let i = 0; i < 1001; i++) f.records("sampleMonitoringVisits").set(`large-${String(i).padStart(4, "0")}`, base);
+  f.records("sampleMonitoringVisits").set("a-small", { ...base, cohortId: "small", baselineVersion: 1, samplingPlanVersion: 1, visitDate: "2099-01-01", sampleAssessments: [{ sampleId: "TREE-001", condition: "Healthy" }] });
+  f.records("sampleMonitoringVisits").set("foreign", { ...base, createdBy: "other" });
+  f.records("verifiedPlantingCohorts").set("small", { source: { siteId: "site" }, baselineVersion: 1, samplingPlan: { status: "APPROVED", version: 1 }, baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001" }] } });
+  const service = analytics({ db: f.db, enabled: () => true }); const actor = { actorId: "staff", actorRole: "staff" };
+  await assert.rejects(service.get(actor), { status: 400 });
+  const filters = await service.filters(actor);
+  assert.ok(filters.filters.some(row => row.cohortId === "small")); assert.ok(filters.nextCursor);
+  assert.equal(JSON.stringify(filters).includes("createdBy"), false);
+  assert.equal((await service.get({ ...actor, cohortId: "small" })).cohorts.length, 1);
+  await assert.rejects(service.filters({ ...actor, cursor: "foreign" }), { status: 400 });
+  await assert.rejects(service.filters({ actorId: "person", actorRole: "participant" }), { status: 403 });
+});
+test("analytics exclusions disclose bounded reason counts, not private record identifiers", () => {
+  const result = summarize([{ id: "private-cohort", baseline: { approvalStatus: "RETURNED" } }], []);
+  assert.deepEqual(result.exclusions, { cohorts: 1, reasons: { unapprovedBaselineOrPlan: 1 } });
+  assert.equal(JSON.stringify(result.exclusions).includes("private-cohort"), false);
+});

@@ -2,6 +2,7 @@ const {
   db,
 } = require("../config/firebase");
 const crypto = require("crypto");
+const { plantingArea, normalizeRequestPlantingArea } = require("../utils/plantingArea.util");
 
 const {
   Timestamp,
@@ -43,6 +44,7 @@ const { createInvitationInTransaction } = require("./guestEvent.service");
 const { parentForEventInTransaction } = require("./parentPlantingReport.service");
 const {
   buildProcessingEstimate,
+  PROCESSING_ADVISORY,
   manilaDateOnly,
   scheduleFromRequest,
   normalizeSchedule,
@@ -537,6 +539,7 @@ const validateItemStructure = (
 
 const createSeedlingRequest =
   async (data, identification = null) => {
+    if (data.workflow) data = { ...data, workflow: normalizeRequestPlantingArea(data.workflow) };
     const submittedItems =
       normalizeRequestItems(
         data
@@ -724,7 +727,7 @@ const createSeedlingRequest =
         recipientUserId: cleanString(data.participantId),
         type: "request_submitted",
         title: "Seedling Request Submitted",
-        message: `${requestNumber} was submitted. MENRO normally processes requests within an estimated 3–7 working days; availability and release schedules may change.`,
+        message: `${requestNumber} was submitted. MENRO requires 5 working days (Monday to Friday, excluding holidays) to review and process seedling requests. This is not a guaranteed approval or release date.`,
         relatedRecordType: "seedlingRequest",
         relatedRecordId: docRef.id,
         requestNumber,
@@ -747,13 +750,13 @@ const createSeedlingRequest =
           submittedAt: now,
         },
       }));
-      if (cleanString(data.preferredReleaseDate) < requestData.processingEstimate.earliestDate) {
+      if (requestData.processingEstimate.earliestDate && cleanString(data.preferredReleaseDate) < requestData.processingEstimate.earliestDate) {
         createNotificationInTransaction(transaction, {
           notificationId: `request_early_release_advisory_${docRef.id}`,
           recipientUserId: cleanString(data.participantId),
           type: "request_early_release_advisory",
           title: "Preferred Release Date Advisory",
-          message: `Your preferred release date is earlier than the estimated processing window for ${requestNumber}. This is an advisory only and does not reject your request.`,
+          message: PROCESSING_ADVISORY,
           relatedRecordType: "seedlingRequest",
           relatedRecordId: docRef.id,
           requestNumber,
@@ -931,6 +934,13 @@ const reviewSeedlingRequest =
         throw new Error("Only pending requests can be reviewed.");
       }
 
+      const proposedWorkflow = currentRequest.workflow || {};
+      const needsSiteReview = proposedWorkflow.siteMode === "proposed" && !proposedWorkflow.officialSiteId &&
+        (proposedWorkflow.siteReviewRequired === true || !proposedWorkflow.areaChoice || reviewData.siteVerification != null);
+      const siteVerification = needsSiteReview
+        ? { ...require("../utils/plantingArea.util").verifiedProposedSite(reviewData.siteVerification, reviewData.reviewedBy), reviewedAt: now }
+        : null;
+
       const originalSchedule = currentRequest.originalSchedule || scheduleFromRequest(currentRequest);
       const coordinated = currentRequest.preApprovalSchedule;
       if (coordinated?.status === "AwaitingRequesterConfirmation") {
@@ -1027,6 +1037,7 @@ const reviewSeedlingRequest =
         reviewId,
         reviewStatus: "Reviewed",
         reviewRemarks: "",
+        ...(siteVerification ? { proposedSiteVerification: siteVerification } : {}),
         reviewedAt: now,
         status: "Reviewed",
         requestVersion: requestVersion(currentRequest) + 1,
@@ -1152,6 +1163,7 @@ const returnSeedlingRequest = async (
 // ========================================
 
 const resubmitSeedlingRequest = async (id, participantId, data) => {
+  if (data.workflow) data = { ...data, workflow: normalizeRequestPlantingArea(data.workflow) };
   if (
     data?.workflow?.siteMode === "proposed" &&
     cleanString(data.workflow.niyogan || data.workflow.niyoganStatus).toLowerCase() === "yes"
@@ -1467,26 +1479,22 @@ const approveSeedlingRequest =
       }
       const workflow = approvalRequest.workflow || {};
       if (workflow.siteMode === "proposed" && !workflow.officialSiteId) {
-        const areaLabels = {
-          "Less than 1 hectare": 0.5,
-          "1 hectare": 1,
-          "2 hectares": 2,
-          "3 hectares": 3,
-          "4 hectares": 4,
-          "5 hectares": 5,
-          "6–10 hectares": 8,
-          "More than 10 hectares": 11,
-        };
-        const areaHectares = workflow.areaChoice === "Other / Exact Area"
-          ? Number(workflow.exactArea)
-          : Number(areaLabels[workflow.areaChoice] || 1);
+        const area = plantingArea(workflow.areaChoice, workflow.exactArea, { optional: true });
+        if (area.error) throw Object.assign(new Error(area.error), { status: 400, fieldErrors: { [area.field]: area.error } });
+        const verified = approvalRequest.proposedSiteVerification;
+        if ((workflow.siteReviewRequired === true || area.hectares === null) && !verified) throw Object.assign(new Error("MENRO must verify the proposed site's area and capacity before registering it. The request may be submitted without an area."), {
+          status: 409, code: "PROPOSED_SITE_AREA_VERIFICATION_REQUIRED",
+        });
+        const reviewedSite = verified ? require("../utils/plantingArea.util").verifiedProposedSite(verified, verified.reviewedBy) : null;
+        const areaHectares = reviewedSite?.areaHectares ?? area.hectares;
         const site = await siteService.createSite({
           siteName: workflow.siteName,
           barangay: workflow.siteBarangay,
           siteType: workflow.landType || "Participant Proposed Site",
+          customSiteType: workflow.landType === "Other" ? workflow.landTypeOther : "",
           locationDescription: workflow.specificLocation,
           areaHectares,
-          maximumCapacity: Math.max(1, Math.ceil(areaHectares * 1000)),
+          maximumCapacity: reviewedSite?.maximumCapacity ?? Math.max(1, Math.ceil(areaHectares * 1000)),
           latitude: workflow.latitude,
           longitude: workflow.longitude,
           coverageRadiusMeters: 100,

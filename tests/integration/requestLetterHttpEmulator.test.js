@@ -68,7 +68,7 @@ async function files() {
 function payload(id = crypto.randomUUID(), individual = false) {
   return { items: [{ inventoryId, quantity: 2 }], purpose: "Private document acceptance",
     plantingLocation: "Synthetic Site", preferredReleaseDate: "2026-11-10", clientSubmissionId: id,
-    identification: { identificationType: "national_id", idNumber: `TEST-${id.slice(0, 8)}`, confirmed: true },
+    identification: { identificationType: "national_id", idNumber: "1234-5678-9012-3456", confirmed: true },
     workflow: { sector: individual ? "Resident / Individual" : "Civic Organization / NGO",
       requestingAs: individual ? "individual" : "group", siteMode: "existing",
       addressProvince: "Sorsogon", addressMunicipality: "Bulan", addressBarangay: "Bical", street: "Purok 1",

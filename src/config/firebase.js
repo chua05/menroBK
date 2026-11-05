@@ -17,6 +17,10 @@ if (unitTest && ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIRE
 if (!unitTest && process.env.MENRO_GCS_DEVELOPMENT !== "true") require("dotenv").config();
 
 let credential;
+const permanentRelease = require("./permanentSampleRelease").resolve();
+if (permanentRelease.paused || permanentRelease.pilot) console.info("[permanent-sample-release-startup]", {
+  paused: permanentRelease.paused, pilot: permanentRelease.pilot, policyFingerprint: permanentRelease.fingerprint,
+});
 const integration = unitTest ? { integration: false } : validateIntegrationEnvironment();
 const evidenceStorage = unitTest ? { storageEmulator: false, bucket: null } : resolveEvidenceStorageConfig();
 

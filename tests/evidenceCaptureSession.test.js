@@ -41,6 +41,15 @@ test("capture bindings require workflow target identifiers", () => {
     /sampling-plan version/i);
 });
 
+test("sample-monitoring capture binding is versioned, permanent-sample scoped, and does not accept omissions", () => {
+  const binding = _test.parseBinding("sample-monitoring", {
+    cohortId: "VPC-1", siteId: "site-1", visitId: "VPMV-1", sampleId: "TREE-001",
+    samplingPlanVersion: 2, baselineVersion: 3, visitVersion: 4, assessmentRevision: 5,
+  });
+  assert.deepEqual(binding, { workflow: "sample-monitoring", cohortId: "VPC-1", siteId: "site-1", visitId: "VPMV-1", sampleId: "TREE-001", samplingPlanVersion: 2, baselineVersion: 3, visitVersion: 4, assessmentRevision: 5 });
+  assert.throws(() => _test.parseBinding("sample-monitoring", { cohortId: "VPC-1", siteId: "site-1", visitId: "VPMV-1", sampleId: "TREE-001", samplingPlanVersion: 2, baselineVersion: 3, visitVersion: 4 }), /required/);
+});
+
 test("location validation rejects inaccurate, outside-Bulan, and outside-site captures", () => {
   const site = { latitude: 13, longitude: 124, coverageRadiusMeters: 50 };
   assert.equal(_test.validateLocation(site, { latitude: 13, longitude: 124, accuracy: 49 }).accuracyMeters, 49);

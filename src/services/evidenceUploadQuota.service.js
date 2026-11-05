@@ -21,7 +21,8 @@ function createEvidenceUploadQuota({ db, clock = () => new Date(), env = process
   guard();
   db ||= require("../config/firebase").db;
   const storage = resolveEvidenceStorageConfig();
-  const expectedProject = storage.gcsProduction?.projectId || "demo-menro-phase2";
+  const expectedProject = storage.gcsProduction?.projectId ||
+    require("../config/integrationEnvironment").validateIntegrationEnvironment().projectId;
   if (db.projectId !== expectedProject) fail("QUOTA_EMULATOR_REQUIRED");
   const config = resolveEvidenceUploadQuotaConfig(env), actors = new WeakSet();
   const reservations = db.collection("evidenceQuotaReservations");

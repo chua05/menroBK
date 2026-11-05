@@ -2,6 +2,7 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { activationState } = require("../utils/earlyMonitoring.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
+const { progressFor } = require("../utils/plantingBalance.util");
 
 const reports = db.collection("plantingReports");
 const submissions = db.collection("plantingContributions");
@@ -40,17 +41,13 @@ function summarizeSubmissions(entries, releasedQuantity) {
   const acceptedQuantity = quantity(accepted);
   const pendingReviewQuantity = quantity(pending);
   const rejectedQuantity = quantity(rejected);
-  const remainingAvailableQuantity = Math.max(0, Number(releasedQuantity || 0) - activeSubmittedQuantity);
-  let reportingProgress = "Awaiting Submission";
-  if (Number(releasedQuantity || 0) > 0 && acceptedQuantity >= Number(releasedQuantity) && pendingReviewQuantity === 0) {
-    reportingProgress = "Completed";
-  } else if (Number(releasedQuantity || 0) > 0 && activeSubmittedQuantity >= Number(releasedQuantity) && pendingReviewQuantity > 0) {
-    reportingProgress = "Fully Reported — Awaiting Review";
-  } else if (activeSubmittedQuantity > 0 || acceptedQuantity > 0) {
-    reportingProgress = "Partial";
-  }
+  const leftover = items => items.reduce((total, entry) => total + Number(entry.leftoverQuantity || 0), 0);
+  const declaredLeftoverQuantity = leftover(active), acceptedLeftoverQuantity = leftover(accepted), pendingReviewLeftoverQuantity = leftover(pending);
+  const remainingAvailableQuantity = Math.max(0, Number(releasedQuantity || 0) - activeSubmittedQuantity - declaredLeftoverQuantity);
+  const reportingProgress = progressFor({ released: Number(releasedQuantity || 0), active: activeSubmittedQuantity, accepted: acceptedQuantity, pending: pendingReviewQuantity,
+    leftovers: declaredLeftoverQuantity, acceptedLeftovers: acceptedLeftoverQuantity, pendingLeftovers: pendingReviewLeftoverQuantity });
   return { submissions, activeSubmittedQuantity, acceptedQuantity, pendingReviewQuantity,
-    rejectedQuantity, remainingAvailableQuantity, reportingProgress };
+    rejectedQuantity, remainingAvailableQuantity, reportingProgress, declaredLeftoverQuantity, acceptedLeftoverQuantity, pendingReviewLeftoverQuantity };
 }
 
 function parentRef(eventId) {
@@ -137,7 +134,7 @@ async function reportDetails(id, data) {
   ]);
   const event = eventDoc.exists ? eventDoc.data() : {};
   const allContributions = submissionSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-  const contributions = allContributions.filter((entry) => Array.isArray(entry.photos) && entry.photos.length > 0);
+  const contributions = allContributions.filter((entry) => entry.officialStaffReport === true || Array.isArray(entry.photos) && entry.photos.length > 0);
   const participantById = new Map(participantSnapshot.docs.map((doc) => [doc.id, doc.data()]));
   const quantityReleased = (event.seedlingItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   const summary = summarizeSubmissions(contributions, quantityReleased || data.quantityReleased);
@@ -145,12 +142,17 @@ async function reportDetails(id, data) {
     const recorded = summary.submissions.filter((entry) => entry.inventoryId === item.inventoryId &&
       entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid")
       .reduce((sum, entry) => sum + Number(entry.quantity || 0), 0);
+    const leftoverQuantity = summary.submissions.filter(entry => entry.inventoryId === item.inventoryId && entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid")
+      .reduce((sum, entry) => sum + Number(entry.leftoverQuantity || 0), 0);
     return {
       inventoryId: item.inventoryId,
       species: item.species,
       allocated: Number(item.quantity || 0),
       recorded,
-      remaining: Number(item.quantity || 0) - recorded,
+      ...(data.officialPlantingWorkflow === true || leftoverQuantity > 0 ? { leftoverQuantity } : {}),
+      // Active submissions above already include pending contributions. Their
+      // reservation ledger must not be deducted a second time in this summary.
+      remaining: Math.max(0, Number(item.quantity || 0) - recorded - leftoverQuantity),
     };
   });
   const evidence = contributions.flatMap((entry) => (entry.photos || []).map(photo =>

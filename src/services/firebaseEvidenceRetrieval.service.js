@@ -11,7 +11,7 @@ const { resolveEvidenceStorageConfig } = require("../config/evidenceStorage");
 const { matchesEvidenceObject } = require('../config/developmentGcs');
 
 const MAX_BYTES = 10 * 1024 * 1024;
-const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "cohort-baseline"]);
+const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "cohort-baseline", "sample-monitoring"]);
 const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
 const sha = value => createHash("sha256").update(value).digest("hex");
 const identifier = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value) && !value.includes("..");
@@ -109,9 +109,11 @@ function createFirebaseEvidenceRetrieval({ getBucket, timeoutMs = 30_000, maxCon
       throwIfAborted();
       const bucket = await getBucket(), config = resolveEvidenceStorageConfig();
       guard(); // Recheck read enablement after awaiting the keyless client.
+      const expectedEndpoint = (config.gcsDevelopment || config.gcsProduction)
+        ? "https://storage.googleapis.com"
+        : `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}`;
       if (bucket.name !== context.reference.bucket || bucket.name !== config.bucket || !bucket.storage ||
-          String(bucket.storage.apiEndpoint).replace(/\/$/, "") !==
-          ((config.gcsDevelopment || config.gcsProduction) ? 'https://storage.googleapis.com' : "http://127.0.0.1:9199")) {
+          String(bucket.storage.apiEndpoint).replace(/\/$/, "") !== expectedEndpoint) {
         throw failure("RETRIEVAL_EMULATOR_REQUIRED");
       }
       // Use the guarded Admin SDK File transport, keeping the uint64 generation a STRING.

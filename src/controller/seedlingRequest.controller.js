@@ -103,6 +103,7 @@ const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
 
 const validateWorkflow = (workflow = {}, purpose = "") => {
   const errors = {};
+  Object.assign(errors, require("../utils/requestLocation.util").requestLocationErrors(workflow));
   const requireField = (field, message) => {
     if (!cleanString(workflow[field])) errors[field] = message;
   };
@@ -137,8 +138,10 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
     }
   }
   ["addressProvince", "addressMunicipality", "addressBarangay", "street", "siteBarangay",
-    "areaChoice", "releaseMethod", "caretaker", "carePlan", "monitoringFrequency"]
+    "releaseMethod", "caretaker", "carePlan", "monitoringFrequency"]
     .forEach((field) => requireField(field, "This field is required."));
+  const area = require("../utils/plantingArea.util").plantingArea(workflow.areaChoice, workflow.exactArea, { optional: workflow.siteMode === "proposed" });
+  if (area.error) errors[area.field] = area.error;
   if (workflow.monitoringFrequency === "Other") requireField("monitoringOther", "Specify the monitoring frequency.");
   if (!["existing", "proposed"].includes(workflow.siteMode)) errors.siteMode = "Select a valid planting-site option.";
   if (workflow.siteMode === "existing") requireField("existingSiteId", "Select a planting site.");
@@ -148,7 +151,10 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
     if (["no", "unsure"].includes(cleanString(workflow.niyogan).toLowerCase())) {
       requireField("landType", "Select a land or area type.");
       requireField("currentCondition", "Describe the current condition or use.");
-      if (workflow.landType === "Other") requireField("landTypeOther", "Describe the type of land or area.");
+      if (workflow.landType === "Other") {
+        requireField("landTypeOther", "Describe the type of land or area.");
+        if (cleanString(workflow.landTypeOther).length > 120) errors.landTypeOther = "Use at most 120 characters for the site type.";
+      }
     }
   }
   if (isGroupWorkflow(workflow)) requireField("eventName", "Enter an event name.");
@@ -950,6 +956,7 @@ const markRequestReviewed =
           {
             reviewedBy: req.user.uid,
             reviewedByName: req.user.fullName || req.user.name || "",
+            siteVerification: req.body?.siteVerification,
             items: validatedItems,
             purpose: cleanString(purpose),
             plantingLocation: cleanString(plantingLocation),
@@ -974,12 +981,13 @@ const markRequestReviewed =
         "The same seedling inventory cannot be selected more than once.",
         "One of the linked seedling inventory records was not found.",
       ].includes(error.message) || /^Seedling item \d+ (has no selected inventory|must have a positive whole-number quantity)\.$/.test(error.message);
-      const statusCode = notFound ? 404 : conflict || ["STALE_REQUEST_VERSION", "SCHEDULE_CONFIRMATION_REQUIRED", "SCHEDULE_STALE"].includes(error.code) ? 409 : invalid ? 400 : 500;
+      const statusCode = notFound ? 404 : conflict || ["STALE_REQUEST_VERSION", "SCHEDULE_CONFIRMATION_REQUIRED", "SCHEDULE_STALE"].includes(error.code) ? 409 : invalid || error.fieldErrors ? 400 : 500;
       if (statusCode === 500) console.error("markRequestReviewed error:", error);
 
       return res.status(statusCode).json({
         success: false,
         message: statusCode === 500 ? "Failed to review request." : error.message,
+        ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
       });
     }
   };
@@ -1118,7 +1126,7 @@ const approveRequest = async (
     const isPublicError = publicMessages.includes(error.message) ||
       /^(Linked seedling inventory|Invalid approved seedling quantity|Insufficient available seedling stock)/.test(error.message || "");
 
-    const conflict = ["STALE_REQUEST_VERSION", "SCHEDULE_STALE"].includes(error.code);
+    const conflict = ["STALE_REQUEST_VERSION", "SCHEDULE_STALE", "PROPOSED_SITE_AREA_VERIFICATION_REQUIRED"].includes(error.code);
     return res.status(conflict ? 409 : isPublicError ? 400 : 500).json({
       success: false,
       message: isPublicError

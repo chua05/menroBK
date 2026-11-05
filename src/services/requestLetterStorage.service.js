@@ -24,7 +24,9 @@ function sanitizeName(value) {
 async function validatePdf(bytes) {
   let task;
   try {
-    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    // Resolve through Node's existing package search path before ESM loading.
+    // This also supports isolated worktrees using the approved NODE_PATH bridge.
+    const pdfjs = await import(require("node:url").pathToFileURL(require.resolve("pdfjs-dist/legacy/build/pdf.mjs")).href);
     task = pdfjs.getDocument({ data: new Uint8Array(bytes), disableWorker: true,
       isEvalSupported: false, useSystemFonts: false, stopEvent: true,
       maxImageSize: 25_000_000, disableFontFace: true });

@@ -17,7 +17,7 @@ function gate(res) {
 async function getCohort(req, res) {
   try {
     if (gate(res)) return;
-    return res.status(200).json({ success: true, data: await getVerifiedPlantingCohort(req.params.id) });
+    return res.status(200).json({ success: true, data: await getVerifiedPlantingCohort(req.params.id, { actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }
@@ -26,7 +26,7 @@ async function getCohort(req, res) {
 async function listCohorts(req, res) {
   try {
     if (gate(res)) return;
-    return res.status(200).json({ success: true, data: await listVerifiedPlantingCohorts() });
+    return res.status(200).json({ success: true, data: await listVerifiedPlantingCohorts({ actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }
@@ -35,7 +35,9 @@ async function listCohorts(req, res) {
 async function saveSamplingPlan(req, res) {
   try {
     if (gate(res)) return;
-    return res.status(200).json({ success: true, data: await saveSamplingPlanRecord({ cohortId: req.params.id, actorId: req.user.uid, ...req.body }) });
+    return res.status(200).json({ success: true, data: await saveSamplingPlanRecord({ expectedVersion: req.body?.expectedVersion,
+      selectionMethod: req.body?.selectionMethod, selectedSamples: req.body?.selectedSamples, speciesSiteDistribution: req.body?.speciesSiteDistribution,
+      notes: req.body?.notes, submitForApproval: req.body?.submitForApproval, cohortId: req.params.id, actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }
@@ -44,7 +46,8 @@ async function saveSamplingPlan(req, res) {
 async function approveSamplingPlan(req, res) {
   try {
     if (gate(res)) return;
-    return res.status(200).json({ success: true, data: await approveSamplingPlanRecord({ cohortId: req.params.id, actorId: req.user.uid, ...req.body }) });
+    return res.status(200).json({ success: true, data: await approveSamplingPlanRecord({ expectedVersion: req.body?.expectedVersion,
+      approve: req.body?.approve, remarks: req.body?.remarks, cohortId: req.params.id, actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }
@@ -59,7 +62,8 @@ async function saveBaseline(req, res) {
       try { return JSON.parse(value); } catch { const error = new Error("Baseline submission data is invalid."); error.status = 400; throw error; }
     };
     const data = await registerBaselineWithEvidence({ cohortId: req.params.id, actorId: req.user.uid,
-      ...req.body, sampleUnits: parse(req.body?.sampleUnits, []), evidenceManifest: parse(req.body?.evidenceManifest, []),
+      expectedVersion: req.body?.expectedVersion, status: req.body?.status,
+      sampleUnits: parse(req.body?.sampleUnits, []), evidenceManifest: parse(req.body?.evidenceManifest, []),
       files: req.files || [], idempotencyKey: req.get("Idempotency-Key") });
     return res.status(200).json({ success: true, data });
   } catch (error) {
@@ -70,7 +74,8 @@ async function saveBaseline(req, res) {
 async function approveBaseline(req, res) {
   try {
     if (gate(res)) return;
-    return res.status(200).json({ success: true, data: await approveBaselineRecord({ cohortId: req.params.id, actorId: req.user.uid, ...req.body }) });
+    return res.status(200).json({ success: true, data: await approveBaselineRecord({ expectedVersion: req.body?.expectedVersion,
+      approve: req.body?.approve, remarks: req.body?.remarks, cohortId: req.params.id, actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }

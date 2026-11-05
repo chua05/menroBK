@@ -23,38 +23,63 @@ function canonical(value) {
     .filter(key => value[key] !== undefined).map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
   throw problem("INVALID_WORKFLOW_PAYLOAD", 400);
 }
+async function operationIdentity({ actor, workflow, target, payload, binding, files, key }) {
+  const images = [];
+  for (const file of files) {
+    const details = await require("../utils/imageVerification.util").validateImageBuffer(file.buffer);
+    images.push({ sha256: digest(file.buffer), sizeBytes: file.buffer.length, format: details.format });
+  }
+  // Only workflows that supply a server-derived binding change identity.
+  // Existing workflows omit it and therefore retain their exact identity.
+  const fingerprint = digest(canonical(binding === undefined ? { payload, images } : { payload, binding, images }));
+  const scope = digest(canonical({ actor, workflow, target }));
+  return { images, fingerprint, scope, id: key === undefined ? randomUUID() : digest(canonical([scope, key])) };
+}
 function enabled() { return resolveEvidenceStorageConfig().cloudWorkflow === true; }
 function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
   if (!enabled()) throw problem("CLOUD_WORKFLOW_DISABLED");
   db ||= require("../config/firebase").db;
-  const expectedProject = resolveEvidenceStorageConfig().gcsProduction?.projectId || "demo-menro-phase2";
+  const expectedProject = resolveEvidenceStorageConfig().gcsProduction?.projectId ||
+    require("../config/integrationEnvironment").validateIntegrationEnvironment().projectId;
   if (db.projectId !== expectedProject) throw problem("CLOUD_WORKFLOW_DISABLED");
   storage ||= require("./firebaseEvidenceStorage.service").createFirebaseEvidenceStorage();
   const operations = db.collection(COLLECTION), capabilities = new WeakSet();
   const assert = operation => {
     if (!enabled() || !capabilities.has(operation)) throw problem("INVALID_WORKFLOW_CONTEXT");
   };
-  async function run({ actor, workflow, target = "", payload, files = [], key }, perform, resolve) {
+  function validateOperation({ actor, workflow, target = "", files = [], key }) {
     if (!enabled()) throw problem("CLOUD_WORKFLOW_DISABLED");
     // Every real-GCS write requires a recoverable client intent. Emulator/local
     // compatibility retains its existing optional-header contract.
     const storageConfig = resolveEvidenceStorageConfig();
     if ((storageConfig.gcsDevelopment || storageConfig.gcsProduction) && key === undefined) throw problem("INVALID_IDEMPOTENCY_KEY", 400);
     if (key !== undefined && (typeof key !== "string" || !/^[A-Za-z0-9_-]{8,128}$/.test(key))) throw problem("INVALID_IDEMPOTENCY_KEY", 400);
-    if (!["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "monitoring-resubmit", "cohort-baseline"].includes(workflow) ||
+    if (!["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "monitoring-resubmit", "cohort-baseline", "sample-monitoring"].includes(workflow) ||
         !actor || Object.keys(actor).length !== 1 || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(actor.uid ?? actor.guestParticipantId ?? "") ||
         typeof target !== "string" || target.length > 256 || !Array.isArray(files) || files.length > 10) throw problem("INVALID_WORKFLOW_CONTEXT", 400);
-    const images = [];
-    for (const file of files) {
-      const details = await require("../utils/imageVerification.util").validateImageBuffer(file.buffer);
-      images.push({ sha256: digest(file.buffer), sizeBytes: file.buffer.length, format: details.format });
+  }
+  async function resolveCompletedOperation({ actor, workflow, target = "", payload, binding, files = [], key }, resolve) {
+    validateOperation({ actor, workflow, target, files, key });
+    if (key === undefined) return null;
+    const { fingerprint, scope, id } = await operationIdentity({ actor, workflow, target, payload, binding, files, key });
+    const doc = await operations.doc(id).get();
+    if (!doc.exists) return null;
+    const saved = doc.data();
+    if (saved.scope !== scope || saved.fingerprint !== fingerprint || saved.workflow !== workflow ||
+        (binding !== undefined && canonical(saved.binding) !== canonical(binding))) {
+      throw problem("IDEMPOTENCY_CONFLICT", 409);
     }
-    const fingerprint = digest(canonical({ payload, images }));
-    const scope = digest(canonical({ actor, workflow, target }));
-    // No header means a NEW operation, never payload-based deduplication.
-    const id = key === undefined ? randomUUID() : digest(canonical([scope, key]));
+    // A legacy or incomplete record must never authorize a sample retry.
+    if (saved.status !== "COMPLETED") return null;
+    if (!saved.resultLink || typeof saved.resultLink !== "object") throw problem("EVIDENCE_RECONCILIATION_REQUIRED");
+    return resolve(saved.resultLink);
+  }
+  async function run({ actor, workflow, target = "", payload, binding, files = [], key }, perform, resolve) {
+    validateOperation({ actor, workflow, target, files, key });
+    const { fingerprint, scope, id } = await operationIdentity({ actor, workflow, target, payload, binding, files, key });
     const ref = operations.doc(id), token = randomUUID();
-    const initial = { schemaVersion: 1, scope, fingerprint, workflow, targetId: randomUUID(),
+    const initial = { schemaVersion: 1, scope, fingerprint, workflow,
+      ...(binding === undefined ? {} : { binding }), targetId: randomUUID(),
       observationId: `OBS-${randomUUID()}`, intentIds: files.map(() => randomUUID()),
       status: "RUNNING", leaseToken: token, leaseUntil: now() + LEASE_MS,
       createdAt: now(), updatedAt: now(), retentionPolicy: "retain-no-ttl-v1" };
@@ -63,7 +88,8 @@ function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
       const doc = await tx.get(ref);
       if (!doc.exists) { tx.create(ref, initial); return initial; }
       const saved = doc.data();
-      if (saved.scope !== scope || saved.fingerprint !== fingerprint) throw problem("IDEMPOTENCY_CONFLICT", 409);
+      if (saved.scope !== scope || saved.fingerprint !== fingerprint ||
+          (binding !== undefined && canonical(saved.binding) !== canonical(binding))) throw problem("IDEMPOTENCY_CONFLICT", 409);
       if (saved.schemaVersion !== 1 || saved.retentionPolicy !== "retain-no-ttl-v1" ||
           !["COMPLETED", "RUNNING", "RETRYABLE"].includes(saved.status) ||
           !Array.isArray(saved.intentIds) || saved.intentIds.length !== files.length ||
@@ -129,7 +155,7 @@ function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
       }));
     };
   }
-  return { run, upload, prepareLink };
+  return { run, upload, prepareLink, resolveCompletedOperation };
 }
 let instance;
 function workflow() { return instance ||= createEvidenceWorkflow(); }
@@ -144,4 +170,4 @@ function workflowErrorResponse(res, error) {
   return true;
 }
 module.exports = { enabled, workflow, runWorkflow, createEvidenceWorkflow, EvidenceWorkflowError,
-  workflowErrorResponse, canonical, COLLECTION };
+  workflowErrorResponse, canonical, operationIdentity, COLLECTION };

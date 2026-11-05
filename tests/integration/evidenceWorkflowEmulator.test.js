@@ -5,20 +5,41 @@ const { randomUUID, createHash } = require("node:crypto");
 const http = require("node:http"), https = require("node:https");
 const fs = require("node:fs/promises"), os = require("node:os"), path = require("node:path");
 const { resolveEvidenceStorageConfig } = require("../../src/config/evidenceStorage");
+const topology = require("../helpers/emulatorTestTopology");
+const {
+  BASELINE_EVIDENCE_FIRESTORE_HOST,
+  FIRESTORE_HOST,
+  MPDO_FIRESTORE_HOST,
+  REQUEST_LETTER_FIRESTORE_HOST,
+  validateIntegrationEnvironment,
+} = require("../../src/config/integrationEnvironment");
 // emulators:exec injects demo SDK discovery metadata. It is not an application
 // credential; validate it before removing it from this isolated test child.
 if (process.env.FIREBASE_CONFIG) {
   const config = JSON.parse(process.env.FIREBASE_CONFIG);
-  assert.equal(config.projectId, "demo-menro-phase2");
+  assert.equal(config.projectId, topology.project);
   assert.ok(Object.keys(config).every(key => ["projectId", "databaseURL", "storageBucket"].includes(key)));
-  if (config.storageBucket) assert.ok(["demo-menro-phase2.appspot.com", "demo-menro-phase2.firebasestorage.app"].includes(config.storageBucket));
-  if (config.databaseURL) assert.equal(config.databaseURL, "https://demo-menro-phase2.firebaseio.com");
+  if (config.storageBucket) assert.ok([`${topology.project}.appspot.com`, topology.bucket].includes(config.storageBucket));
+  if (config.databaseURL) assert.equal(config.databaseURL, `https://${topology.project}.firebaseio.com`);
   delete process.env.FIREBASE_CONFIG;
 }
+for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL"]) {
+  assert.equal(process.env[key], undefined, `Integration test must not receive ${key}`);
+}
 if (!resolveEvidenceStorageConfig().cloudWorkflow) throw Error("Explicit credential-free demo cloud gate required");
-const approvedFirestorePort = process.env.MENRO_MPDO_BOUNDARY_ACCEPTANCE === "true" ? "8180" : "8080";
-assert.equal(process.env.FIRESTORE_EMULATOR_HOST, `127.0.0.1:${approvedFirestorePort}`);
-const allowedPorts = new Set([approvedFirestorePort, "9099", "9199"]);
+const integration = validateIntegrationEnvironment();
+assert.equal(integration.integration, true);
+const approvedFirestoreHost = topology.isolated ? topology.firestore : integration.baselineEvidenceAcceptance ? BASELINE_EVIDENCE_FIRESTORE_HOST
+  : integration.requestLetterAcceptance ? REQUEST_LETTER_FIRESTORE_HOST
+  : integration.mpdoAcceptance ? MPDO_FIRESTORE_HOST
+  : FIRESTORE_HOST;
+assert.equal(process.env.FIRESTORE_EMULATOR_HOST, approvedFirestoreHost);
+assert.equal(process.env.FIREBASE_AUTH_EMULATOR_HOST, topology.auth);
+assert.equal(process.env.FIREBASE_STORAGE_EMULATOR_HOST, topology.storage);
+assert.equal(process.env.GCLOUD_PROJECT, topology.project);
+assert.equal(process.env.FIREBASE_PROJECT_ID, topology.project);
+const approvedFirestorePort = approvedFirestoreHost.split(":")[1];
+const allowedPorts = new Set([approvedFirestorePort, topology.auth.split(":")[1], topology.storage.split(":")[1]]);
 const nativeRequest = http.request, nativeFetch = globalThis.fetch;
 http.request = function (input, ...args) {
   const url = typeof input === "string" || input instanceof URL ? new URL(input) :
@@ -42,6 +63,9 @@ const app = require("../../src/app");
 const prefix = `phase5-${randomUUID()}`;
 const today = dateOnlyInManila();
 const users = {}, tokens = {};
+const cleanupCreated = require("../helpers/emulatorCreatedResources").trackEmulatorCreatedResources({
+  db, auth, getBucket: getStorageBucket, prefix, users,
+});
 let server, base;
 const hash = value => createHash("sha256").update(value).digest("hex");
 async function api(role, method, route, body, key) {
@@ -140,14 +164,17 @@ test.before(async () => {
     await auth.createUser({ uid, email, password, emailVerified: true });
     await db.collection("users").doc(uid).create({ role: role === "other" ? "participant" : role,
       status: "active", fullName: `Synthetic ${role}`, email });
-    const response = await fetch("http://127.0.0.1:9099/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo", {
+    const response = await fetch(`http://${topology.auth}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, returnSecureToken: true }) });
     const body = await response.json(); assert.equal(response.status, 200); tokens[role] = body.idToken; users[role] = uid;
   }
   server = app.listen(0, "127.0.0.1"); await new Promise(resolve => server.once("listening", resolve));
   allowedPorts.add(String(server.address().port)); base = `http://127.0.0.1:${server.address().port}`;
 });
-test.after(async () => { if (server) await new Promise(resolve => server.close(resolve)); await deleteApp(firebaseApp); });
+test.after(async () => {
+  if (server) await new Promise(resolve => server.close(resolve));
+  try { await cleanupCreated(); } finally { await deleteApp(firebaseApp); }
+});
 test("authenticated planting upload, retry/filename independence, private retrieval and ownership", async () => {
   const fields = await plantingFixture(), bytes = await image(fields.plantingDate), key = randomUUID();
   const first = ok(await api("participant", "POST", "/planting-reports", form(fields, bytes, "photos"), key));

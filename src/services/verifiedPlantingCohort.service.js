@@ -1,4 +1,5 @@
 const crypto = require("node:crypto");
+const release = require("../config/permanentSampleRelease");
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
@@ -40,7 +41,8 @@ function normalizedSpecies(event = {}, report = {}) {
     const key = `${inventoryId}|${species}`;
     if ((!inventoryId && !species) || seen.has(key)) continue;
     seen.add(key);
-    output.push({ inventoryId, species, releasedQuantity: Number(item?.quantity || 0) || 0 });
+    output.push({ inventoryId, species, releasedQuantity: Number(item?.quantity || 0) || 0,
+      ...(report.officialPlantingWorkflow === true ? { verifiedPlantedQuantity: Number(report.acceptedSeedlingsByInventory?.[inventoryId] || 0) } : {}) });
   }
   if (!output.length && String(report.species || "").trim()) {
     output.push({ inventoryId: String(report.inventoryId || "").trim(), species: String(report.species).trim(), releasedQuantity: 0 });
@@ -62,6 +64,10 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
 }) {
   const config = resolveVerifiedPlantingCohortConfig();
   if (!config.enabled) return null;
+  // Report completion has no trusted pilot actor; defer automatic provisioning
+  // without blocking the legacy report or inventing a backfill policy.
+  const policy = release.resolve();
+  if (policy.paused || policy.pilot) return null;
   const verifiedPlantedQuantity = authoritativeQuantity(report);
   if (!verifiedPlantedQuantity) return null;
 
@@ -90,6 +96,7 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
       distributionId: String(report.distributionId || report.requestId || "").trim(),
       siteId: String(report.siteId || event.plantingSiteId || "").trim(),
       species: normalizedSpecies(event, report),
+      ...(report.officialPlantingWorkflow === true ? { confirmationBases: report.confirmationBases || [] } : {}),
     },
     verifiedPlantedQuantity,
     authoritativeAt: now,
@@ -122,7 +129,8 @@ function safeCohort(id, data) {
     baselineHistory: Array.isArray(data?.baselineHistory) ? data.baselineHistory.map(redactBaselineEntry) : data?.baselineHistory };
 }
 
-async function getVerifiedPlantingCohort(id) {
+async function getVerifiedPlantingCohort(id, { actorId } = {}) {
+  release.assertScope(actorId, id);
   const doc = await cohorts.doc(id).get();
   if (!doc.exists) {
     const error = new Error("Verified planting cohort not found.");
@@ -132,8 +140,9 @@ async function getVerifiedPlantingCohort(id) {
   return safeCohort(doc.id, doc.data());
 }
 
-async function listVerifiedPlantingCohorts() {
-  const snapshot = await cohorts.get();
+async function listVerifiedPlantingCohorts({ actorId } = {}) {
+  const policy = release.assertUser(actorId);
+  const snapshot = await release.scopeQuery(cohorts, policy, "__name__").get();
   return snapshot.docs.map((doc) => safeCohort(doc.id, doc.data()));
 }
 
@@ -220,6 +229,7 @@ function samplingPlanSnapshot(plan) {
 }
 
 async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionMethod, selectedSamples, speciesSiteDistribution, notes, submitForApproval = false }) {
+  release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   if (!Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 0) throw new Error("A valid expected sampling-plan version is required.");
   if (!SELECTION_METHODS.has(String(selectionMethod || ""))) throw new Error("Select a documented sample-selection method.");
@@ -250,12 +260,14 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
       submittedAt: now,
     };
     const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
+    release.writeScope(actorId, cohortId);
     transaction.update(ref, { samplingPlan: plan, samplingPlanHistory: [...history, samplingPlanSnapshot(plan)], updatedAt: now });
   });
-  return getVerifiedPlantingCohort(cohortId);
+  return getVerifiedPlantingCohort(cohortId, { actorId });
 }
 
 async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
+  release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   const ref = cohorts.doc(cohortId);
   await db.runTransaction(async (transaction) => {
@@ -267,9 +279,10 @@ async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve
     const now = Timestamp.now();
     const reviewed = { ...plan, status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
     const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
+    release.writeScope(actorId, cohortId);
     transaction.update(ref, { samplingPlan: reviewed, samplingPlanHistory: [...history, samplingPlanSnapshot(reviewed)], updatedAt: now });
   });
-  return getVerifiedPlantingCohort(cohortId);
+  return getVerifiedPlantingCohort(cohortId, { actorId });
 }
 
 function parseCoordinate(value, label, min, max) {
@@ -320,6 +333,7 @@ function normalizeSampleUnits(value) {
 }
 
 async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGISTERED", sampleUnits, actorId, workflowOperation = null, captureEvidence = [], uploadedReferences = new Map() }) {
+  release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   if (!BASELINE_STATUSES.has(status)) throw new Error("Baseline status is invalid.");
   if (!Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 0) {
@@ -361,6 +375,7 @@ async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGIS
     }
     const baseline = { registeredBy: actorId, registeredAt: now, sampleUnits: units, approvalStatus: "PENDING_ADMIN_APPROVAL" };
     const history = Array.isArray(current.baselineHistory) ? current.baselineHistory : [];
+    release.writeScope(actorId, cohortId);
     transaction.update(ref, {
       baselineStatus: status === "IN_PROGRESS" ? "IN_PROGRESS" : "REGISTERED",
       baselineVersion: Number(current.baselineVersion || 0) + 1,
@@ -377,10 +392,11 @@ async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGIS
       completeEvidence?.({ cohortId });
     }
   });
-  return getVerifiedPlantingCohort(cohortId);
+  return getVerifiedPlantingCohort(cohortId, { actorId });
 }
 
 async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, evidenceManifest, files, idempotencyKey, ...rest }) {
+  release.writeScope(actorId, cohortId);
   if (!Array.isArray(files) || !files.length) throw new Error("A verified baseline photo is required for every permanent sample.");
   const manifest = Array.isArray(evidenceManifest) ? evidenceManifest : [];
   const normalizedUnits = Array.isArray(sampleUnits) ? sampleUnits : [];
@@ -443,6 +459,7 @@ async function registerBaselineWithEvidence({ cohortId, actorId, sampleUnits, ev
 async function registerBaseline(data) { return registerBaselineImpl(data); }
 
 async function approveBaseline({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
+  release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   const ref = cohorts.doc(cohortId);
   await db.runTransaction(async (transaction) => {
@@ -454,9 +471,10 @@ async function approveBaseline({ cohortId, actorId, expectedVersion, approve = t
     const now = Timestamp.now();
     const baseline = { ...current.baseline, approvalStatus: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
     const history = Array.isArray(current.baselineHistory) ? current.baselineHistory : [];
+    release.writeScope(actorId, cohortId);
     transaction.update(ref, { baseline, baselineHistory: [...history, { version: current.baselineVersion, status: baseline.approvalStatus, reviewedBy: actorId, reviewedAt: now, reviewRemarks: baseline.reviewRemarks }], updatedAt: now });
   });
-  return getVerifiedPlantingCohort(cohortId);
+  return getVerifiedPlantingCohort(cohortId, { actorId });
 }
 
 module.exports = {

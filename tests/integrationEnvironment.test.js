@@ -12,6 +12,7 @@ const mpdoValid = () => ({ ...valid(), MENRO_MPDO_BOUNDARY_ACCEPTANCE: "true",
 
 test("rejects emulator hosts when integration mode is disabled", () => {
   assert.throws(() => validateIntegrationEnvironment({ FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080" }), /require MENRO_INTEGRATION_TEST/);
+  assert.throws(() => validateIntegrationEnvironment({ MENRO_PHASE3C_ISOLATED_EMULATORS: "true" }), /require MENRO_INTEGRATION_TEST/);
 });
 test("rejects production mode, real projects, and non-loopback hosts", () => {
   assert.throws(() => validateIntegrationEnvironment({ ...valid(), NODE_ENV: "production" }), /disabled in production/);
@@ -50,6 +51,19 @@ test("accepts port 8181 for the separate explicit baseline-evidence acceptance g
   assert.equal(validateIntegrationEnvironment(env).baselineEvidenceAcceptance, true);
   assert.throws(() => validateIntegrationEnvironment({ ...env, MENRO_REQUEST_LETTER_ACCEPTANCE: "true" }), /cannot be combined/);
   assert.throws(() => validateIntegrationEnvironment({ ...env, MENRO_BASELINE_EVIDENCE_ACCEPTANCE: "false" }), /must be exactly true/);
+});
+test("accepts only the explicit Phase 3C isolated emulator topology", () => {
+  const isolated = { ...valid(), MENRO_PHASE3C_ISOLATED_EMULATORS: "true", GCLOUD_PROJECT: "demo-menro-phase3c-isolated", FIREBASE_PROJECT_ID: "demo-menro-phase3c-isolated", FIRESTORE_EMULATOR_HOST: "127.0.0.1:8281",
+    FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9299", FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9298", FIREBASE_STORAGE_BUCKET: "demo-menro-phase3c-isolated.firebasestorage.app" };
+  assert.equal(validateIntegrationEnvironment(isolated).phase3cIsolated, true);
+  for (const change of [{ MENRO_PHASE3C_ISOLATED_EMULATORS: undefined }, { FIRESTORE_EMULATOR_HOST: "127.0.0.1:8181" },
+    { FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9099" }, { FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9199" },
+    { GCLOUD_PROJECT: "production-project" }, { GCLOUD_PROJECT: "demo-menro-phase2" },
+    { FIREBASE_STORAGE_BUCKET: "demo-menro-phase2.firebasestorage.app" },
+    { FIREBASE_STORAGE_EMULATOR_HOST: undefined, FIREBASE_STORAGE_BUCKET: undefined },
+    { NODE_ENV: "development" }, { NODE_ENV: "production" },
+    ...["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"].map(key => ({ [key]: "rejected-test-value" }))
+  ]) assert.throws(() => validateIntegrationEnvironment({ ...isolated, ...change }));
 });
 test("requires an isolated temporary upload root", () => {
   const cwd = path.resolve("C:/work/menrobackend");

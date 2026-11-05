@@ -1,0 +1,5 @@
+const test=require("node:test"),assert=require("node:assert/strict");
+const routes=require("../src/routes/sampleMonitoringVisit.routes");
+const route=(method,path)=>routes.stack.find(x=>x.route?.path===path&&x.route.methods[method])?.route;
+const response=()=>({code:0,status(c){this.code=c;return this},json(){}});
+test("per-tree monitoring routes require authentication and enforce Staff/Admin boundaries",async()=>{const cases=[["post","/cohorts/:cohortId/visits","staff",true],["put","/visits/:visitId","staff",true],["post","/visits/:visitId/review","admin",true],["post","/visits/:visitId/review","staff",false],["post","/cohorts/:cohortId/visits","participant",false]];for(const [m,p,role,ok] of cases){const r=route(m,p);assert.ok(r);let next=false;const res=response();r.stack[1].handle({user:{role}},res,()=>next=true);assert.equal(next,ok);if(!ok)assert.equal(res.code,403);const unauth=response();await r.stack[0].handle({headers:{}},unauth,()=>{throw Error("unauthenticated continued")});assert.equal(unauth.code,401)}});

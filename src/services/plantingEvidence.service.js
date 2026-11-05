@@ -5,6 +5,7 @@ const { validatePlantingReport } = require("../utils/plantingVerification.util")
 const { calculateDistanceMeters, isPointInPolygon } = require("../utils/geo.util");
 const { savePlantingPhoto, deletePlantingPhoto } = require("./fileStorage.service");
 const { isPointWithinMunicipality } = require("../config/municipality");
+const { progressFor } = require("../utils/plantingBalance.util");
 
 const SITE_GPS_TOLERANCE_METERS = 50;
 
@@ -177,7 +178,7 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
       const pendingReservations = { ...(currentEvent.pendingSeedlingsByInventory || {}) };
       const reserved = Number(pendingReservations[inventoryId] || 0);
       const hasReservation = latestContribution.data().allocationReserved === true;
-      const remaining = Math.max(0, Number(allocation.quantity) - currentRecorded - reserved);
+      const remaining = Math.max(0, Number(allocation.quantity) - currentRecorded - reserved - Number(currentEvent.leftoverSeedlingsByInventory?.[inventoryId] || 0));
       if ((!hasReservation && quantity > remaining) || (hasReservation && reserved < quantity)) {
         throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
       }
@@ -189,11 +190,8 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
       const active = Number(report.activeSubmittedQuantity || 0) + quantity;
       const accepted = Number(report.acceptedQuantity || 0);
       const pending = Number(report.pendingReviewQuantity || 0) + quantity;
-      const reportingProgress = released > 0 && accepted >= released && pending === 0
-        ? "Completed"
-        : released > 0 && active >= released && pending > 0
-          ? "Fully Reported — Awaiting Review"
-          : active > 0 ? "Partial" : "Awaiting Submission";
+      const reportingProgress = progressFor({ released, active, accepted, pending,
+        leftovers: Number(report.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(report.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(report.pendingReviewLeftoverQuantity || 0) });
       const recorded = { ...(currentEvent.recordedSeedlingsByInventory || {}), [inventoryId]: currentRecorded + quantity };
       if (hasReservation) {
         pendingReservations[inventoryId] = Math.max(0, reserved - quantity);
@@ -226,6 +224,7 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
       });
       transaction.update(eventRef, {
         recordedSeedlingsByInventory: recorded,
+        officialReportingVersion: Number(currentEvent.officialReportingVersion || 0) + 1,
         pendingSeedlingsByInventory: pendingReservations,
         pendingSeedlingQuantity: Math.max(0,
           Number(currentEvent.pendingSeedlingQuantity || 0) - (hasReservation ? quantity : 0)),
@@ -239,7 +238,7 @@ async function attachEvidenceImpl(eventId, participantId, contributionId, files,
         activeSubmittedQuantity: active,
         acceptedQuantity: accepted,
         pendingReviewQuantity: pending,
-        remainingAvailableQuantity: Math.max(0, released - active),
+        remainingAvailableQuantity: Math.max(0, released - active - Number(report.declaredLeftoverQuantity || 0)),
         reportingProgress,
         verificationStatus: reportingProgress,
         updatedAt: now,

@@ -29,12 +29,13 @@ function resolveEvidenceStorageConfig(env = process.env) {
   }
   if (!development && !production && cloudWorkflow && (provider !== "firebase" || !integration.integration ||
       !env.FIREBASE_STORAGE_EMULATOR_HOST ||
-      (env.GOOGLE_CLOUD_PROJECT && env.GOOGLE_CLOUD_PROJECT !== "demo-menro-phase2") ||
+      (env.GOOGLE_CLOUD_PROJECT && env.GOOGLE_CLOUD_PROJECT !== integration.projectId) ||
       ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]
         .some(key => env[key] !== undefined))) throw new Error("Cloud evidence workflows require credential-free demo emulators.");
   if (!development && !production && cloudRead && (!integration.integration || !env.FIREBASE_STORAGE_EMULATOR_HOST ||
-      (env.STORAGE_EMULATOR_HOST !== undefined && env.STORAGE_EMULATOR_HOST !== "http://127.0.0.1:9199") ||
-      (env.GOOGLE_CLOUD_PROJECT && env.GOOGLE_CLOUD_PROJECT !== "demo-menro-phase2") ||
+      (env.STORAGE_EMULATOR_HOST !== undefined && env.STORAGE_EMULATOR_HOST !==
+        `http://${env.FIREBASE_STORAGE_EMULATOR_HOST}`) ||
+      (env.GOOGLE_CLOUD_PROJECT && env.GOOGLE_CLOUD_PROJECT !== integration.projectId) ||
       ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]
         .some(key => env[key] !== undefined))) throw new Error("Cloud evidence reads require credential-free demo emulators.");
   if (provider === "firebase" && !cloudWorkflow && !cloudRead) {

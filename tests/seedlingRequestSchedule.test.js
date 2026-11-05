@@ -12,12 +12,18 @@ const {
 
 test("working-day estimates exclude weekends and cross month/year boundaries", () => {
   assert.equal(addWorkingDays("2026-10-16", 3), "2026-10-21");
-  assert.equal(addWorkingDays("2026-12-30", 3), "2027-01-04");
+  assert.equal(addWorkingDays("2026-12-30", 3), "2027-01-06");
   assert.deepEqual(buildProcessingEstimate("2026-10-16T01:00:00Z"), {
-    timezone: "Asia/Manila", submittedDate: "2026-10-16", earliestDate: "2026-10-21",
-    latestDate: "2026-10-27", workingDaysMinimum: 3, workingDaysMaximum: 7,
-    holidayExclusionsApplied: false, advisory: true,
+    timezone: "Asia/Manila", submittedDate: "2026-10-16", earliestDate: "2026-10-23",
+    latestDate: "2026-10-23", workingDaysMinimum: 5, workingDaysMaximum: 5,
+    holidayExclusionsApplied: true, calendarVersion: "2026-11-05", calendarBasis: "currently-proclaimed-holidays", advisory: true,
   });
+});
+
+test("published holidays are excluded and unknown calendar coverage never becomes a promised date", () => {
+  assert.equal(addWorkingDays("2026-12-23", 5), "2027-01-06");
+  assert.throws(() => addWorkingDays("2029-01-01", 5), /calendar needs an update/);
+  assert.equal(buildProcessingEstimate("2029-01-01T00:00:00Z").earliestDate, null);
 });
 
 test("planting can be on the release date but never before it", () => {
