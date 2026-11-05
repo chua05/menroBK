@@ -7,7 +7,7 @@ const {
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
 const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
-const { progressFor } = require("../utils/plantingBalance.util");
+const { availableForReporting, progressFor, wholeQuantity } = require("../utils/plantingBalance.util");
 
 const {
   createVerificationLogInTransaction,
@@ -353,14 +353,18 @@ const toTimestampOrNull = (
 // --------------------------------
 async function createPlantingReport(data, files) {
   const { idempotencyKey, ...payload } = data;
+  if (payload.leftoverQuantity != null && payload.leftoverQuantity !== "" && !wholeQuantity(payload.leftoverQuantity)) {
+    throw Object.assign(new Error("Leftovers must be a nonnegative whole number."), { status: 400, fieldErrors: { leftoverQuantity: "Enter a nonnegative whole number." } });
+  }
   const { runWorkflow } = require("./evidenceWorkflow.service");
   const fingerprintPayload = Object.fromEntries(["distributionId", "inventoryId", "siteId", "barangay",
     "quantityPlanted", "plantingDate", "plantingLocation", "eventId", "eventName", "remarks",
     "submittedByName", "submittedBySector", "submittedByContactNumber"].map(key => [key, payload[key]]));
+  if (Number(payload.leftoverQuantity || 0) !== 0) fingerprintPayload.leftoverQuantity = Number(payload.leftoverQuantity);
   return runWorkflow({ actor: { uid: data.participantId }, workflow: "planting-report",
     key: idempotencyKey, payload: fingerprintPayload, files },
   operation => createPlantingReportImpl({ ...payload, workflowOperation: operation }, files),
-  link => getPlantingReportById(link.recordId));
+  async link => ({ ...await getPlantingReportById(link.recordId), ...(link.contributionId ? { participantSubmissionId: link.contributionId } : {}) }));
 }
 const createPlantingReportImpl = async (
   data,
@@ -458,6 +462,10 @@ const createPlantingReportImpl = async (
     Number(
       data.quantityPlanted
     );
+  const leftoverQuantity = data.leftoverQuantity == null || data.leftoverQuantity === "" ? 0 : data.leftoverQuantity;
+  if (!wholeQuantity(leftoverQuantity)) throw Object.assign(new Error("Leftovers must be a nonnegative whole number."), { status: 400, fieldErrors: { leftoverQuantity: "Enter a nonnegative whole number." } });
+  const leftovers = Number(leftoverQuantity);
+
 
   const quantityReleased = Number(
     selectedDistributionItem?.releasedQuantity ??
@@ -661,6 +669,7 @@ if (submittedEventId) {
 
 }
 
+if (!linkedEvent?.sourceRequestId && leftovers > 0) throw Object.assign(new Error("Leftovers require an authoritative linked release and event."), { status: 409, fieldErrors: { leftoverQuantity: "MENRO must reconcile this legacy release before recording leftovers." } });
 if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
   throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${quantityReleased} trees remain available for reporting.`);
 }
@@ -1535,8 +1544,9 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
         const reserved = Number(event.pendingSeedlingsByInventory?.[inventoryId] || 0);
         const remaining = Math.max(0, Number(currentAllocation.quantity) - current - reserved - Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0));
-        if (quantityPlanted > remaining) {
-          throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`);
+        if (quantityPlanted + leftovers > remaining) {
+          const message = `Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`;
+          throw Object.assign(new Error(message), { status: 400, fieldErrors: { quantityPlanted: message } });
         }
         parentId = `event_${submittedEventId}`;
         const hashDocs = await Promise.all(uploadedPhotos.map((photo) =>
@@ -1544,7 +1554,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         if (hashDocs.some((doc) => doc.exists)) {
           throw new Error("Duplicate planting image detected.");
         }
-        const initialProgress = quantityPlanted >= Number(event.seedlingTotalQuantity || 0) &&
+        const initialProgress = quantityPlanted + leftovers >= Number(event.seedlingTotalQuantity || 0) &&
           submissionStaffReviewStatus === "Pending Review"
           ? "Fully Reported — Awaiting Review"
           : quantityPlanted >= Number(event.seedlingTotalQuantity || 0)
@@ -1552,6 +1562,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         const parent = await parentForEventInTransaction(
           transaction, submittedEventId, event, now, quantityPlanted, initialProgress, {
             activeSubmittedQuantity: quantityPlanted,
+            declaredLeftoverQuantity: leftovers,
             acceptedQuantity: 0,
             pendingReviewQuantity: quantityPlanted,
             reportingProgress: initialProgress,
@@ -1569,8 +1580,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           recordedSeedlingsByInventory: recorded,
           officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
           recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + quantityPlanted,
-          remainingSeedlingQuantity: Number(event.seedlingTotalQuantity || 0) -
-            Number(event.recordedSeedlingQuantity || 0) - quantityPlanted,
+          ...(leftovers ? { leftoverSeedlingsByInventory: { ...(event.leftoverSeedlingsByInventory || {}), [inventoryId]: Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0) + leftovers }, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) + leftovers } : {}),
+          remainingSeedlingQuantity: Math.max(0, event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) - quantityPlanted - leftovers),
           updatedAt: now,
         });
         if (!parent.created) {
@@ -1579,13 +1590,14 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           const nextPending = Number(parent.data.pendingReviewQuantity || 0) + quantityPlanted;
           const totalReleased = Number(event.seedlingTotalQuantity || parent.data.quantityReleased || 0);
           const nextProgress = progressFor({ released: totalReleased, active: nextActive, accepted: nextAccepted, pending: nextPending,
-            leftovers: Number(parent.data.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.data.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.data.pendingReviewLeftoverQuantity || 0) });
+            leftovers: Number(parent.data.declaredLeftoverQuantity || 0) + leftovers, acceptedLeftovers: Number(parent.data.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.data.pendingReviewLeftoverQuantity || 0) + leftovers });
           transaction.update(parent.ref, {
             quantityPlanted: Number(parent.data.quantityPlanted || 0) + quantityPlanted,
             activeSubmittedQuantity: nextActive,
             acceptedQuantity: nextAccepted,
+            ...(leftovers ? { declaredLeftoverQuantity: Number(parent.data.declaredLeftoverQuantity || 0) + leftovers, pendingReviewLeftoverQuantity: Number(parent.data.pendingReviewLeftoverQuantity || 0) + leftovers } : {}),
             pendingReviewQuantity: nextPending,
-            remainingAvailableQuantity: Math.max(0, totalReleased - nextActive - Number(parent.data.declaredLeftoverQuantity || 0)),
+            remainingAvailableQuantity: Math.max(0, totalReleased - nextActive - Number(parent.data.declaredLeftoverQuantity || 0) - leftovers),
             reportingProgress: nextProgress,
             verificationStatus: nextProgress,
             submittedAt: now,
@@ -1615,6 +1627,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           requestedQuantity,
           releasedQuantity: quantityReleased,
           quantity: quantityPlanted,
+          ...(leftovers ? { leftoverQuantity: leftovers } : {}),
           recordedAt: now,
           photos: uploadedPhotos,
           imageHashes: uploadedPhotos.map((photo) => photo.imageHash),
@@ -1703,7 +1716,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       });
       persisted = true;
       const doc = await reportCollection.doc(parentId).get();
-      return reportDetails(doc.id, doc.data());
+      return { ...await reportDetails(doc.id, doc.data()), participantSubmissionId: contributionRef.id };
     }
 
     const docRef = operation ? reportCollection.doc(operation.targetId) : reportCollection.doc();
@@ -1994,13 +2007,13 @@ const approvePlantingReport =
         const parentDoc = await transaction.get(parentRef);
         if (!parentDoc.exists) throw new Error("Planting report not found.");
         const parent = parentDoc.data();
-        const quantity = Number(current.quantity || 0);
+        const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
         const accepted = Number(parent.acceptedQuantity || 0) + quantity;
         const pending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || 0);
         const active = Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0);
         const reportingProgress = progressFor({ released, active, accepted, pending,
-          leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) });
+          leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0) + leftover, pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
         const now = Timestamp.now();
         const earlyMonitoring = reportingProgress === "Completed" && !parent.earlyMonitoring
           ? buildEarlyMonitoringPolicy({
@@ -2016,6 +2029,7 @@ const approvePlantingReport =
         });
         transaction.update(parentRef, {
           acceptedQuantity: accepted, pendingReviewQuantity: pending,
+          ...(leftover ? { acceptedLeftoverQuantity: Number(parent.acceptedLeftoverQuantity || 0) + leftover, pendingReviewLeftoverQuantity: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover } : {}),
           reportingProgress,
           verificationStatus: reportingProgress,
           updatedAt: now,
@@ -2233,7 +2247,7 @@ const rejectPlantingReport =
         if (!parentDoc.exists || !eventDoc.exists) throw new Error("Planting report not found.");
         const parent = parentDoc.data();
         const event = eventDoc.data();
-        const quantity = Number(current.quantity || 0);
+        const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
         const inventoryId = current.inventoryId;
         const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
         recorded[inventoryId] = Math.max(0, Number(recorded[inventoryId] || 0) - quantity);
@@ -2242,7 +2256,7 @@ const rejectPlantingReport =
         const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
         const accepted = Number(parent.acceptedQuantity || 0);
         const reportingProgress = progressFor({ released, active: nextActive, accepted, pending: nextPending,
-          leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) });
+          leftovers: Number(parent.declaredLeftoverQuantity || 0) - leftover, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
         const now = Timestamp.now();
         transaction.update(contributionRef, {
           staffReviewStatus: "Rejected", reviewedBy: rejectedBy,
@@ -2251,17 +2265,19 @@ const rejectPlantingReport =
         });
         transaction.update(eventRef, {
           recordedSeedlingsByInventory: recorded,
+          ...(leftover ? { leftoverSeedlingsByInventory: { ...(event.leftoverSeedlingsByInventory || {}), [inventoryId]: Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0) - leftover }, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover } : {}),
           recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
           officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
           remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
-            Number(event.remainingSeedlingQuantity || 0) + quantity),
+            (event.seedlingItems || []).reduce((sum, item) => sum + availableForReporting(event, item), 0) + quantity + leftover),
           updatedAt: now,
         });
         transaction.update(parentRef, {
           quantityPlanted: nextActive, activeSubmittedQuantity: nextActive,
           pendingReviewQuantity: nextPending,
+          ...(leftover ? { declaredLeftoverQuantity: Number(parent.declaredLeftoverQuantity || 0) - leftover, pendingReviewLeftoverQuantity: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover } : {}),
           rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity,
-          remainingAvailableQuantity: Math.max(0, released - nextActive - Number(parent.declaredLeftoverQuantity || 0)),
+          remainingAvailableQuantity: Math.max(0, released - nextActive - Number(parent.declaredLeftoverQuantity || 0) + leftover),
           reportingProgress,
           verificationStatus: reportingProgress,
           updatedAt: now,

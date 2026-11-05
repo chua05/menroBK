@@ -83,6 +83,7 @@ const submitPlantingReport = async (
       barangay,
 
       quantityPlanted,
+      leftoverQuantity,
       plantingDate,
       plantingLocation,
 
@@ -311,7 +312,7 @@ const submitPlantingReport = async (
       "Photo capture timestamp is in the future and cannot be verified.",
     ];
 
-    const statusCode = notFoundErrors.includes(error.message)
+    const statusCode = [400, 409, 422].includes(error.status) ? error.status : notFoundErrors.includes(error.message)
       ? 404
       : validationErrors.includes(error.message) || error.message.startsWith("Quantity exceeds the remaining reportable quantity.")
       ? 400
@@ -325,6 +326,7 @@ const submitPlantingReport = async (
         statusCode === 500
           ? "Failed to submit planting report. Please try again."
           : error.message,
+      ...(statusCode < 500 && error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
     });
   }
 };

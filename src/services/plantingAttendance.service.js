@@ -3,16 +3,17 @@ const { db, getStorageBucket } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { resolveEvidenceStorageConfig } = require("../config/evidenceStorage");
 const { validateRequestLetterFile } = require("./requestLetterStorage.service");
-const fail = (status, message) => Object.assign(new Error(message), { status });
+const fail = (status, message) => Object.assign(new Error(message), { status, ...(status === 400 || status === 413 ? { fieldErrors: { attendance: message } } : {}) });
 function storageConfig() {
   const storage = resolveEvidenceStorageConfig();
   if (!storage.cloudWorkflow || !storage.cloudRead || !storage.bucket) throw fail(503, "Private attendance storage is unavailable. The report can be submitted without attendance documentation.");
   return storage;
 }
 function identifier(value) { return typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value); }
-async function context(user, id, write) {
+async function context(user, id, write, participant = false) {
   if (!user?.uid) throw fail(401, "Authentication is required.");
   if (!identifier(id)) throw fail(404, "Attendance file not found.");
+  if (participant) return participantContext(user, id, write);
   if (!(write ? ["staff"] : ["staff", "admin"]).includes(user.role)) throw fail(403, "MENRO access is required.");
   const contributionRef = db.collection("plantingContributions").doc(id), contribution = await contributionRef.get();
   if (!contribution.exists || contribution.data().officialStaffReport !== true || !identifier(contribution.data().officialOperationId)) throw fail(404, "Attendance file not found.");
@@ -22,11 +23,28 @@ async function context(user, id, write) {
   if (!operation.exists || operation.data().reportId !== contribution.data().reportId || !operation.data().submissionIds.includes(id)) throw fail(404, "Attendance file not found.");
   return { operationRef, operation: operation.data() };
 }
+async function participantContext(user, id, write) {
+  if (!(write ? ["participant"] : ["participant", "staff", "admin"]).includes(user.role)) throw fail(403, "Attendance access is not authorized.");
+  const ref = db.collection("plantingContributions").doc(id), row = await ref.get(), data = row.data();
+  if (!row.exists || data.officialStaffReport === true || !data.authenticatedSubmitterUid || user.role === "participant" && data.authenticatedSubmitterUid !== user.uid) throw fail(404, "Attendance file not found.");
+  const operationRef = db.collection("plantingAttendanceOperations").doc(`PA-${createHash("sha256").update(id).digest("hex")}`);
+  if (write) await db.runTransaction(async tx => {
+    const [latest, op] = await Promise.all([tx.get(ref), tx.get(operationRef)]);
+    if (!latest.exists || latest.data().authenticatedSubmitterUid !== user.uid) throw fail(404, "Attendance file not found.");
+    if (!op.exists) {
+      if (latest.data().staffReviewStatus !== "Pending Review") throw fail(409, "Attendance cannot be added after Staff review.");
+      tx.create(operationRef, { ownerId: user.uid, ownerRole: "participant", requestId: data.requestId, eventId: data.eventId, reportId: data.reportId, submissionIds: [id], createdAt: Timestamp.now() });
+    }
+  });
+  const op = await operationRef.get();
+  if (!op.exists || op.data().ownerId !== data.authenticatedSubmitterUid || op.data().reportId !== data.reportId || op.data().submissionIds?.length !== 1 || op.data().submissionIds[0] !== id) throw fail(404, "Attendance file not found.");
+  return { operationRef, operation: op.data() };
+}
 function boundPath(operationRef, descriptor) {
   return descriptor && descriptor.objectName === `planting-attendance/v1/${operationRef.id}/${descriptor.sha256}` && /^[a-f0-9]{64}$/.test(descriptor.sha256);
 }
-async function uploadAttendance(user, id, file) {
-  const config = storageConfig(), { operationRef, operation: initialOperation } = await context(user, id, true);
+async function uploadAttendance(user, id, file, participant = false) {
+  const config = storageConfig(), { operationRef, operation: initialOperation } = await context(user, id, true, participant);
   if (!file || !["application/pdf", "image/jpeg", "image/png"].includes(file.mimetype)) throw fail(400, "Attendance must be a PDF, JPEG or PNG file not larger than 10 MB.");
   let validated;
   try { validated = await validateRequestLetterFile(file); } catch { throw fail(400, "Attendance must be a valid, safe PDF, JPEG or PNG file not larger than 10 MB."); }
@@ -48,7 +66,7 @@ async function uploadAttendance(user, id, file) {
     await quota.reserve(actor, { intentId, day: quotaDay, fileCount: 1, byteCount: validated.sizeBytes });
     await db.runTransaction(async tx => {
       const opDoc = await tx.get(operationRef); const op = opDoc.data();
-      if (!opDoc.exists || op.staffId !== user.uid) throw fail(404, "Attendance file not found.");
+      if (!opDoc.exists || (op.ownerId || op.staffId) !== user.uid) throw fail(404, "Attendance file not found.");
       if (op.attendance) {
         if (op.attendance.sha256 !== validated.sha256) throw fail(409, "Attendance is immutable. Keep the original file with this submission.");
         completed = true; return;
@@ -74,7 +92,7 @@ async function uploadAttendance(user, id, file) {
     const descriptor = { objectName, bucket: config.bucket, generation: String(metadata.generation), contentType: validated.contentType, sha256: validated.sha256, sizeBytes: validated.sizeBytes, uploadedAt: metadata.timeCreated };
     await db.runTransaction(async tx => {
       const opDoc = await tx.get(operationRef), op = opDoc.data();
-      if (!opDoc.exists || op.staffId !== user.uid || op.attendanceLease !== lease || op.attendance || !boundPath(operationRef, descriptor)) throw fail(409, "Attendance upload changed. Refresh the report.");
+      if (!opDoc.exists || (op.ownerId || op.staffId) !== user.uid || op.attendanceLease !== lease || op.attendance || !boundPath(operationRef, descriptor)) throw fail(409, "Attendance upload changed. Refresh the report.");
       const rows = await Promise.all(op.submissionIds.map(row => tx.get(db.collection("plantingContributions").doc(row))));
       if (rows.some(row => !row.exists || row.data().staffReviewStatus !== "Pending Review")) throw fail(409, "Attendance cannot be changed after Admin review.");
       await quota.finalizeInTransaction(tx, actor, intentId, { uploadIntentId: intentId, generation: descriptor.generation, sizeBytes: descriptor.sizeBytes, uploadedAt: descriptor.uploadedAt });
@@ -93,10 +111,10 @@ async function uploadAttendance(user, id, file) {
     throw error;
   }
 }
-async function streamAttendance(user, id, response) {
+async function streamAttendance(user, id, response, participant = false) {
   const storage = resolveEvidenceStorageConfig();
   if (!storage.cloudRead || !storage.bucket) throw fail(503, "Private attendance retrieval is unavailable.");
-  const { operationRef, operation } = await context(user, id, false), descriptor = operation.attendance;
+  const { operationRef, operation } = await context(user, id, false, participant), descriptor = operation.attendance;
   if (!boundPath(operationRef, descriptor) || descriptor.bucket !== storage.bucket) throw fail(404, "Attendance file not found.");
   const bucket = getStorageBucket();
   if (bucket.name !== descriptor.bucket) throw fail(503, "Private attendance retrieval is unavailable.");
@@ -116,10 +134,16 @@ async function cleanupAttendanceObject(operationId, expectedRequestId) {
   const storage = storageConfig();
   if (!storage.storageEmulator || !require("../config/integrationEnvironment").validateIntegrationEnvironment().integration) throw fail(403, "Explicit attendance fixture cleanup requires the approved demo emulator environment.");
   if (!identifier(operationId) || !identifier(expectedRequestId)) throw fail(400, "Invalid cleanup context.");
-  const ref = db.collection("officialPlantingOperations").doc(operationId), doc = await ref.get();
+  const ref = db.collection(operationId.startsWith("PA-") ? "plantingAttendanceOperations" : "officialPlantingOperations").doc(operationId), doc = await ref.get();
   if (!doc.exists) return { deleted: false };
   const op = doc.data();
   if (op.requestId !== expectedRequestId || op.attendanceLeaseUntil > Date.now()) throw fail(409, "Attendance cleanup ownership or lease mismatch.");
+  if (operationId.startsWith("PA-")) {
+    const id = op.submissionIds?.[0];
+    if (op.ownerRole !== "participant" || op.submissionIds?.length !== 1 || !identifier(id) || operationId !== `PA-${createHash("sha256").update(id).digest("hex")}`) throw fail(409, "Attendance cleanup ownership mismatch.");
+    const submission = await db.collection("plantingContributions").doc(id).get();
+    if (!submission.exists || submission.data().officialStaffReport === true || submission.data().authenticatedSubmitterUid !== op.ownerId || submission.data().reportId !== op.reportId || submission.data().requestId !== expectedRequestId || submission.data().eventId !== op.eventId) throw fail(409, "Attendance cleanup relationship mismatch.");
+  }
   const descriptor = op.attendance || op.attendanceIntent;
   if (!descriptor) return { deleted: false };
   if (!boundPath(ref, descriptor) || descriptor.bucket !== storage.bucket) throw fail(409, "Attendance cleanup binding mismatch.");
@@ -131,4 +155,6 @@ async function cleanupAttendanceObject(operationId, expectedRequestId) {
     await object.delete({ ifGenerationMatch: metadata.generation }); return { deleted: true };
   } catch (error) { if (Number(error.code) === 404) return { deleted: false }; throw error; }
 }
-module.exports = { uploadAttendance, streamAttendance, cleanupAttendanceObject };
+module.exports = { uploadAttendance, streamAttendance, cleanupAttendanceObject,
+  uploadParticipantAttendance: (user, id, file) => uploadAttendance(user, id, file, true),
+  streamParticipantAttendance: (user, id, response) => streamAttendance(user, id, response, true) };

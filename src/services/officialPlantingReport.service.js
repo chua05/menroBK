@@ -49,7 +49,16 @@ async function listReleasedOptions(user, { cursor, requestId } = {}) {
     if (!safeId(request.eventId)) continue;
     const [event, distribution] = await Promise.all([db.collection("events").doc(request.eventId).get(), db.collection("distributions").doc(doc.id).get()]);
     if (!event.exists || !distribution.exists) continue;
-    try { options.push(optionsFor(doc.id, request, event.id, event.data(), distribution.data())); }
+    try {
+      const option = optionsFor(doc.id, request, event.id, event.data(), distribution.data());
+      const siteDoc = option.siteId ? await db.collection("sites").doc(option.siteId).get() : null;
+      const site = siteDoc?.exists ? siteDoc.data() : {};
+      options.push({ ...option, requestNumber: request.requestNumber || doc.id, distributionNumber: distribution.data().distributionNumber || distribution.id,
+        siteName: site.siteName || option.siteName, barangay: site.barangay || event.data().barangay || "",
+        latitude: Number.isFinite(site.latitude) ? site.latitude : null, longitude: Number.isFinite(site.longitude) ? site.longitude : null,
+        coverageRadiusMeters: Number.isFinite(site.coverageRadiusMeters) && site.coverageRadiusMeters > 0 ? site.coverageRadiusMeters : null,
+        startTime: event.data().startTime || event.data().time || "", endTime: event.data().endTime || "" });
+    }
     catch (error) { if (error.status !== 409) throw error; /* Reconciliation is fail-closed; never invent an allocation. */ }
   }
   return { options, nextCursor: snapshot.docs.length > 50 ? page.at(-1).id : null };
@@ -131,6 +140,7 @@ async function submitOfficialReport(user, input) {
     if (correctionRef) transaction.update(correctionRef, { correctedBySubmission: rows[0].id });
     transaction.update(eventRef, { recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftovers,
       recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + planted, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) + leftover,
+      remainingSeedlingQuantity: Math.max(0, event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) - planted - leftover),
       officialReportingVersion: input.expectedVersion + 1, updatedAt: now });
     transaction.update(parentRef, { officialPlantingWorkflow: true, quantityPlanted: active, activeSubmittedQuantity: active, pendingReviewQuantity: pending, declaredLeftoverQuantity: declaredLeftovers,
       pendingReviewLeftoverQuantity: pendingLeftovers, remainingAvailableQuantity: Math.max(0, Number(parent.quantityReleased) - active - declaredLeftovers), reportingProgress: progress, verificationStatus: progress, submittedAt: now, updatedAt: now,
@@ -150,6 +160,17 @@ async function reviewOfficialSubmission(user, id, approve, reason = "") {
     if (!doc.exists || doc.data().officialStaffReport !== true) throw fail(404, "Official submission not found.");
     const current = doc.data(); parentId = current.reportId;
     if (current.staffReviewStatus !== "Pending Review") throw fail(409, "Only pending official submissions can be decided.");
+    if (approve && current.confirmationBasis === "menro-field-report") {
+      const operation = await transaction.get(db.collection("officialPlantingOperations").doc(current.officialOperationId));
+      const evidenceId = operation.data()?.evidenceSubmissionId;
+      const evidence = evidenceId ? await transaction.get(db.collection("plantingContributions").doc(evidenceId)) : null;
+      const photos = evidence?.data()?.photos;
+      if (!operation.exists || operation.data().evidenceVerified !== true || Number(operation.data().evidenceRevision) !== Number(current.revision || 0) ||
+          !evidence?.exists || evidence.data().officialOperationId !== current.officialOperationId || evidence.data().authenticatedSubmitterUid !== current.authenticatedSubmitterUid ||
+          !photos?.length || photos.some(photo => !photo.privateEvidence || !photo.gpsValid || !photo.siteGpsValid || !photo.timestampValid)) {
+        throw fail(409, "Verified private planting photos are required before approving a MENRO Field Report.");
+      }
+    }
     const parentRef = db.collection("plantingReports").doc(parentId), eventRef = db.collection("events").doc(current.eventId);
     const [parentDoc, eventDoc] = await Promise.all([transaction.get(parentRef), transaction.get(eventRef)]);
     if (!parentDoc.exists || !eventDoc.exists || parentDoc.data().requestId !== current.requestId || eventDoc.data().sourceRequestId !== current.requestId) throw fail(409, "Official report relationships require reconciliation.");
@@ -185,6 +206,7 @@ async function reviewOfficialSubmission(user, id, approve, reason = "") {
       recorded[current.inventoryId] -= quantity; leftovers[current.inventoryId] -= leftover;
       transaction.update(eventRef, { recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftovers,
         recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) - quantity, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover,
+        remainingSeedlingQuantity: event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) + quantity + leftover,
         officialReportingVersion: Number(event.officialReportingVersion || 0) + 1, updatedAt: now });
     }
     transaction.update(parentRef, nextParent);

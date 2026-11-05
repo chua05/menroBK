@@ -131,6 +131,33 @@ test("client disconnect while preparing cancels upstream, and concurrency slots 
   first.output.destroy(); await expectation;
   h.faults.metadataHang = false; await h.streamTo(h.token(), sink().output);
 });
+
+test("late SDK response after client cancellation cannot abort retry-request inside its response callback", async () => {
+  const { PassThrough } = require("node:stream");
+  const retryRequest = require("retry-request");
+  const h = await fixture(), response = sink();
+  let releaseHeaders, ready;
+  const responseHandled = new Promise((resolve, reject) => {
+    releaseHeaders = () => {
+      try {
+        ready.emit("response", { statusCode: 200, headers: {} });
+        ready.end(JSON.stringify(h.metadata)); resolve();
+      } catch (error) { reject(error); }
+    };
+  });
+  h.bucket.file = () => ({ interceptors: [], requestStream() {
+    return retryRequest({}, { retries: 0, noResponseRetries: 0, request() {
+      ready = new PassThrough(); return ready;
+    } });
+  } });
+  const pending = h.streamTo(h.token(), response.output);
+  const rejected = assert.rejects(pending, { code: "CLIENT_DISCONNECTED" });
+  // Wait for SDK request construction, then disconnect BEFORE response headers.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(ready); response.output.destroy(); await rejected;
+  releaseHeaders(); await responseHandled;
+  assert.equal(response.bytes(), 0);
+});
 test("wrong bucket/endpoint and production are rejected; explicit read-only firebase provider is safe", async () => {
   const h = await fixture(); h.bucket.name = "menrosystem-ddfac.firebasestorage.app";
   await assert.rejects(() => h.streamTo(h.token(), sink().output), { code: "RETRIEVAL_EMULATOR_REQUIRED" });

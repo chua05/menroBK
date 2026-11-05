@@ -34,7 +34,7 @@ const {
 const { parseRequestLetterSubmission } = require("../middleware/requestLetterUpload.middleware");
 
 // Non-sensitive capability used to coordinate staggered frontend/backend releases.
-router.get("/capabilities", verifyToken, authorizeRoles("participant"), getSeedlingRequestCapabilities);
+router.get("/capabilities", verifyToken, authorizeRoles("participant", "staff"), getSeedlingRequestCapabilities);
 
 // ========================================
 // PARTICIPANT — SUBMIT REQUEST
@@ -43,7 +43,7 @@ router.get("/capabilities", verifyToken, authorizeRoles("participant"), getSeedl
 router.post(
   "/",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("participant", "staff"),
   parseRequestLetterSubmission,
   submitSeedlingRequest
 );
@@ -75,7 +75,7 @@ router.get(
 router.get(
   "/my",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("participant", "staff"),
   getMySeedlingRequests
 );
 
@@ -93,7 +93,7 @@ router.patch(
 );
 
 router.patch("/:id/pre-approval-schedule", verifyToken, authorizeRoles("staff"), savePreApprovalSchedule);
-router.patch("/:id/pre-approval-schedule/confirm", verifyToken, authorizeRoles("participant"), confirmPreApproval);
+router.patch("/:id/pre-approval-schedule/confirm", verifyToken, authorizeRoles("participant", "staff"), confirmPreApproval);
 
 // Staff may return only a currently pending request for participant revision.
 router.patch(
@@ -107,7 +107,7 @@ router.patch(
 router.patch(
   "/:id/resubmit",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("participant", "staff"),
   parseRequestLetterSubmission,
   resubmitRequest
 );
@@ -174,7 +174,7 @@ router.patch(
 );
 
 router.patch("/:id/late-release-conflict", verifyToken, authorizeRoles("staff"), createLateReleaseConflict);
-router.patch("/:id/late-release-rescheduling/proposal", verifyToken, authorizeRoles("participant"), submitLateReleaseProposal);
+router.patch("/:id/late-release-rescheduling/proposal", verifyToken, authorizeRoles("participant", "staff"), submitLateReleaseProposal);
 router.patch("/:id/late-release-rescheduling/return", verifyToken, authorizeRoles("staff"), returnLateReleaseProposal);
 router.patch("/:id/late-release-rescheduling/approve", verifyToken, authorizeRoles("staff"), approveLateReleaseProposal);
 

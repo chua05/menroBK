@@ -367,6 +367,9 @@ const submitSeedlingRequest = async (
   req,
   res
 ) => {
+  if (!req.user?.uid || !["participant", "staff"].includes(req.user.role)) {
+    return res.status(req.user?.uid ? 403 : 401).json({ success: false, message: "Authenticated Participant or Staff requester access is required." });
+  }
   try {
     const participantId =
       req.user.uid;
@@ -446,7 +449,7 @@ const submitSeedlingRequest = async (
     const organization = req.user.organization || "";
     const contactNumber = req.user.contactNumber || "";
 
-    if (!cleanString(organization)) {
+    if (!cleanString(organization) && (req.user.role !== "staff" || groupRequest)) {
       return res.status(400).json({
         success: false,
         message: "Your organization information is missing from your profile. Please update your profile before submitting this request.",
@@ -469,9 +472,7 @@ const submitSeedlingRequest = async (
       !cleanString(
         participantName
       ) ||
-      !cleanString(
-        organization
-      ) ||
+      (!cleanString(organization) && (req.user.role !== "staff" || groupRequest)) ||
       !cleanString(
         contactNumber
       ) ||
@@ -658,7 +659,7 @@ const submitSeedlingRequest = async (
 
         clientSubmissionId: cleanString(clientSubmissionId),
 
-        workflow: workflow && typeof workflow === "object" ? workflow : {},
+        workflow: { ...(workflow && typeof workflow === "object" ? workflow : {}), fullName: cleanString(participantName), contactNumber: cleanString(contactNumber) },
 
         ...(privateRequestLetter ? { requestLetter: { privateDocument: privateRequestLetter } } : {}),
 
@@ -739,7 +740,7 @@ const submitSeedlingRequest = async (
 
         inventoryReleased:
           false,
-      }, validatedIdentification);
+      }, validatedIdentification, { uid: participantId, role: req.user.role });
 
     return res.status(201).json({
       success: true,
@@ -973,6 +974,7 @@ const markRequestReviewed =
           updatedRequest,
       });
     } catch (error) {
+      if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
       const notFound = error.message === "Seedling request not found.";
       const conflict = error.message === "Only pending requests can be reviewed.";
       const invalid = [
@@ -1024,6 +1026,7 @@ const returnRequestForRevision = async (req, res) => {
       data: request,
     });
   } catch (error) {
+    if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     const notFound = error.message === "Seedling request not found.";
     const conflict = error.message === "Only pending requests can be returned for revision.";
     const statusCode = notFound ? 404 : conflict || error.code === "STALE_REQUEST_VERSION" ? 409 : 400;
@@ -1038,6 +1041,7 @@ const resubmitRequest = async (req, res) => {
   try {
     requireExpectedVersion(req.body);
     const requestData = validateResubmissionPayload(req.body);
+    requestData.workflow = { ...requestData.workflow, fullName: cleanString(req.user.fullName || req.user.name), contactNumber: cleanString(req.user.contactNumber) };
     if (req.file) {
       const requestLetterStorageEnabled = require("../config/requestLetterStorage")
         .resolveRequestLetterStorageConfig().enabled;
@@ -1106,6 +1110,7 @@ const approveRequest = async (
       data: request,
     });
   } catch (error) {
+    if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     console.error(
       "approveRequest error:",
       error
@@ -1173,6 +1178,7 @@ const rejectRequest = async (
       data: request,
     });
   } catch (error) {
+    if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     console.error(
       "rejectRequest error:",
       error
@@ -1214,6 +1220,7 @@ const releaseRequest = async (
       data: request,
     });
   } catch (error) {
+    if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     console.error(
       "releaseRequest error:",
       error
@@ -1234,6 +1241,7 @@ const scheduleActionResponse = (handler, successMessage) => async (req, res) => 
     const data = await handler(req);
     return res.status(200).json({ success: true, message: successMessage, data });
   } catch (error) {
+    if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     const conflictCodes = ["STALE_REQUEST_VERSION", "SCHEDULE_CONFIRMATION_REQUIRED", "SCHEDULE_STALE", "NO_LATE_RELEASE_CONFLICT", "UNRESOLVED_LATE_RELEASE_CONFLICT", "EVENT_ALREADY_HAS_PLANTING_ACTIVITY"];
     const forbidden = /only (confirm|update) your own/i.test(error.message || "");
     const notFound = /not found/i.test(error.message || "");

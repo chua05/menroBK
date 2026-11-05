@@ -148,6 +148,10 @@ async function plantingEvidenceForUser(reportId, photoIndex, user) {
 
   const photo = plantingPhotos(report)[parseIndex(photoIndex)];
   if (!photo) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const source = (report.submissions || []).find(submission => submission.id === photo._evidenceRecordId);
+  if (source?.officialStaffReport && user.role !== "admin" && !(user.role === "staff" && source.authenticatedSubmitterUid === user.uid)) {
+    throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
+  }
   if (hasPrivateReference(photo)) return cloudEvidence(photo.privateEvidence,
     report.reportType === "parent" ? photo._evidenceRecordId : report.id,
     report.reportType === "parent" ? "planting-contribution" : "planting-report");
