@@ -1,10 +1,12 @@
+const { approvedEstimate } = require("../utils/permanentSampleEstimate.util");
 const CONDITIONS = ["Healthy", "Damaged", "Dead", "Needs Rechecking"];
 const release = require("../config/permanentSampleRelease");
 const error = (status, message) => Object.assign(new Error(message), { status });
 const safeId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value);
 
 // A cohort/sample pair is the permanent identity. Counts use one latest
-// approved visit per cohort and never extrapolate to whole-site survival.
+// approved visit per cohort. Whole-cohort estimates require separate explicit
+// sampling-validity approval and complete, resolved tree observations.
 function summarize(cohorts, visits) {
   const output = [];
   const reasons = {};
@@ -53,10 +55,10 @@ function summarize(cohorts, visits) {
     }
     if (invalid) exclude("invalidAssessments");
     else output.push({ cohortId: cohort.id, siteId: cohort.source.siteId,
-      baselineVersion: cohort.baselineVersion, samplingPlanVersion: plan.version, latest: history.at(-1), history });
+      baselineVersion: cohort.baselineVersion, samplingPlanVersion: plan.version, latest: history.at(-1), history, estimate: approvedEstimate(cohort, plan, history.at(-1)) });
   }
   return { cohorts: output, exclusions: { cohorts: Object.values(reasons).reduce((a, b) => a + b, 0), reasons }, limitations: [
-    "Approved permanent samples only; these are not official whole-site survival estimates.",
+    "Approved permanent samples only. Eligible estimates require complete assessments and explicit approval of sampling validity; official aggregate KPIs remain separate.",
     "Needs Rechecking and Not Located After Rechecking are unresolved, not confirmed deaths.",
     "Only the current approved baseline and plan are comparable. Invalid or ambiguous records are excluded.",
   ] };

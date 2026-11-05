@@ -91,6 +91,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/sites", siteRoutes);
 app.use("/api/seedling-requests", seedlingRequestRoutes);
+app.use("/api/purpose-policies", require("./routes/purposePolicy.routes"));
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/distributions", distributionRoutes);
 app.use("/api/planting-reports", plantingReportRoutes);

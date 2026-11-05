@@ -47,7 +47,7 @@ async function approveSamplingPlan(req, res) {
   try {
     if (gate(res)) return;
     return res.status(200).json({ success: true, data: await approveSamplingPlanRecord({ expectedVersion: req.body?.expectedVersion,
-      approve: req.body?.approve, remarks: req.body?.remarks, cohortId: req.params.id, actorId: req.user.uid }) });
+      approve: req.body?.approve, estimationEligibilityApproved: req.body?.estimationEligibilityApproved, remarks: req.body?.remarks, cohortId: req.params.id, actorId: req.user.uid }) });
   } catch (error) {
     return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
   }

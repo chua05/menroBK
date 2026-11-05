@@ -628,6 +628,48 @@ test("participant planted plus leftover balances reserve once and become accepte
   } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
 });
 
+test("final planting confirmation covers exactly 100 released = 80 planted + 20 final leftovers", async t => {
+  const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  const requestId = "request-final-confirmation", eventId = "event-final-confirmation";
+  seedApproved(requestId, eventId);
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", { items: [{ inventoryId: "calamansi", releasedQuantity: 100, shortReleaseReason: "Only ten required" }] });
+  Object.assign(table("events").get(eventId), { recordStatus: "scheduled", plantingSiteId: "site-final-confirmation", barangay: "Bical" });
+  table("sites").set("site-final-confirmation", { status: "active", siteName: "Leftovers site", barangay: "Bical", latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50 });
+  const bytes = await sharp({ create: { width: 9, height: 9, channels: 3, background: "purple" } }).jpeg().withExif({
+    IFD0: { Make: "Fixture camera" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1", GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1" },
+  }).toBuffer();
+  const file = { buffer: bytes, mimetype: "image/jpeg", originalname: "leftovers-evidence.jpg" };
+  const payload = { distributionId: requestId, inventoryId: "calamansi", siteId: "site-final-confirmation", participantId: "participant-1", participantName: "Participant One", participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical", quantityPlanted: 80, leftoverQuantity: 20, confirmationMode: "final", plantingDate: "2026-09-17", plantingLocation: "Leftovers site", eventId };
+  let report;
+  try {
+    for (const leftoverQuantity of [-1, 1.5, Infinity, "1e3"]) await assert.rejects(service.createPlantingReport({ ...payload, leftoverQuantity }, [file]), /whole number/);
+    await assert.rejects(service.createPlantingReport({ ...payload, leftoverQuantity: 19 }, [file]), /final confirmation must cover/);
+    report = await service.createPlantingReport(payload, [file]);
+    assert.equal(report.acceptedQuantity, 0); assert.equal(report.pendingReviewQuantity, 80);
+    assert.equal(report.pendingReviewLeftoverQuantity, 20); assert.equal(report.remainingAvailableQuantity, 0);
+    assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 80);
+    assert.equal(table("events").get(eventId).leftoverSeedlingQuantity, 20);
+    assert.equal(table("events").get(eventId).remainingSeedlingQuantity, 0);
+    assert.equal(report.submissions[0].staffReviewStatus, "Pending Review");
+    const priorGate = process.env.VERIFIED_PLANTING_COHORT_ENABLED;
+    process.env.VERIFIED_PLANTING_COHORT_ENABLED = "true";
+    t.after(() => { if (priorGate === undefined) delete process.env.VERIFIED_PLANTING_COHORT_ENABLED; else process.env.VERIFIED_PLANTING_COHORT_ENABLED = priorGate; });
+    const runTransaction = db.runTransaction.bind(db);
+    t.mock.method(db, "runTransaction", handler => runTransaction(transaction => {
+      let wrote = false;
+      const get = transaction.get.bind(transaction);
+      transaction.get = ref => { assert.equal(wrote, false, "Firestore requires all cohort reads before approval writes"); return get(ref); };
+      for (const method of ["create", "set", "update"]) { const write = transaction[method].bind(transaction); transaction[method] = (...args) => { wrote = true; return write(...args); }; }
+      return handler(transaction);
+    }));
+    const approved = await service.approvePlantingReport(report.submissions[0].id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+    assert.equal(approved.acceptedQuantity, 80); assert.equal(approved.acceptedLeftoverQuantity, 20);
+    assert.equal(approved.pendingReviewLeftoverQuantity, 0); assert.equal(approved.remainingAvailableQuantity, 0);
+  } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
+});
+
+
 test("image without EXIF GPS is rejected even when client coordinates are supplied", async () => {
   const sharp = require("sharp");
   const controller = require("../src/controller/plantingReport.controller");
@@ -1140,4 +1182,40 @@ test("global search returns role-safe record links without exposing another part
   assert.equal(roleTamperResponse.result.code, 200);
   assert.equal(roleTamperResponse.result.body.data.results.some((item) => item.id === "search-other"), false);
   assert.equal(roleTamperResponse.result.body.data.results.some((item) => item.type === "Inventory Sapling"), false);
+});
+
+
+test("partial 60 then final 30 plus 10 leftovers preserves a 40 future balance and confirms only 90 planted", async () => {
+  const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  const requestId = "request-partial-then-final", eventId = "event-partial-then-final", siteId = "site-partial-then-final";
+  seedApproved(requestId, eventId);
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", { items: [{ inventoryId: "calamansi", releasedQuantity: 100 }] });
+  Object.assign(table("events").get(eventId), { recordStatus: "scheduled", plantingSiteId: siteId, barangay: "Bical" });
+  table("sites").set(siteId, { status: "active", siteName: "Partial fixture", barangay: "Bical", latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50 });
+  const body = { distributionId: requestId, inventoryId: "calamansi", siteId, participantId: "participant-1", participantName: "Participant One", participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical", plantingDate: "2026-09-17", plantingLocation: "Partial fixture", eventId };
+  let report;
+  try {
+    for (const [index, quantity, leftover, mode] of [[0, 60, 0, "partial"], [1, 30, 10, "final"]]) {
+      const buffer = await sharp({ create: { width: 11 + index, height: 11 + index, channels: 3, background: index ? "teal" : "pink" } }).jpeg().withExif({
+        IFD0: { Make: "Fixture camera" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1", GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1" },
+      }).toBuffer();
+      const file = { buffer, mimetype: "image/jpeg", originalname: `partial-final-${index}.jpg` };
+      report = await service.createPlantingReport({ ...body, quantityPlanted: quantity, leftoverQuantity: leftover, confirmationMode: mode }, [file]);
+      const submission = report.submissions.at(-1);
+      report = await service.approvePlantingReport(submission.id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+      if (!index) { assert.equal(report.remainingAvailableQuantity, 40); assert.equal(report.acceptedLeftoverQuantity || 0, 0); }
+      else { assert.equal(report.remainingAvailableQuantity, 0); assert.equal(report.acceptedQuantity, 90); assert.equal(report.acceptedLeftoverQuantity, 10); }
+      await assert.rejects(service.createPlantingReport({ ...body, quantityPlanted: quantity, leftoverQuantity: leftover, confirmationMode: mode }, [file]));
+    }
+    assert.equal(report.submissions.length, 2); assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 90);
+  } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
+});
+
+test("new policy reports never synthesize requester aggregate monitoring assignments or accept legacy submissions", async () => {
+  const service = require("../src/services/monitoring.service");
+  table("plantingReports").set("policy-only-report", { participantId: "new-policy-owner", reportingProgress: "Completed", quantityPlanted: 80, siteId: "policy-site", plantingDate: "2026-10-01", reportingPolicy: { monitoring: "PERMANENT_SAMPLE", requesterMonitoringTasks: false } });
+  const rows = await service.getMonitoringRecordsByParticipantId("new-policy-owner");
+  assert.equal(rows.some(row => row.plantingReportId === "policy-only-report"), false);
+  await assert.rejects(service.createMonitoringRecord({ plantingReportId: "policy-only-report" }), error => error.code === "PURPOSE_POLICY_MONITORING_WORKFLOW");
 });

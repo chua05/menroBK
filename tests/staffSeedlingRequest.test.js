@@ -188,3 +188,90 @@ test("Staff requester proposes late-release rescheduling; another officer decide
   assert.equal(memory.records("events").get(approved.data.eventId).date, "2099-01-05");
   assert.equal(memory.records("events").get(approved.data.eventId).sourceRequestId, request.id);
 });
+
+test("Other purpose requires a reasoned Staff proposal and explicit Admin decision; approved policy is snapshotted", async () => {
+  const body = payload(); body.purpose = "Community special planting";
+  body.workflow = { ...body.workflow, requestContractVersion: 2, purpose: "Other", purposeOther: body.purpose };
+  const request = await submit("staff", body);
+  const review = { expectedVersion: 0, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate,
+    policyProposal: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Documented reforestation activity" } };
+  const reviewed = await http(`/seedling-requests/${request.id}/review`, "officer", "PATCH", review); assert.equal(reviewed.status, 200, JSON.stringify(reviewed));
+  assert.equal(reviewed.data.staffPolicyProposal.actorId, identities.officer.uid);
+  assert.equal((await http(`/seedling-requests/${request.id}/approve`, "staff", "PATCH", { expectedVersion: 1 })).status, 403);
+  assert.equal((await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1 })).status, 409);
+  const result = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1,
+    policyDecision: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Admin confirms the applicable reporting and sampling requirement", expectedPolicyVersion: 0 } });
+  assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.approvedPurposePolicy.approvedBy, identities.admin.uid);
+  assert.equal(result.data.approvedPurposePolicy.definition.reporting, "REQUIRED");
+});
+
+test("walk-in multipart encoding separates citizen and Staff, links a private signed acknowledgement and preserves release approval", async t => {
+  const letters = require("../src/services/requestLetterStorage.service");
+  const { createHash } = require("node:crypto");
+  const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQkAAAAASUVORK5CYII=", "base64");
+  // Only private Storage I/O is replaced; actual document validation and real
+  // request/identification/transaction services remain in use.
+  t.mock.method(letters, "uploadRequestLetter", async ({ requestId, participantId, file, clientSubmissionId }) => {
+    const validated = await letters.validateRequestLetterFile(file);
+    const intent = createHash("sha256").update(clientSubmissionId).digest("hex");
+    memory.records("requestLetterUploadIntents").set(intent, { requestId, participantId, sha256: validated.sha256, status: "UPLOADED" });
+    return { uploadIntentId: intent, ...validated, bytes: undefined, objectName: `private-test/${requestId}`, bucket: "demo-only", generation: "1" };
+  });
+  const body = payload(); body.workflow.requestContractVersion = 2; body.workflow.purpose = "Household / Backyard"; body.purpose = "Household / Backyard";
+  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "", receiptReference: "WALKIN-ACK-001" };
+  async function send(role, acknowledgement = true, path = "/walk-in", method = "POST") {
+    const form = new FormData(); form.append("request", JSON.stringify(body));
+    if (acknowledgement) form.append("acknowledgement", new Blob([image], { type: "image/png" }), "signed-acknowledgement.png");
+    const response = await fetch(`${base}/seedling-requests${path}`, { method, headers: { ...(role ? { authorization: `Bearer ${role}` } : {}) }, body: form });
+    return { status: response.status, ...(await response.json()) };
+  }
+  assert.equal((await send(null)).status, 401); assert.equal((await send("participant")).status, 403);
+  const missing = await send("staff", false); assert.equal(missing.status, 400); assert.ok(missing.fieldErrors.acknowledgement);
+  const result = await send("staff"); assert.equal(result.status, 201, JSON.stringify(result)); const request = result.data;
+  assert.equal(request.participantName, "Actual Walk-in Citizen"); assert.notEqual(request.participantId, identities.staff.uid);
+  assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.citizenHasAccount, false);
+  assert.equal(request.reviewHistory[0].actorId, identities.staff.uid); assert.equal(request.status, "Pending");
+  assert.equal(request.walkIn.receiptReference, "WALKIN-ACK-001"); assert.equal(JSON.stringify(result).includes("private-test/"), false);
+  assert.ok(memory.records("walkInAcknowledgements").has(request.id));
+  assert.equal((await send("staff")).data.id, request.id);
+  assert.equal((await http(`/seedling-requests/${request.id}/acknowledgement`, "participant")).status, 403);
+  assert.equal((await http(`/seedling-requests/${request.id}/approve`, "staff", "PATCH", { expectedVersion: 0 })).status, 403);
+  assert.ok(![...memory.records("notifications").values()].some(n => n.recipientUserId === request.participantId));
+  assert.equal(memory.records("users").has(request.participantId), false);
+  const returned = await http(`/seedling-requests/${request.id}/return`, "officer", "PATCH", { expectedVersion: 0, reason: "Clarify the signed care plan" });
+  assert.equal(returned.status, 200, JSON.stringify(returned));
+  body.expectedVersion = returned.data.requestVersion; body.citizen.receiptReference = "WALKIN-CORRECTION-002";
+  body.workflow.carePlan = "Corrected signed citizen plan";
+  assert.equal((await send("officer", true, `/walk-in/${request.id}/resubmit`, "PATCH")).status, 404);
+  const corrected = await send("staff", true, `/walk-in/${request.id}/resubmit`, "PATCH");
+  assert.equal(corrected.status, 200, JSON.stringify(corrected)); assert.equal(corrected.data.id, request.id);
+  assert.equal(corrected.data.participantId, request.participantId); assert.equal(corrected.data.reviewHistory.at(-1).actorRole, "staff");
+  assert.equal(memory.records("walkInAcknowledgements").get(request.id).history.length, 1);
+  assert.equal(JSON.stringify(corrected).includes("private-test/"), false);
+  assert.equal((await send("staff", true, `/walk-in/${request.id}/resubmit`, "PATCH")).status, 409);
+  const coordinated = await http(`/seedling-requests/${request.id}/pre-approval-schedule`, "officer", "PATCH", { expectedVersion: corrected.data.requestVersion, plantingDate: "2099-01-03", startTime: "09:00", adjustmentReason: "Citizen coordinated the updated schedule" });
+  assert.equal(coordinated.status, 200, JSON.stringify(coordinated));
+  body.expectedVersion = coordinated.data.requestVersion; body.proposalVersion = coordinated.data.preApprovalSchedule.proposalVersion;
+  body.action = "confirm"; body.plantingDate = "2099-01-03"; body.startTime = "09:00"; body.receiptReference = "SIGNED-SCHEDULE-003";
+  assert.equal((await send("officer", true, `/walk-in/${request.id}/schedule`, "PATCH")).status, 404);
+  assert.equal((await send("staff", false, `/walk-in/${request.id}/schedule`, "PATCH")).status, 400);
+  const confirmed = await send("staff", true, `/walk-in/${request.id}/schedule`, "PATCH"); assert.equal(confirmed.status, 200, JSON.stringify(confirmed));
+  assert.equal(confirmed.data.preApprovalSchedule.confirmedBy, identities.staff.uid); assert.equal(confirmed.data.scheduleHistory.at(-1).actorRole, "staff");
+  assert.equal(memory.records("walkInAcknowledgements").get(request.id).history.length, 2);
+  const reviewed = await http(`/seedling-requests/${request.id}/review`, "officer", "PATCH", { expectedVersion: confirmed.data.requestVersion, items: request.items, purpose: body.purpose, plantingLocation: body.plantingLocation, preferredReleaseDate: body.preferredReleaseDate });
+  assert.equal(reviewed.status, 200, JSON.stringify(reviewed));
+  assert.equal((await http(`/seedling-requests/${request.id}/approve`, "promotedOwner", "PATCH", { expectedVersion: reviewed.data.requestVersion })).status, 403);
+  const approved = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: reviewed.data.requestVersion }); assert.equal(approved.status, 200, JSON.stringify(approved));
+  const conflict = await http(`/seedling-requests/${request.id}/late-release-conflict`, "officer", "PATCH", { expectedVersion: approved.data.requestVersion, availableReleaseDate: "2099-01-04", reason: "Later seedling availability" }); assert.equal(conflict.status, 200, JSON.stringify(conflict));
+  body.action = "late-proposal"; body.expectedVersion = conflict.data.requestVersion; body.reschedulingVersion = conflict.data.lateReleaseRescheduling.version; body.plantingDate = "2099-01-05"; body.receiptReference = "SIGNED-LATE-SCHEDULE-004";
+  const proposed = await send("staff", true, `/walk-in/${request.id}/schedule`, "PATCH"); assert.equal(proposed.status, 200, JSON.stringify(proposed));
+  assert.equal(proposed.data.lateReleaseRescheduling.requesterProposal.submittedBy, identities.staff.uid);
+  assert.equal((await http(`/seedling-requests/${request.id}/late-release-rescheduling/approve`, "staff", "PATCH", { expectedVersion: proposed.data.requestVersion })).status, 403);
+  const decided = await http(`/seedling-requests/${request.id}/late-release-rescheduling/approve`, "officer", "PATCH", { expectedVersion: proposed.data.requestVersion, reschedulingVersion: proposed.data.lateReleaseRescheduling.version, proposalVersion: proposed.data.lateReleaseRescheduling.requesterProposal.proposalVersion }); assert.equal(decided.status, 200, JSON.stringify(decided));
+  const released = await http(`/seedling-requests/${request.id}/release`, "officer", "PATCH", { expectedVersion: decided.data.requestVersion, availableReleaseDate: "2099-01-04", items: [{ inventoryId: "narra", releasedQuantity: 2 }] });
+  assert.equal(released.status, 200, JSON.stringify(released)); assert.equal(released.data.reportingPolicy.reporting, "NOT_REQUIRED");
+  assert.equal(memory.records("walkInAcknowledgements").get(request.id).history.length, 3);
+  assert.ok(![...memory.records("notifications").values()].some(n => n.recipientUserId === request.participantId));
+  assert.equal(memory.records("distributions").get(request.id).reportingPolicy.reportingOverdueApplicable, false);
+
+});

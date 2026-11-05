@@ -1,3 +1,4 @@
+const purposePolicy = require("./purposePolicy.service");
 const {
   db,
 } = require("../config/firebase");
@@ -93,6 +94,7 @@ const REVIEW_ID_PATTERN = /^REV-(\d{4})-(\d{3,})$/;
 
 const stripSensitiveIdentification = (request, { includePrivateDocument = false } = {}) => {
   const sanitized = { ...request };
+  if (sanitized.walkIn) sanitized.walkIn = { ...sanitized.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(sanitized.walkIn.acknowledgement) };
   for (const field of [
     "identification",
     "identificationType",
@@ -540,9 +542,10 @@ const validateItemStructure = (
 
 const createSeedlingRequest =
   async (data, identification = null, requester = null) => {
+    const authorizedWalkIn = requester?.role === "staff" && data.walkIn?.encodedBy === requester.uid && data.participantId === requester.walkInRequesterId && data.walkIn.citizenHasAccount === false;
     const invalidRequester = requester && (
       !requester.uid || !["participant", "staff"].includes(requester.role) ||
-      requester.uid !== data.participantId
+      requester.uid !== data.participantId && !authorizedWalkIn
     );
     if (invalidRequester || (data.requesterRole === "staff" && requester?.role !== "staff")) {
       throw Object.assign(new Error("Seedling requests must be submitted by the authenticated requester."), { status: 403 });
@@ -609,7 +612,8 @@ const createSeedlingRequest =
 
     const requestData = {
       ...data,
-      ...(requesterRole === "staff" ? { requesterRole: "staff", createdByRole: "staff" } : {}),
+      ...(authorizedWalkIn ? { walkIn: { ...data.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(data.walkIn.acknowledgement) } } : {}),
+      ...(authorizedWalkIn ? { requesterRole: "walk-in", createdByRole: "staff" } : requesterRole === "staff" ? { requesterRole: "staff", createdByRole: "staff" } : {}),
 
       // Canonical multi-tree data.
       items:
@@ -627,8 +631,9 @@ const createSeedlingRequest =
         ...(Array.isArray(data.reviewHistory) ? data.reviewHistory : []),
         {
           action: "submitted",
-          actorId: cleanString(data.participantId),
-          actorName: cleanString(data.participantName),
+          actorId: authorizedWalkIn ? requester.uid : cleanString(data.participantId),
+          actorName: authorizedWalkIn ? requester.fullName : cleanString(data.participantName),
+          ...(authorizedWalkIn ? { citizenRequesterId: data.participantId, actionBasis: "STAFF_ENCODED_WALK_IN" } : {}),
           actorRole: requesterRole,
           at: now,
         },
@@ -687,6 +692,7 @@ const createSeedlingRequest =
     const identificationRecord = identification
       ? buildIdentificationRecord(docRef.id, data.participantId, identification, now)
       : null;
+    if (data.purposePolicyManaged) requestData.purposePolicyCandidate = purposePolicy.candidateFor(data, await purposePolicy.currentPolicy());
     const requestYear = Number(new Intl.DateTimeFormat("en", {
       timeZone: "Asia/Manila",
       year: "numeric",
@@ -709,6 +715,13 @@ const createSeedlingRequest =
       }
       const counterDoc = await transaction.get(counterRef);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+      let acknowledgementRef;
+      if (authorizedWalkIn) {
+        acknowledgementRef = db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId);
+        const acknowledgementDoc = await transaction.get(acknowledgementRef);
+        const record = acknowledgementDoc.data();
+        if (!acknowledgementDoc.exists || record.status !== "UPLOADED" || record.requestId !== docRef.id || record.participantId !== data.participantId || record.sha256 !== data.walkIn.acknowledgement.sha256) throw new Error("The signed acknowledgement could not be linked.");
+      }
       if (data.requestLetter?.privateDocument) {
         await require("./requestLetterStorage.service").linkRequestLetterInTransaction(
           transaction, data.requestLetter.privateDocument, docRef.id, data.participantId,
@@ -723,6 +736,8 @@ const createSeedlingRequest =
       }
 
       const requestNumber = `REQ-${requestYear}-${String(nextValue).padStart(3, "0")}`;
+      if (acknowledgementRef) transaction.update(acknowledgementRef, { status: "LINKED", linkedAt: now, updatedAt: now });
+      if (authorizedWalkIn) transaction.create(db.collection("walkInAcknowledgements").doc(docRef.id), { requestId: docRef.id, encodedBy: requester.uid, descriptor: data.walkIn.acknowledgement, createdAt: now });
       transaction.set(counterRef, {
         year: requestYear,
         lastNumber: nextValue,
@@ -732,7 +747,7 @@ const createSeedlingRequest =
         ...requestData,
         requestNumber,
       });
-      createNotificationInTransaction(transaction, {
+      if (!data.walkIn) createNotificationInTransaction(transaction, {
         notificationId: `request_submitted_${docRef.id}`,
         recipientUserId: cleanString(data.participantId),
         type: "request_submitted",
@@ -761,7 +776,7 @@ const createSeedlingRequest =
         },
       }));
       if (requestData.processingEstimate.earliestDate && cleanString(data.preferredReleaseDate) < requestData.processingEstimate.earliestDate) {
-        createNotificationInTransaction(transaction, {
+        if (!data.walkIn) createNotificationInTransaction(transaction, {
           notificationId: `request_early_release_advisory_${docRef.id}`,
           recipientUserId: cleanString(data.participantId),
           type: "request_early_release_advisory",
@@ -926,6 +941,7 @@ const reviewSeedlingRequest =
       .doc(`${REVIEW_COUNTER_DOCUMENT}_${reviewYear}`);
     const reviewSequenceFloor = floors.review.get(reviewYear) || 0;
 
+    const policyProposal = reviewData.policyProposal ? purposePolicy.validateDecision(reviewData.policyProposal) : null;
     const reviewItems = normalizeRequestItems({ items: reviewData.items });
 
     validateItemStructure(reviewItems);
@@ -1032,6 +1048,7 @@ const reviewSeedlingRequest =
         updatedAt: now,
       }, { merge: true });
       transaction.update(docRef, {
+        ...(policyProposal ? { staffPolicyProposal: { ...policyProposal, actorId: reviewData.reviewedBy, at: now } } : {}),
         items: canonicalItems,
         totalQuantity,
         purpose: cleanString(reviewData.purpose),
@@ -1145,9 +1162,9 @@ const returnSeedlingRequest = async (
       ],
     });
 
-    createNotificationInTransaction(transaction, {
+    if (!request.walkIn) createNotificationInTransaction(transaction, {
       notificationId: `request_returned_${id}_${revisionNumber}`,
-      recipientUserId: request.participantId,
+      recipientUserId: request.walkIn?.encodedBy || request.participantId,
       type: "request_returned",
       title: "Request Returned for Revision",
       message: `Your request ${request.requestNumber || id} was returned by MENRO Staff. Please review the reason, make the necessary corrections, and resubmit your request.`,
@@ -1175,7 +1192,7 @@ const returnSeedlingRequest = async (
 // No inventory or event mutation occurs here.
 // ========================================
 
-const resubmitSeedlingRequest = async (id, participantId, data) => {
+const resubmitSeedlingRequest = async (id, participantId, data, actor = null) => {
   if (data.workflow) data = { ...data, workflow: normalizeRequestPlantingArea(data.workflow) };
   if (
     data?.workflow?.siteMode === "proposed" &&
@@ -1259,11 +1276,20 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
     );
     const nextVersion = requestVersion(request) + 1;
     const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    let acknowledgementRef, priorAcknowledgement;
+    if (data.walkIn) {
+      if (actor?.role !== "staff" || actor.uid !== request.walkIn?.encodedBy || data.walkIn.requesterId !== request.participantId) throw Object.assign(new Error("Only the authorized encoder may correct this walk-in request."), { status: 403 });
+      acknowledgementRef = db.collection("walkInAcknowledgements").doc(id);
+      const [priorDoc, intentDoc] = await Promise.all([transaction.get(acknowledgementRef), transaction.get(db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId))]);
+      priorAcknowledgement = priorDoc.data(); const intent = intentDoc.data();
+      if (!priorDoc.exists || !intentDoc.exists || intent.status !== "UPLOADED" || intent.requestId !== id || intent.participantId !== participantId || intent.sha256 !== data.walkIn.acknowledgement.sha256) throw new Error("The replacement signed acknowledgement could not be linked.");
+    }
     const replacementDocument = data.requestLetter?.privateDocument;
     const legacyMetadata = request.workflow?.requestLetter && typeof request.workflow.requestLetter === "object"
       ? request.workflow.requestLetter
       : null;
     const nextWorkflow = data.workflow && typeof data.workflow === "object" ? { ...data.workflow } : {};
+    const purposePolicyCandidate = request.purposePolicyManaged ? purposePolicy.candidateFor({ purpose: data.purpose, workflow: nextWorkflow }, await purposePolicy.currentPolicy()) : null;
     if (!replacementDocument && legacyMetadata) nextWorkflow.requestLetter = legacyMetadata;
     if (replacementDocument) nextWorkflow.requestLetter = null;
     if (replacementDocument) {
@@ -1272,10 +1298,16 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
       );
     }
 
+    if (acknowledgementRef) {
+      transaction.update(acknowledgementRef, { descriptor: data.walkIn.acknowledgement, history: [...(priorAcknowledgement.history || []), { descriptor: priorAcknowledgement.descriptor, supersededAt: now }], updatedAt: now });
+      transaction.update(db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId), { status: "LINKED", linkedAt: now, updatedAt: now });
+    }
     transaction.update(requestRef, {
+      ...(data.walkIn ? { walkIn: { ...data.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(data.walkIn.acknowledgement) }, participantName: nextWorkflow.fullName, contactNumber: nextWorkflow.contactNumber } : {}),
       items: canonicalItems,
       totalQuantity,
       purpose: cleanString(data.purpose),
+      ...(purposePolicyCandidate ? { purposePolicyCandidate, staffPolicyProposal: null, staffPolicyProposalHistory: [...(request.staffPolicyProposalHistory || []), ...(request.staffPolicyProposal ? [{ ...request.staffPolicyProposal, supersededAt: now }] : [])] } : {}),
       plantingLocation: cleanString(data.plantingLocation),
       preferredReleaseDate: data.preferredReleaseDate,
       workflow: nextWorkflow,
@@ -1324,9 +1356,9 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
         ...(Array.isArray(request.reviewHistory) ? request.reviewHistory : []),
         {
           action: "resubmitted",
-          actorId: participantId,
-          actorName: cleanString(request.participantName),
-          actorRole: request.requesterRole === "staff" ? "staff" : "participant",
+          actorId: data.walkIn ? actor.uid : participantId,
+          actorName: data.walkIn ? cleanString(actor.fullName) : cleanString(request.participantName),
+          actorRole: data.walkIn || request.requesterRole === "staff" ? "staff" : "participant",
           at: now,
         },
       ],
@@ -1395,7 +1427,7 @@ const proposePreApprovalSchedule = async (id, staff, data = {}) => {
     });
     if (plantingChanged) createNotificationInTransaction(transaction, {
       notificationId: `request_schedule_confirmation_${id}_${proposalVersion}`,
-      recipientUserId: request.participantId,
+      recipientUserId: request.walkIn?.encodedBy || request.participantId,
       type: "request_schedule_confirmation_required",
       title: "Planting Schedule Confirmation Required",
       message: `${request.requestNumber || id} has a coordinated planting schedule that requires your confirmation before Staff review can be completed.`,
@@ -1410,7 +1442,23 @@ const proposePreApprovalSchedule = async (id, staff, data = {}) => {
   return { id: updated.id, ...updated.data() };
 };
 
-const confirmPreApprovalSchedule = async (id, participantId, data = {}) => {
+// Walk-in citizens have no account. A Staff encoder may record their signed
+// schedule acknowledgement, but cannot impersonate a citizen's online session.
+async function prepareWalkInScheduleAcknowledgement(transaction, ref, request, actor) {
+  if (!request.walkIn) { if (actor) throw Object.assign(new Error("Walk-in request required."), { status: 403 }); return () => {}; }
+  if (actor?.role !== "staff" || actor.uid !== request.walkIn.encodedBy || !actor.acknowledgement || !cleanString(actor.receiptReference)) throw Object.assign(new Error("The original Staff encoder and a new signed acknowledgement are required."), { status: 403 });
+  const descriptor = actor.acknowledgement, ackRef = db.collection("walkInAcknowledgements").doc(ref.id), intentRef = db.collection("requestLetterUploadIntents").doc(descriptor.uploadIntentId);
+  const [prior, upload] = await Promise.all([transaction.get(ackRef), transaction.get(intentRef)]);
+  const intent = upload.data();
+  if (!prior.exists || prior.data().encodedBy !== actor.uid || !upload.exists || intent.status !== "UPLOADED" || intent.requestId !== ref.id || intent.participantId !== request.participantId || intent.sha256 !== descriptor.sha256) throw Object.assign(new Error("The signed schedule acknowledgement could not be linked."), { status: 409 });
+  const now = Timestamp.now();
+  return () => {
+    transaction.update(ackRef, { descriptor, updatedAt: now, history: [...(prior.data().history || []), { descriptor: prior.data().descriptor, receiptReference: request.walkIn.receiptReference, supersededAt: now }] });
+    transaction.update(intentRef, { status: "LINKED", linkedAt: now, updatedAt: now });
+    transaction.update(ref, { walkIn: { ...request.walkIn, receiptReference: cleanString(actor.receiptReference), acknowledgement: require("./requestLetterStorage.service").publicMetadata(descriptor) } });
+  };
+}
+const confirmPreApprovalSchedule = async (id, participantId, data = {}, walkInActor = null) => {
   const requestRef = db.collection(COLLECTION).doc(id);
   await db.runTransaction(async (transaction) => {
     const doc = await transaction.get(requestRef);
@@ -1434,13 +1482,15 @@ const confirmPreApprovalSchedule = async (id, participantId, data = {}) => {
     const now = Timestamp.now();
     const nextVersion = requestVersion(request) + 1;
     const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    const linkWalkInAcknowledgement = await prepareWalkInScheduleAcknowledgement(transaction, requestRef, request, walkInActor);
+    linkWalkInAcknowledgement();
     transaction.update(requestRef, {
-      preApprovalSchedule: { ...request.preApprovalSchedule, ...schedule, status: "Confirmed", confirmedBy: participantId, confirmedAt: now },
+      preApprovalSchedule: { ...request.preApprovalSchedule, ...schedule, status: "Confirmed", confirmedBy: walkInActor?.uid || participantId, ...(walkInActor ? { confirmationBasis: "STAFF_ENCODED_SIGNED_ACKNOWLEDGEMENT" } : {}), confirmedAt: now },
       requestVersion: nextVersion,
       updatedAt: now,
       scheduleHistory: [
         ...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []),
-        { action: "pre_approval_schedule_confirmed", actorId: participantId, actorRole: request.requesterRole === "staff" ? "staff" : "participant", toSchedule: schedule, requestVersion: nextVersion, at: now },
+        { action: "pre_approval_schedule_confirmed", actorId: walkInActor?.uid || participantId, actorRole: walkInActor || request.requesterRole === "staff" ? "staff" : "participant", toSchedule: schedule, requestVersion: nextVersion, at: now },
       ],
     });
     staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
@@ -1468,7 +1518,8 @@ const approveSeedlingRequest =
     id,
     approvedBy,
     reason,
-    expectedVersion
+    expectedVersion,
+    policyDecision
   ) => {
     const adminUid = cleanString(approvedBy);
     if (!adminUid) {
@@ -1487,6 +1538,7 @@ const approveSeedlingRequest =
     if (approvalSnapshot.exists) {
       const approvalRequest = approvalSnapshot.data();
       assertIndependentRequestAction(approvalRequest, adminUid);
+      if (approvalRequest.walkIn?.encodedBy === adminUid) assertIndependentRequestAction({ participantId: adminUid }, adminUid);
       assertMutationVersion(approvalRequest, expectedVersion);
       const alreadyApproved = approvalRequest.status === "Approved" && approvalRequest.eventId && approvalRequest.eventCreated === true;
       if (approvalRequest.status !== "Reviewed" && !alreadyApproved) {
@@ -1494,6 +1546,7 @@ const approveSeedlingRequest =
       }
       const workflow = approvalRequest.workflow || {};
       if (workflow.siteMode === "proposed" && !workflow.officialSiteId) {
+        if (approvalRequest.purposePolicyManaged) await db.runTransaction(transaction => purposePolicy.approvalSnapshot(transaction, approvalRequest, adminUid, policyDecision));
         const area = plantingArea(workflow.areaChoice, workflow.exactArea, { optional: true });
         if (area.error) throw Object.assign(new Error(area.error), { status: 400, fieldErrors: { [area.field]: area.error } });
         const verified = approvalRequest.proposedSiteVerification;
@@ -1548,8 +1601,10 @@ const approveSeedlingRequest =
         const currentRequest =
           requestDoc.data();
         assertIndependentRequestAction(currentRequest, adminUid);
+        if (currentRequest.walkIn?.encodedBy === adminUid) assertIndependentRequestAction({ participantId: adminUid }, adminUid);
 
         assertMutationVersion(currentRequest, expectedVersion);
+        const approvedPurposePolicy = await purposePolicy.approvalSnapshot(transaction, currentRequest, adminUid, policyDecision);
 
         if (
           currentRequest.status === "Approved" &&
@@ -1768,6 +1823,7 @@ const approveSeedlingRequest =
 
         const eventRequestData = {
           ...currentRequest,
+          ...(approvedPurposePolicy ? { approvedPurposePolicy } : {}),
           // For event allocation use approvedItems (what MENRO will actually provide)
           items: approvedItems,
           totalQuantity: approvedItems.reduce((total, item) => total + Number(item.quantity || 0), 0),
@@ -1814,6 +1870,7 @@ const approveSeedlingRequest =
 
         // Store approvedItems on the request for later release and auditing.
         transaction.update(requestRef, {
+          ...(approvedPurposePolicy ? { approvedPurposePolicy } : {}),
           status: "Approved",
           approvedBy: adminUid,
           approvedAt: now,
@@ -1832,7 +1889,7 @@ const approveSeedlingRequest =
 
         createNotificationInTransaction(transaction, {
           notificationId: `request_approved_${id}_${currentRequest.participantId}`,
-          recipientUserId: currentRequest.participantId,
+          recipientUserId: currentRequest.walkIn?.encodedBy || currentRequest.participantId,
           type: "request_approved",
           title: "Seedling Request Approved",
           message: `Your seedling request ${currentRequest.requestNumber || id} has been approved. ${eventData.name} is scheduled for ${eventData.date} ${eventData.startTime}${eventData.endTime ? `-${eventData.endTime}` : ""} at ${eventData.plantingSiteName || eventData.location || eventData.barangay}. Please wait for release updates.`,
@@ -1935,6 +1992,7 @@ const rejectSeedlingRequest =
     const currentRequest =
       doc.data();
     assertIndependentRequestAction(currentRequest, adminUid);
+        if (currentRequest.walkIn?.encodedBy === adminUid) assertIndependentRequestAction({ participantId: adminUid }, adminUid);
 
     assertMutationVersion(currentRequest, expectedVersion);
 
@@ -1977,7 +2035,7 @@ const rejectSeedlingRequest =
     });
     createNotificationInTransaction(transaction, {
       notificationId: `request_rejected_${id}_${currentRequest.participantId}`,
-      recipientUserId: currentRequest.participantId,
+      recipientUserId: currentRequest.walkIn?.encodedBy || currentRequest.participantId,
       type: "request_rejected",
       title: "Seedling Request Rejected",
       message: `Your seedling request ${currentRequest.requestNumber || id} was rejected by the MENRO Administrator.`,
@@ -2098,7 +2156,7 @@ const recordLateReleaseConflict = async (id, staff, data = {}) => {
     });
     createNotificationInTransaction(transaction, {
       notificationId: `late_release_conflict_${id}_${version}`,
-      recipientUserId: request.participantId,
+      recipientUserId: request.walkIn?.encodedBy || request.participantId,
       type: "late_release_conflict",
       title: "New Planting Date Required",
       message: `${request.requestNumber || id} cannot follow its approved planting schedule because seedlings will be available later. Please submit a replacement planting date.`,
@@ -2109,7 +2167,7 @@ const recordLateReleaseConflict = async (id, staff, data = {}) => {
   const updated = await requestRef.get(); return { id: updated.id, ...updated.data() };
 };
 
-const proposeLateReleaseSchedule = async (id, participantId, data = {}) => {
+const proposeLateReleaseSchedule = async (id, participantId, data = {}, walkInActor = null) => {
   const requestRef = db.collection(COLLECTION).doc(id);
   await db.runTransaction(async (transaction) => {
     const doc = await transaction.get(requestRef); if (!doc.exists) throw new Error("Seedling request not found.");
@@ -2123,10 +2181,12 @@ const proposeLateReleaseSchedule = async (id, participantId, data = {}) => {
     validateFuturePlantingSchedule(proposal);
     const now = Timestamp.now(); const proposalVersion = Number(state.requesterProposal?.proposalVersion || 0) + 1; const nextVersion = requestVersion(request) + 1;
     const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    const linkWalkInAcknowledgement = await prepareWalkInScheduleAcknowledgement(transaction, requestRef, request, walkInActor);
+    linkWalkInAcknowledgement();
     transaction.update(requestRef, {
-      lateReleaseRescheduling: { ...state, status: "PendingStaffReview", requesterProposal: { plantingDate: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, remarks: cleanString(data.remarks), submittedBy: participantId, submittedAt: now, proposalVersion } },
+      lateReleaseRescheduling: { ...state, status: "PendingStaffReview", requesterProposal: { plantingDate: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, remarks: cleanString(data.remarks), submittedBy: walkInActor?.uid || participantId, ...(walkInActor ? { confirmationBasis: "STAFF_ENCODED_SIGNED_ACKNOWLEDGEMENT" } : {}), submittedAt: now, proposalVersion } },
       requestVersion: nextVersion, updatedAt: now,
-      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_proposed", actorId: participantId, actorRole: request.requesterRole === "staff" ? "staff" : "participant", toSchedule: proposal, requestVersion: nextVersion, at: now }],
+      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_proposed", actorId: walkInActor?.uid || participantId, actorRole: walkInActor || request.requesterRole === "staff" ? "staff" : "participant", toSchedule: proposal, requestVersion: nextVersion, at: now }],
     });
     staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, { notificationId: `late_release_proposal_${id}_${proposalVersion}_${recipient.id}`, recipientUserId: recipient.id, type: "late_release_proposal_submitted", title: "Replacement Planting Schedule Submitted", message: `${request.requestNumber || id} has a replacement planting schedule ready for Staff review.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", createdAt: now }));
   });
@@ -2140,12 +2200,13 @@ const decideLateReleaseSchedule = async (id, staff, data = {}, approve = false) 
     const request = doc.data(); assertIndependentRequestAction(request, staff.uid); assertMutationVersion(request, data.expectedVersion);
     const state = request.lateReleaseRescheduling || {};
     if (request.status !== "Approved" || request.inventoryReleased === true || state.status !== "PendingStaffReview") throw new Error("This replacement schedule is no longer awaiting Staff review.");
+    if (request.walkIn && state.requesterProposal?.submittedBy === staff.uid) assertIndependentRequestAction({ participantId: staff.uid }, staff.uid);
     if (Number(data.reschedulingVersion) !== Number(state.version) || Number(data.proposalVersion) !== Number(state.requesterProposal?.proposalVersion)) { const error = new Error("The replacement schedule changed. Refresh and try again."); error.code = "STALE_REQUEST_VERSION"; throw error; }
     const now = Timestamp.now(); const nextVersion = requestVersion(request) + 1;
     if (!approve) {
       const reason = cleanString(data.reason); if (!reason) throw new Error("A return reason is required.");
       transaction.update(requestRef, { lateReleaseRescheduling: { ...state, status: "ReturnedForRevision", staffDecision: { decision: "Returned", reason, decidedBy: staff.uid, decidedAt: now } }, requestVersion: nextVersion, updatedAt: now, scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_returned", actorId: staff.uid, actorRole: "staff", reason, requestVersion: nextVersion, at: now }] });
-      createNotificationInTransaction(transaction, { notificationId: `late_release_returned_${id}_${state.requesterProposal.proposalVersion}`, recipientUserId: request.participantId, type: "late_release_schedule_returned", title: "Replacement Schedule Returned", message: `Your replacement planting schedule for ${request.requestNumber || id} needs revision.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", reason, createdAt: now });
+      createNotificationInTransaction(transaction, { notificationId: `late_release_returned_${id}_${state.requesterProposal.proposalVersion}`, recipientUserId: request.walkIn?.encodedBy || request.participantId, type: "late_release_schedule_returned", title: "Replacement Schedule Returned", message: `Your replacement planting schedule for ${request.requestNumber || id} needs revision.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", reason, createdAt: now });
       return;
     }
     const eventRef = db.collection("events").doc(request.eventId); const eventDoc = await transaction.get(eventRef);
@@ -2156,7 +2217,7 @@ const decideLateReleaseSchedule = async (id, staff, data = {}, approve = false) 
     const eventRecipients = await activeRegisteredRecipients(transaction, eventRef.id, event);
     transaction.update(eventRef, { date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, updatedAt: now });
     transaction.update(requestRef, { lateReleaseRescheduling: { ...state, status: "Approved", staffDecision: { decision: "Approved", reason: "", decidedBy: staff.uid, decidedAt: now }, updatedEventSchedule: { date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime } }, requestVersion: nextVersion, updatedAt: now, scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_approved", actorId: staff.uid, actorRole: "staff", fromSchedule: state.originalEventSchedule, toSchedule: proposal, requestVersion: nextVersion, at: now }] });
-    createNotificationInTransaction(transaction, { notificationId: `late_release_approved_${id}_${proposal.proposalVersion}`, recipientUserId: request.participantId, type: "late_release_schedule_approved", title: "Replacement Planting Schedule Approved", message: `The replacement planting schedule for ${request.requestNumber || id} was approved and its Event Calendar schedule was updated.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", relatedEventId: eventRef.id, createdAt: now });
+    createNotificationInTransaction(transaction, { notificationId: `late_release_approved_${id}_${proposal.proposalVersion}`, recipientUserId: request.walkIn?.encodedBy || request.participantId, type: "late_release_schedule_approved", title: "Replacement Planting Schedule Approved", message: `The replacement planting schedule for ${request.requestNumber || id} was approved and its Event Calendar schedule was updated.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", relatedEventId: eventRef.id, createdAt: now });
     writeNotifications(transaction, {
       eventId: eventRef.id,
       event: { ...event, date: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime },
@@ -2289,6 +2350,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       shortReleaseReason: entered.shortReleaseReason,
     }));
     const totalQuantityReleased = releaseItems.reduce((sum, item) => sum + item.releasedQuantity, 0);
+    const reportingPolicy = purposePolicy.releasePolicy(request.approvedPurposePolicy, totalQuantityReleased);
     await parentForEventInTransaction(transaction, request.eventId, {
       ...eventDoc.data(), seedlingTotalQuantity: totalQuantityReleased,
     }, now);
@@ -2366,6 +2428,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       updatedAt: now,
     });
     transaction.update(requestRef, {
+      ...(reportingPolicy ? { reportingPolicy } : {}),
       status: "Released",
       inventoryReleased: true,
       inventoryReserved: false,
@@ -2380,9 +2443,9 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       requestVersion: requestVersion(request) + 1,
       updatedAt: now,
     });
-    createNotificationInTransaction(transaction, {
+    if (!request.walkIn) createNotificationInTransaction(transaction, {
       notificationId: `request_released_${id}`,
-      recipientUserId: request.participantId,
+      recipientUserId: request.walkIn?.encodedBy || request.participantId,
       type: "request_released",
       title: "Seedlings Released",
       message: "The seedlings for your request have been successfully released by MENRO Staff. Below are the actual seedlings released for your planting activity.",

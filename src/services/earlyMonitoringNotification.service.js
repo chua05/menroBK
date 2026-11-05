@@ -40,6 +40,7 @@ async function processEarlyMonitoringNotifications(options = {}) {
         const reportDoc = await transaction.get(reportRef);
         if (!reportDoc.exists) return;
         const report = reportDoc.data(), policy = report.earlyMonitoring;
+        if (report.reportingPolicy) return; // New purpose-policy cohorts never assign requester survival tasks.
         const key = milestone(policy, today);
         if (!key || today >= policy.officialOpeningDate) return;
         const lifecycleQuery = db.collection("monitoringRecords").where("plantingReportId", "==", reportDoc.id);

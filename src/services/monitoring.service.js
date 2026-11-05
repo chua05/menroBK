@@ -284,6 +284,7 @@ async function createMonitoringRecordImpl(data) {
   const reportDoc = await reportRef.get();
   if (!reportDoc.exists) throw new Error("Planting report not found.");
   const report = { id: reportDoc.id, ...reportDoc.data() };
+  if (report.reportingPolicy) throw workflowError("PURPOSE_POLICY_MONITORING_WORKFLOW", "New purpose-policy cohorts use authorized Staff monitoring, not requester aggregate tasks.");
   if (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") throw new Error("Only completed planting reports can be monitored.");
   if (!report.siteId) throw new Error("Planting report has no associated planting site.");
 
@@ -348,6 +349,7 @@ async function createMonitoringRecordImpl(data) {
       if (duplicateDoc.exists) throw new Error("Duplicate monitoring image detected.");
       if (!currentReportDoc.exists) throw new Error("Planting report not found.");
       const currentReport = { id: currentReportDoc.id, ...currentReportDoc.data() };
+      if (currentReport.reportingPolicy) throw workflowError("PURPOSE_POLICY_MONITORING_WORKFLOW", "This report uses the Staff monitoring policy.");
       if (currentReport.verificationStatus !== "Approved" && currentReport.reportingProgress !== "Completed") {
         throw new Error("Only completed planting reports can be monitored.");
       }
@@ -627,7 +629,7 @@ async function getMonitoringRecordsByParticipantId(participantId) {
   const byReport = new Map(existing.map((record) => [record.plantingReportId, record]));
   for (const doc of reportSnapshot.docs) {
     const report = { id: doc.id, ...doc.data() };
-    if ((report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || byReport.has(doc.id)) continue;
+    if (report.reportingPolicy || (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || byReport.has(doc.id)) continue;
     try {
       const id = lifecycleId(participantId, doc.id, report.eventId || "", report.siteId || "");
       byReport.set(doc.id, present(baseLifecycle(id, report)));

@@ -143,3 +143,11 @@ test("worker uses report ownership, active Staff, deterministic IDs, and suppres
   await processOfficialMonitoringNotifications({ today: "2026-10-16" });
   assert.equal(table("notifications").size, 2);
 });
+
+test("new purpose-policy reports do not generate legacy requester monitoring reminders", async () => {
+  table("plantingReports").set("new-purpose-report", { ...report, reportingPolicy: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", requesterMonitoringTasks: false }, earlyMonitoring: { enabled: true, applicable: true, openingDate: "2026-10-15", deadlineDate: "2026-10-21", officialOpeningDate: "2026-11-01" } });
+  const before = table("notifications").size;
+  await require("../src/services/earlyMonitoringNotification.service").processEarlyMonitoringNotifications({ today: "2026-10-15" });
+  await processOfficialMonitoringNotifications({ today: "2026-10-15" });
+  assert.equal(table("notifications").size, before);
+});

@@ -103,7 +103,7 @@ async function processOfficialMonitoringNotifications(options = {}) {
         const reportDoc = await transaction.get(reportSnapshot.ref);
         if (!reportDoc.exists) return;
         const report = reportDoc.data();
-        if (report.archived === true ||
+        if (report.reportingPolicy || report.archived === true ||
             (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed")) return;
         const recordsSnapshot = await transaction.get(
           db.collection("monitoringRecords").where("plantingReportId", "==", reportDoc.id)

@@ -137,6 +137,7 @@ const createDistributionRecordInTransaction = (
     distributionNumber,
     requestId,
     requestNumber: requestData.requestNumber || "",
+    ...(requestData.approvedPurposePolicy ? { reportingPolicy: require("./purposePolicy.service").releasePolicy(requestData.approvedPurposePolicy, totalQuantityReleased) } : {}),
 
     participantId:
       requestData.participantId,
