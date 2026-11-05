@@ -136,8 +136,21 @@ function createFirebaseEvidenceRetrieval({ getBucket, timeoutMs = 30_000, maxCon
         sdkStream.once("end", () => { sdkEnded = true; });
         sdkStream.once("close", () => { if (!sdkEnded && !stream.destroyed) stream.destroy(failure("EVIDENCE_STORAGE_UNAVAILABLE")); });
         stream.once("close", () => {
-          try { if (!sdkEnded && typeof sdkStream.abort === "function") sdkStream.abort(); }
-          catch { /* Still destroy the request below; never surface an abort SDK error. */ }
+          // retry-request emits `response` BEFORE wiring its delay stream. Its
+          // abort() clears that stream; aborting inside (or before a late)
+          // response callback can therefore crash the process at .pipe(null).
+          // Stop our consumer immediately, then cancel the SDK only after its
+          // response callback unwinds. The request's existing timeout bounds a
+          // peer that never sends headers. No retry or integrity rule changes.
+          const cancelRequest = () => setImmediate(() => {
+            try { if (!sdkEnded && typeof sdkStream.abort === "function") sdkStream.abort(); }
+            catch { /* Destruction below still closes the consumer. */ }
+            sdkStream.destroy();
+          });
+          if (!sdkEnded) {
+            if (sawResponse) cancelRequest();
+            else sdkStream.once("response", cancelRequest);
+          }
           sdkStream.destroy();
         });
         stream.on("error", () => {}); // The iterator/pipeline below handles the sanitized error.

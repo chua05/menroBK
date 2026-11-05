@@ -44,5 +44,11 @@ test("attendance maintenance and role guards execute before multipart/storage ac
     assert.equal((await request("staff", "/official/unknown/attendance", { method: "PUT" })).status, 503);
     assert.equal((await request(null, "/official/unknown/attendance")).status, 401);
     assert.equal((await request("participant", "/official/unknown/attendance")).status, 403);
+    for (const [role, expected] of [[null, 401], ["participant", 403], ["admin", 403], ["staff", 503]]) {
+      assert.equal((await request(role, "/official/unknown/photos", { method: "PUT" })).status, expected);
+    }
+    for (const [role, expected] of [[null, 401], ["staff", 403], ["admin", 403], ["participant", 503]]) {
+      assert.equal((await request(role, "/submissions/unknown/attendance", { method: "PUT" })).status, expected);
+    }
   } finally { if (prior === undefined) delete process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED; else process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED = prior; }
 });

@@ -22,6 +22,16 @@ Optional attendance accepts validated JPEG/PNG/PDF only (10 MB maximum), using e
 
 The UUID fixture cleanup is emulator-only, ownership checked and explicitly callable twice. Production orphan retention/reconciliation and attendance retention require an operational policy before activation; this change introduces no background cleanup job or global deletion.
 
+## Planting report corrections
+
+Participant documentation retains its existing form, photo verification, site map and Staff-review lifecycle. A selected species may include nonnegative integer leftovers. Planted plus leftovers are transactionally bounded by the authoritative remaining release; neither declaration becomes an accepted planting total before MENRO review. Leftovers never increase planted cohorts or inventory. Zero/omitted leftovers preserve existing request fingerprints and historical records.
+
+Participant attendance is also optional: `PUT /planting-reports/submissions/:id/attendance` accepts one `attendance` multipart file under the same safe JPEG/PNG/PDF, 10 MB, generation and quota rules. Only the authenticated original Participant may upload before review; that Participant and authorized MENRO Staff/Admin may retrieve through the corresponding authenticated GET. A different Participant receives no attachment. Exact completed retries cannot replace the immutable original file. A saved planting report retries only its attachment, never its quantities.
+
+MENRO Field Reports now require **server-verified private planting photos before Admin approval**, as explicitly confirmed by MENRO's user in this task. Staff uploads to `PUT /planting-reports/official/:id/photos` using `photos`, `evidenceManifest`, `expectedRevision` and a stable `Idempotency-Key`. The server resolves the authenticated Staff owner, canonical operation, released distribution, event, site and assessment revision. It reuses original EXIF or the actual planting-report camera session, enforces existing municipality/site/timestamp checks, consumes sessions atomically and reserves real image hashes. Evidence is immutable and corrections create new submission/revision records. Only the original Staff and Admin retrieve official Staff photos. No public Storage URL or client-controlled private path is accepted.
+
+Individual release-based confirmation remains explicitly **not** photo/GPS verified; its existing server-derived planted calculation and Admin approval remain unchanged. Incomplete field-report uploads remain pending and can resume evidence upload without submitting quantities again. Private evidence is not fabricated to complete a report.
+
 ## Release limits
 
 Local acceptance does not authorize production activation. MENRO must still approve sample selection, official visit creation/scheduling, intervals, retention and use of sample analytics in official reports. Physical Android/iOS camera, GPS and EXIF acceptance remains separate. The locked dependency install reported seven moderate npm advisories; no dependency version or manifest was changed to address them.

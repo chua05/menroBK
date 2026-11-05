@@ -3,7 +3,8 @@ function handler(action) {
   return async (req, res) => {
     try { return res.status(req.method === "POST" ? 201 : 200).json({ success: true, data: await action(req) }); }
     catch (error) {
-      const status = [400, 401, 403, 404, 409, 413, 429, 503].includes(error.status) ? error.status : 500;
+      if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
+      const status = [400, 401, 403, 404, 409, 410, 413, 422, 429, 503].includes(error.status) ? error.status : 500;
       if (status === 500) console.error("Official planting report operation failed", { code: error.code || "UNAVAILABLE" });
       return res.status(status).json({ success: false, message: status === 500 ? "Official planting reporting is temporarily unavailable." : error.message,
         ...(status < 500 && error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}) });
@@ -13,6 +14,12 @@ function handler(action) {
 module.exports = {
   listOptions: handler(req => service.listReleasedOptions(req.user, req.query)), submit: handler(req => service.submitOfficialReport(req.user, req.body)),
   uploadAttendance: handler(req => require("../services/plantingAttendance.service").uploadAttendance(req.user, req.params.id, req.file)),
+  uploadPhotos: handler(req => require("../services/officialPlantingEvidence.service").upload(req.user, req.params.id, req.files?.photos || [], req.body, req.headers["idempotency-key"])),
+  uploadParticipantAttendance: handler(req => require("../services/plantingAttendance.service").uploadParticipantAttendance(req.user, req.params.id, req.file)),
+  async downloadParticipantAttendance(req, res) {
+    try { await require("../services/plantingAttendance.service").streamParticipantAttendance(req.user, req.params.id, res); }
+    catch (error) { if (res.headersSent) return res.destroy(); return res.status([401, 403, 404, 409, 503].includes(error.status) ? error.status : 500).json({ success: false, message: "Attendance is unavailable or access was denied." }); }
+  },
   async downloadAttendance(req, res) {
     try { await require("../services/plantingAttendance.service").streamAttendance(req.user, req.params.id, res); }
     catch (error) {

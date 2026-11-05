@@ -598,6 +598,36 @@ test("any authenticated participant can submit planting evidence for an eligible
   }
 });
 
+test("participant planted plus leftover balances reserve once and become accepted only after MENRO review", async () => {
+  const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  const requestId = "request-participant-leftovers", eventId = "event-participant-leftovers";
+  seedApproved(requestId, eventId);
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", { items: [{ inventoryId: "calamansi", releasedQuantity: 10, shortReleaseReason: "Only ten required" }] });
+  Object.assign(table("events").get(eventId), { recordStatus: "scheduled", plantingSiteId: "site-leftovers", barangay: "Bical" });
+  table("sites").set("site-leftovers", { status: "active", siteName: "Leftovers site", barangay: "Bical", latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50 });
+  const bytes = await sharp({ create: { width: 7, height: 7, channels: 3, background: "orange" } }).jpeg().withExif({
+    IFD0: { Make: "Fixture camera" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1", GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1" },
+  }).toBuffer();
+  const file = { buffer: bytes, mimetype: "image/jpeg", originalname: "leftovers-evidence.jpg" };
+  const payload = { distributionId: requestId, inventoryId: "calamansi", siteId: "site-leftovers", participantId: "participant-1", participantName: "Participant One", participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical", quantityPlanted: 6, leftoverQuantity: 4, plantingDate: "2026-09-17", plantingLocation: "Leftovers site", eventId };
+  let report;
+  try {
+    for (const leftoverQuantity of [-1, 1.5, Infinity, "1e3"]) await assert.rejects(service.createPlantingReport({ ...payload, leftoverQuantity }, [file]), /whole number/);
+    await assert.rejects(service.createPlantingReport({ ...payload, leftoverQuantity: 5 }, [file]), /Only 10/);
+    report = await service.createPlantingReport(payload, [file]);
+    assert.equal(report.acceptedQuantity, 0); assert.equal(report.pendingReviewQuantity, 6);
+    assert.equal(report.pendingReviewLeftoverQuantity, 4); assert.equal(report.remainingAvailableQuantity, 0);
+    assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 6);
+    assert.equal(table("events").get(eventId).leftoverSeedlingQuantity, 4);
+    assert.equal(table("events").get(eventId).remainingSeedlingQuantity, 0);
+    assert.equal(report.submissions[0].staffReviewStatus, "Pending Review");
+    const approved = await service.approvePlantingReport(report.submissions[0].id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+    assert.equal(approved.acceptedQuantity, 6); assert.equal(approved.acceptedLeftoverQuantity, 4);
+    assert.equal(approved.pendingReviewLeftoverQuantity, 0); assert.equal(approved.remainingAvailableQuantity, 0);
+  } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
+});
+
 test("image without EXIF GPS is rejected even when client coordinates are supplied", async () => {
   const sharp = require("sharp");
   const controller = require("../src/controller/plantingReport.controller");

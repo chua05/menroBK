@@ -109,6 +109,18 @@ test("authorizes monitoring owner, staff, and admin but denies unrelated partici
   }
 });
 
+test("official Staff photos exclude requester and non-owner Staff even when they can view the parent report", async () => {
+  plantingReport = { id: "parent-report", reportType: "parent", participantId: "requester",
+    photos: [{ _evidenceRecordId: "official-row", photoPath: "/uploads/planting-reports/security-test/evidence.png" }],
+    submissions: [{ id: "official-row", officialStaffReport: true, authenticatedSubmitterUid: "staff-owner" }] };
+  for (const user of [{ uid: "requester", role: "participant" }, { uid: "other-staff", role: "staff" }]) {
+    await assert.rejects(evidence.plantingEvidenceForUser("parent-report", "0", user), { code: "EVIDENCE_FORBIDDEN" });
+  }
+  for (const user of [{ uid: "staff-owner", role: "staff" }, { uid: "admin", role: "admin" }]) {
+    assert.equal((await evidence.plantingEvidenceForUser("parent-report", "0", user)).absolutePath, fixturePath);
+  }
+});
+
 test("authorizes revision evidence for its reporter, staff, and admin only", async () => {
   monitoringRecord = {
     participantId: "legacy-owner",

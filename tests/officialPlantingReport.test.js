@@ -21,6 +21,15 @@ function seed(suffix, requestType = "individual", released = 10) {
 function payload(requestId, quantityPlanted = 6, leftoverQuantity = 2) {
   return { requestId, confirmationBasis: "menro-field-report", items: [{ inventoryId: "narra", quantityPlanted, leftoverQuantity }], remarks: "Official fixture report", clientSubmissionId: randomUUID(), expectedVersion: 0 };
 }
+// Trusted linkage fixture only: these unit tests do not claim real photo verification.
+function verifiedEvidence(id) {
+  const row = memory.records("plantingContributions").get(id);
+  const op = memory.records("officialPlantingOperations").get(row.officialOperationId);
+  Object.assign(op, { evidenceVerified: true, evidenceRevision: Number(row.revision || 0), evidenceSubmissionId: id });
+  Object.assign(row, { hasVerifiedPlantingEvidence: true, officialEvidenceSubmissionId: id,
+    photos: [{ privateEvidence: { uploadIntentId: "unit-server-reference" }, gpsValid: true, siteGpsValid: true, timestampValid: true }] });
+}
+
 test("Staff reporting derives identities and release quantities; requester documentation remains optional", async () => {
   const fixture = seed("optional");
   const result = await service.submitOfficialReport(staff, payload(fixture.requestId));
@@ -74,6 +83,7 @@ test("Admin return releases only this submission's quantities and correction pre
   assert.equal(returned.remainingAvailableQuantity, 10); assert.equal(returned.submissions[0].staffReviewStatus, "Rejected");
   const corrected = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 7, 3), correctionOf: id, expectedVersion: 2 });
   assert.equal(corrected.submissions.length, 2); const row = corrected.submissions.find(row => row.correctionOf === id); assert.equal(row.revision, 1);
+  verifiedEvidence(row.id);
   const approved = await service.reviewOfficialSubmission(admin, row.id, true);
   assert.equal(approved.acceptedQuantity, 7); assert.equal(approved.acceptedLeftoverQuantity, 3); assert.equal(approved.reportingProgress, "Completed");
 });
@@ -102,12 +112,29 @@ test("the 2 previously planted + 6 new planted + 2 leftover example confirms eig
   try {
     const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 6, 2));
     const current = report.submissions.find(row => row.officialStaffReport);
+    verifiedEvidence(current.id);
     const verified = await service.reviewOfficialSubmission(admin, current.id, true);
     assert.equal(verified.acceptedQuantity, 8); assert.equal(verified.acceptedLeftoverQuantity, 2); assert.equal(verified.remainingAvailableQuantity, 0);
     const cohort = [...memory.records("verifiedPlantingCohorts").values()].find(row => row.source.plantingReportId === fixture.reportId);
     assert.equal(cohort.verifiedPlantedQuantity, 8); assert.equal(cohort.source.species[0].releasedQuantity, 10); assert.equal(cohort.source.species[0].verifiedPlantedQuantity, 8);
     assert.equal(JSON.stringify(memory.records("plantingContributions").get("historical-two")), before);
   } finally { if (flag === undefined) delete process.env.VERIFIED_PLANTING_COHORT_ENABLED; else process.env.VERIFIED_PLANTING_COHORT_ENABLED = flag; }
+});
+
+test("field approval requires server-linked evidence for the current revision and valid private photos", async () => {
+  const fixture = seed("mandatory-photos");
+  const report = await service.submitOfficialReport(staff, payload(fixture.requestId));
+  const id = report.submissions[0].id;
+  await assert.rejects(service.reviewOfficialSubmission(admin, id, true), error => error.status === 409);
+  verifiedEvidence(id);
+  const row = memory.records("plantingContributions").get(id);
+  const op = memory.records("officialPlantingOperations").get(row.officialOperationId);
+  op.evidenceRevision = 1;
+  await assert.rejects(service.reviewOfficialSubmission(admin, id, true), error => error.status === 409);
+  op.evidenceRevision = 0; row.photos[0].siteGpsValid = false;
+  await assert.rejects(service.reviewOfficialSubmission(admin, id, true), error => error.status === 409);
+  row.photos[0].siteGpsValid = true;
+  assert.equal((await service.reviewOfficialSubmission(admin, id, true)).acceptedQuantity, 6);
 });
 
 test("release discovery pages are bounded and use backend document cursors without duplicate records", async () => {

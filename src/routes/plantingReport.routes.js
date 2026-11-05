@@ -127,11 +127,17 @@ const handlePlantingEvidenceUpload = (
 const official = require("../controller/officialPlantingReport.controller");
 router.get("/official/options", verifyToken, authorizeRoles("staff"), official.listOptions);
 router.post("/official", verifyToken, authorizeRoles("staff"), official.submit);
+router.put("/official/:id/photos", verifyToken, authorizeRoles("staff"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
+  (req, res, next) => require("../services/evidenceWorkflow.service").enabled() ? next() : res.status(503).json({ success: false, message: "Private planting evidence storage is unavailable." }),
+  handlePlantingEvidenceUpload, official.uploadPhotos);
 const attendanceUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 0 } }).single("attendance");
 router.put("/official/:id/attendance", verifyToken, authorizeRoles("staff"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
   (req, res, next) => attendanceUpload(req, res, error => error
     ? res.status(400).json({ success: false, message: "Upload one attendance PDF, JPEG or PNG file not larger than 10 MB.", fieldErrors: { attendance: "Upload one attendance PDF, JPEG or PNG file not larger than 10 MB." } }) : next()), official.uploadAttendance);
 router.get("/official/:id/attendance", verifyToken, authorizeRoles("staff", "admin"), official.downloadAttendance);
+router.put("/submissions/:id/attendance", verifyToken, authorizeRoles("participant"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
+  (req, res, next) => attendanceUpload(req, res, error => error ? res.status(400).json({ success: false, message: "Upload one valid attendance PDF, JPEG or PNG up to 10 MB.", fieldErrors: { attendance: "Upload one valid attendance PDF, JPEG or PNG up to 10 MB." } }) : next()), official.uploadParticipantAttendance);
+router.get("/submissions/:id/attendance", verifyToken, authorizeRoles("participant", "staff", "admin"), official.downloadParticipantAttendance);
 
 // PARTICIPANT SUBMIT REPORT
 router.post(

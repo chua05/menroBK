@@ -38,6 +38,37 @@ async function image() { return { originalname: "attendance.png", mimetype: "ima
 function response() {
   return { headers: {}, setHeader(name, value) { this.headers[name] = value; }, end(bytes) { this.bytes = bytes; } };
 }
+function seedParticipant() {
+  const id = randomUUID(), participant = { uid: `participant-${id}`, role: "participant" };
+  memory.records("plantingContributions").set(id, { reportId: `report-${id}`, requestId: `request-${id}`, eventId: `event-${id}`,
+    authenticatedSubmitterUid: participant.uid, staffReviewStatus: "Pending Review" });
+  return { id, participant };
+}
+
+test("participant attendance is private, owner-written and immutable across exact retries", async () => {
+  const { id, participant } = seedParticipant(), file = await image();
+  await assert.rejects(service.uploadParticipantAttendance(staff, id, file), error => error.status === 403);
+  await assert.rejects(service.uploadParticipantAttendance({ uid: "other", role: "participant" }, id, file), error => error.status === 404);
+  await service.uploadParticipantAttendance(participant, id, file);
+  const count = objects.size;
+  await service.uploadParticipantAttendance(participant, id, file); assert.equal(objects.size, count);
+  for (const user of [participant, staff, admin]) {
+    const out = response(); await service.streamParticipantAttendance(user, id, out);
+    assert.deepEqual(out.bytes, file.buffer); assert.equal(out.headers["Cache-Control"], "private, no-store");
+  }
+  for (const user of [null, { uid: "other", role: "participant" }]) await assert.rejects(service.streamParticipantAttendance(user, id, response()), error => [401, 404].includes(error.status));
+  await assert.rejects(service.uploadParticipantAttendance(participant, id, { ...file, buffer: await sharp(file.buffer).negate().png().toBuffer() }), error => error.status === 409);
+  memory.records("plantingContributions").get(id).staffReviewStatus = "Accepted";
+  await service.uploadParticipantAttendance(participant, id, file);
+});
+
+test("participant attendance rejects invalid files and cannot first be attached after review", async () => {
+  const fixture = seedParticipant();
+  await assert.rejects(service.uploadParticipantAttendance(fixture.participant, fixture.id, { mimetype: "text/html", originalname: "unsafe.html", buffer: Buffer.from("<html>") }), error => error.status === 400 && Boolean(error.fieldErrors.attendance));
+  memory.records("plantingContributions").get(fixture.id).staffReviewStatus = "Accepted";
+  await assert.rejects(service.uploadParticipantAttendance(fixture.participant, fixture.id, await image()), error => error.status === 409);
+});
+
 test("attendance is optional, private, byte-preserving, quota-accounted and retrievable by authorized MENRO roles", async () => {
   const fixture = seed(), file = await image();
   assert.deepEqual(await service.uploadAttendance(staff, fixture.id, file), { hasAttendance: true });
