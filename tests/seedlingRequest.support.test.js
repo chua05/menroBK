@@ -708,7 +708,7 @@ test("identification validation preserves supported string formats and requires 
 test("submission rejects unsupported root-level sensitive fields", async () => {
   const res = response();
   await seedlingController.submitSeedlingRequest({
-    user: { uid: "participant-1", fullName: "Participant One" },
+    user: { uid: "participant-1", role: "participant", fullName: "Participant One" },
     body: { idNumber: "MUST-NOT-BE-IGNORED" },
   }, res);
   assert.equal(res.result.code, 400);
@@ -722,7 +722,7 @@ test("submission reports unavailable secure identification storage as a service 
   const res = response();
   await seedlingController.submitSeedlingRequest({
     user: {
-      uid: "participant-secure",
+      uid: "participant-secure", role: "participant",
       fullName: "Participant Secure",
       organization: "Resident / Individual",
       contactNumber: "09123456789",
@@ -824,15 +824,14 @@ test("review and decision roles remain separate", () => {
     assert.ok(layer);
     return layer.route.stack[1].handle;
   }
-  for (const [path, role] of [["/:id/review", "staff"], ["/:id/return", "staff"], ["/:id/resubmit", "participant"], ["/:id/approve", "admin"], ["/:id/reject", "admin"]]) {
-    const handler = roleFor(path);
-    const allowed = response();
-    let nextCalled = false;
-    handler({ user: { role } }, allowed, () => { nextCalled = true; });
-    assert.equal(nextCalled, true);
-    const denied = response();
-    handler({ user: { role: role === "participant" ? "staff" : "participant" } }, denied, () => {});
-    assert.equal(denied.result.code, 403);
+  for (const [path, roles] of [["/:id/review", ["staff"]], ["/:id/return", ["staff"]], ["/:id/resubmit", ["participant", "staff"]], ["/:id/approve", ["admin"]], ["/:id/reject", ["admin"]]]) {
+    for (const role of ["participant", "staff", "admin"]) {
+      const res = response();
+      let nextCalled = false;
+      roleFor(path)({ user: { role } }, res, () => { nextCalled = true; });
+      assert.equal(nextCalled, roles.includes(role), `${role}: ${path}`);
+      if (!roles.includes(role)) assert.equal(res.result.code, 403);
+    }
   }
 });
 

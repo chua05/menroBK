@@ -2,6 +2,7 @@ const {
   db,
 } = require("../config/firebase");
 const crypto = require("crypto");
+const { assertIndependentRequestAction } = require("../utils/requestSeparation.util");
 const { plantingArea, normalizeRequestPlantingArea } = require("../utils/plantingArea.util");
 
 const {
@@ -538,7 +539,15 @@ const validateItemStructure = (
 // ========================================
 
 const createSeedlingRequest =
-  async (data, identification = null) => {
+  async (data, identification = null, requester = null) => {
+    const invalidRequester = requester && (
+      !requester.uid || !["participant", "staff"].includes(requester.role) ||
+      requester.uid !== data.participantId
+    );
+    if (invalidRequester || (data.requesterRole === "staff" && requester?.role !== "staff")) {
+      throw Object.assign(new Error("Seedling requests must be submitted by the authenticated requester."), { status: 403 });
+    }
+    const requesterRole = requester?.role || "participant";
     if (data.workflow) data = { ...data, workflow: normalizeRequestPlantingArea(data.workflow) };
     const submittedItems =
       normalizeRequestItems(
@@ -600,6 +609,7 @@ const createSeedlingRequest =
 
     const requestData = {
       ...data,
+      ...(requesterRole === "staff" ? { requesterRole: "staff", createdByRole: "staff" } : {}),
 
       // Canonical multi-tree data.
       items:
@@ -619,7 +629,7 @@ const createSeedlingRequest =
           action: "submitted",
           actorId: cleanString(data.participantId),
           actorName: cleanString(data.participantName),
-          actorRole: "participant",
+          actorRole: requesterRole,
           at: now,
         },
       ],
@@ -734,7 +744,7 @@ const createSeedlingRequest =
         createdAt: now,
         details: { processingEstimate: requestData.processingEstimate },
       });
-      staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+      staffRecipients.filter(recipient => recipient.id !== data.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
         notificationId: `request_submitted_staff_${docRef.id}_${recipient.id}`,
         recipientUserId: recipient.id,
         type: "request_submitted_staff",
@@ -908,6 +918,7 @@ const reviewSeedlingRequest =
     }
 
     const floors = getReadableSequenceFloors(allRequestsSnapshot.docs);
+    assertIndependentRequestAction(targetDoc.data(), reviewData.reviewedBy);
     await ensureReadableRequestMetadata(targetDoc, floors);
     const now = Timestamp.now();
     const reviewYear = getManilaYear(now);
@@ -927,6 +938,7 @@ const reviewSeedlingRequest =
       }
 
       const currentRequest = doc.data();
+      assertIndependentRequestAction(currentRequest, reviewData.reviewedBy);
 
       assertMutationVersion(currentRequest, reviewData.expectedVersion);
 
@@ -1098,6 +1110,7 @@ const returnSeedlingRequest = async (
     }
 
     const request = requestDoc.data();
+    assertIndependentRequestAction(request, returnedBy);
     assertMutationVersion(request, expectedVersion);
     if (request.status !== "Pending") {
       throw new Error("Only pending requests can be returned for revision.");
@@ -1313,12 +1326,12 @@ const resubmitSeedlingRequest = async (id, participantId, data) => {
           action: "resubmitted",
           actorId: participantId,
           actorName: cleanString(request.participantName),
-          actorRole: "participant",
+          actorRole: request.requesterRole === "staff" ? "staff" : "participant",
           at: now,
         },
       ],
     });
-    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+    staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
       notificationId: `request_resubmitted_staff_${id}_${nextVersion}_${recipient.id}`,
       recipientUserId: recipient.id,
       type: "request_resubmitted_staff",
@@ -1342,6 +1355,7 @@ const proposePreApprovalSchedule = async (id, staff, data = {}) => {
     const doc = await transaction.get(requestRef);
     if (!doc.exists) throw new Error("Seedling request not found.");
     const request = doc.data();
+    assertIndependentRequestAction(request, staff.uid);
     assertMutationVersion(request, data.expectedVersion);
     if (request.status !== "Pending") throw new Error("Only pending requests can have a coordinated schedule.");
 
@@ -1426,10 +1440,10 @@ const confirmPreApprovalSchedule = async (id, participantId, data = {}) => {
       updatedAt: now,
       scheduleHistory: [
         ...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []),
-        { action: "pre_approval_schedule_confirmed", actorId: participantId, actorRole: "participant", toSchedule: schedule, requestVersion: nextVersion, at: now },
+        { action: "pre_approval_schedule_confirmed", actorId: participantId, actorRole: request.requesterRole === "staff" ? "staff" : "participant", toSchedule: schedule, requestVersion: nextVersion, at: now },
       ],
     });
-    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+    staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
       notificationId: `request_schedule_confirmed_${id}_${request.preApprovalSchedule.proposalVersion}_${recipient.id}`,
       recipientUserId: recipient.id, type: "request_schedule_confirmed", title: "Planting Schedule Confirmed",
       message: `${request.requestNumber || id} has a requester-confirmed planting schedule and is ready for Staff review.`,
@@ -1472,6 +1486,7 @@ const approveSeedlingRequest =
     const approvalSnapshot = await requestRef.get();
     if (approvalSnapshot.exists) {
       const approvalRequest = approvalSnapshot.data();
+      assertIndependentRequestAction(approvalRequest, adminUid);
       assertMutationVersion(approvalRequest, expectedVersion);
       const alreadyApproved = approvalRequest.status === "Approved" && approvalRequest.eventId && approvalRequest.eventCreated === true;
       if (approvalRequest.status !== "Reviewed" && !alreadyApproved) {
@@ -1532,6 +1547,7 @@ const approveSeedlingRequest =
 
         const currentRequest =
           requestDoc.data();
+        assertIndependentRequestAction(currentRequest, adminUid);
 
         assertMutationVersion(currentRequest, expectedVersion);
 
@@ -1835,7 +1851,7 @@ const approveSeedlingRequest =
           },
         });
 
-        staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        staffRecipients.filter(recipient => recipient.id !== currentRequest.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
           notificationId: `request_approved_staff_${id}_${recipient.id}`,
           recipientUserId: recipient.id,
           type: "request_approved_staff",
@@ -1918,6 +1934,7 @@ const rejectSeedlingRequest =
 
     const currentRequest =
       doc.data();
+    assertIndependentRequestAction(currentRequest, adminUid);
 
     assertMutationVersion(currentRequest, expectedVersion);
 
@@ -1972,7 +1989,7 @@ const rejectSeedlingRequest =
       createdAt: now,
     });
 
-    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+    staffRecipients.filter(recipient => recipient.id !== currentRequest.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
       notificationId: `request_rejected_staff_${id}_${recipient.id}`,
       recipientUserId: recipient.id,
       type: "request_rejected_staff",
@@ -2038,6 +2055,7 @@ const recordLateReleaseConflict = async (id, staff, data = {}) => {
     const doc = await transaction.get(requestRef);
     if (!doc.exists) throw new Error("Seedling request not found.");
     const request = doc.data();
+    assertIndependentRequestAction(request, staff.uid);
     assertMutationVersion(request, data.expectedVersion);
     if (request.status !== "Approved" || request.inventoryReleased === true) throw new Error("Only approved, unreleased requests can enter late-release rescheduling.");
     if (["AwaitingRequester", "PendingStaffReview", "ReturnedForRevision"].includes(request.lateReleaseRescheduling?.status)) {
@@ -2108,9 +2126,9 @@ const proposeLateReleaseSchedule = async (id, participantId, data = {}) => {
     transaction.update(requestRef, {
       lateReleaseRescheduling: { ...state, status: "PendingStaffReview", requesterProposal: { plantingDate: proposal.plantingDate, startTime: proposal.startTime, endTime: proposal.endTime, remarks: cleanString(data.remarks), submittedBy: participantId, submittedAt: now, proposalVersion } },
       requestVersion: nextVersion, updatedAt: now,
-      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_proposed", actorId: participantId, actorRole: "participant", toSchedule: proposal, requestVersion: nextVersion, at: now }],
+      scheduleHistory: [...(Array.isArray(request.scheduleHistory) ? request.scheduleHistory : []), { action: "late_release_schedule_proposed", actorId: participantId, actorRole: request.requesterRole === "staff" ? "staff" : "participant", toSchedule: proposal, requestVersion: nextVersion, at: now }],
     });
-    staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, { notificationId: `late_release_proposal_${id}_${proposalVersion}_${recipient.id}`, recipientUserId: recipient.id, type: "late_release_proposal_submitted", title: "Replacement Planting Schedule Submitted", message: `${request.requestNumber || id} has a replacement planting schedule ready for Staff review.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", createdAt: now }));
+    staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, { notificationId: `late_release_proposal_${id}_${proposalVersion}_${recipient.id}`, recipientUserId: recipient.id, type: "late_release_proposal_submitted", title: "Replacement Planting Schedule Submitted", message: `${request.requestNumber || id} has a replacement planting schedule ready for Staff review.`, relatedRecordType: "seedlingRequest", relatedRecordId: id, requestNumber: request.requestNumber || "", createdAt: now }));
   });
   const updated = await requestRef.get(); return { id: updated.id, ...updated.data() };
 };
@@ -2119,7 +2137,7 @@ const decideLateReleaseSchedule = async (id, staff, data = {}, approve = false) 
   const requestRef = db.collection(COLLECTION).doc(id);
   await db.runTransaction(async (transaction) => {
     const doc = await transaction.get(requestRef); if (!doc.exists) throw new Error("Seedling request not found.");
-    const request = doc.data(); assertMutationVersion(request, data.expectedVersion);
+    const request = doc.data(); assertIndependentRequestAction(request, staff.uid); assertMutationVersion(request, data.expectedVersion);
     const state = request.lateReleaseRescheduling || {};
     if (request.status !== "Approved" || request.inventoryReleased === true || state.status !== "PendingStaffReview") throw new Error("This replacement schedule is no longer awaiting Staff review.");
     if (Number(data.reschedulingVersion) !== Number(state.version) || Number(data.proposalVersion) !== Number(state.requesterProposal?.proposalVersion)) { const error = new Error("The replacement schedule changed. Refresh and try again."); error.code = "STALE_REQUEST_VERSION"; throw error; }
@@ -2171,6 +2189,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     const requestDoc = await transaction.get(requestRef);
     if (!requestDoc.exists) throw new Error("Seedling request not found.");
     const request = requestDoc.data();
+    assertIndependentRequestAction(request, releasedBy);
     assertMutationVersion(request, releaseData?.expectedVersion);
     if (request.inventoryReleased === true || request.status === "Released") {
       throw new Error("Seedlings have already been released for this request.");

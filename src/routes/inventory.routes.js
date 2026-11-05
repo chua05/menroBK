@@ -54,7 +54,7 @@ router.get(
 router.get(
   "/available",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("participant", "staff"),
   getAvailableInventory
 );
 
