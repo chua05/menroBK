@@ -50,6 +50,19 @@ test("sample-monitoring capture binding is versioned, permanent-sample scoped, a
   assert.throws(() => _test.parseBinding("sample-monitoring", { cohortId: "VPC-1", siteId: "site-1", visitId: "VPMV-1", sampleId: "TREE-001", samplingPlanVersion: 2, baselineVersion: 3, visitVersion: 4 }), /required/);
 });
 
+test("legacy monitoring capture is Staff-only while requester planting capture remains owner-scoped", () => {
+  for (const workflow of ["monitoring-early", "monitoring-official", "monitoring-resubmit"]) {
+    assert.doesNotThrow(() => _test.assertCaptureRole(workflow, "staff"));
+    assert.throws(() => _test.assertCaptureRole(workflow, "participant"), error => error.code === "CAPTURE_SESSION_FORBIDDEN");
+    assert.throws(() => _test.assertCaptureRole(workflow, "staff", "participant"), error => error.code === "CAPTURE_SESSION_FORBIDDEN");
+  }
+  assert.doesNotThrow(() => _test.assertCaptureRole("planting-report", "participant"));
+  assert.equal(_test.monitoringReportTargetAllowed({ siteId: "site-1", participantId: "owner" }, "site-1", "staff", "staff"), true);
+  assert.equal(_test.monitoringReportTargetAllowed({ siteId: "site-1", participantId: "owner" }, "site-1", "owner", "participant"), true);
+  assert.equal(_test.monitoringReportTargetAllowed({ siteId: "site-1", participantId: "owner" }, "site-1", "other", "participant"), false);
+  assert.equal(_test.monitoringReportTargetAllowed({ siteId: "other-site", participantId: "owner" }, "site-1", "staff", "staff"), false);
+});
+
 test("location validation rejects inaccurate, outside-Bulan, and outside-site captures", () => {
   const site = { latitude: 13, longitude: 124, coverageRadiusMeters: 50 };
   assert.equal(_test.validateLocation(site, { latitude: 13, longitude: 124, accuracy: 49 }).accuracyMeters, 49);

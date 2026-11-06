@@ -131,7 +131,7 @@ test("a failed record remains retryable on the next complete scan", async () => 
   assert.equal(notice.data().recipientUserId, RECIPIENT_ID);
 });
 
-test("official worker persists notices only for the owner and active Staff", async () => {
+test("official worker persists monitoring notices only for active Staff and Admin", async () => {
   await db.collection("users").doc(PARTICIPANT_ID).set({
     role: "participant", status: "active", testFixture: true,
   });
@@ -149,12 +149,15 @@ test("official worker persists notices only for the owner and active Staff", asy
   const allNotices = await db.collection("notifications").get();
   const notices = allNotices.docs.filter((document) =>
     document.data().details?.plantingReportId === OFFICIAL_REPORT_ID);
-  const activeStaff = await db.collection("users").where("role", "==", "staff").get();
-  const expected = new Set(activeStaff.docs
+  const [activeStaff, activeAdmins] = await Promise.all([
+    db.collection("users").where("role", "==", "staff").get(),
+    db.collection("users").where("role", "==", "admin").get(),
+  ]);
+  const expected = new Set([...activeStaff.docs, ...activeAdmins.docs]
     .filter((document) => document.data().status !== "inactive")
     .map((document) => document.id));
-  expected.add(PARTICIPANT_ID);
   assert.deepEqual(new Set(notices.map((document) => document.data().recipientUserId)), expected);
+  assert.equal(notices.some((document) => document.data().recipientUserId === PARTICIPANT_ID), false);
   assert.ok(notices.every((document) =>
     document.data().type === "official_monitoring_available"));
 });

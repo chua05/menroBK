@@ -2028,6 +2028,8 @@ const approvePlantingReport =
             verifiedAt: now,
             officialOpeningDate: shiftCalendarDate(String(parent.plantingDate || parent.eventDate || ""), 14),
           }) : null;
+        const monitoringRecipients = earlyMonitoring?.applicable
+          ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
         await ensureCohortForAuthoritativeReportInTransaction(transaction, {
           reportId: parentId,
           report: {
@@ -2052,14 +2054,14 @@ const approvePlantingReport =
           ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
         });
 
-        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
-          notificationId: `early_monitoring_scheduled_${parentId}`,
-          recipientUserId: parent.participantId,
+        if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${parentId}_${recipient.id}`,
+          recipientUserId: recipient.id,
           type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
           message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
           relatedRecordType: "monitoring", relatedRecordId: parentId, createdAt: now,
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
-        });
+        }));
         createVerificationLogInTransaction(transaction, {
           plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
           previousStatus: "Pending Review", newStatus: "Accepted",
@@ -2118,6 +2120,8 @@ const approvePlantingReport =
           verifiedAt: now,
           officialOpeningDate: shiftCalendarDate(String(currentReport.plantingDate || ""), 14),
         });
+        const monitoringRecipients = earlyMonitoring?.applicable
+          ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
 
         transaction.update(
           reportRef,
@@ -2197,14 +2201,14 @@ const approvePlantingReport =
           relatedRecordId: id,
           createdAt: now,
         });
-        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
-          notificationId: `early_monitoring_scheduled_${id}`,
-          recipientUserId: currentReport.participantId,
+        if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${id}_${recipient.id}`,
+          recipientUserId: recipient.id,
           type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
           message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
           relatedRecordType: "monitoring", relatedRecordId: id, createdAt: now,
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
-        });
+        }));
       }
     );
 

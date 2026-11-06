@@ -135,12 +135,15 @@ async function globalSearch({ query, role, userId, limit = 10 }) {
     if (includedMonitoringIds.has(canonicalId)) return;
     includedMonitoringIds.add(canonicalId);
     const normalizedRecord = { ...record, id: canonicalId };
+    const monitoringPath = isParticipant
+      ? `/participant/my-planting-reports${record.plantingReportId ? `?report=${encodeURIComponent(record.plantingReportId)}` : ""}`
+      : `/${role}/survival-monitoring?monitoring=${encodeURIComponent(canonicalId)}`;
     results.push(result(
     "Monitoring Record", normalizedRecord, record.monitoringNumber || canonicalId,
     [record.plantingReportNumber, record.eventName, record.siteName,
       searchDate(record.monitoringDate || record.updatedAt || record.createdAt), record.status]
       .filter(Boolean).join(" · "),
-    `/${role}/survival-monitoring?monitoring=${encodeURIComponent(canonicalId)}`
+    monitoringPath
   ));
   });
 

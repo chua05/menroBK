@@ -34,7 +34,7 @@ async function submit(name = "valid-original.jpg", overrides = {}) {
   return service.createMonitoringRecord({ plantingReportId: "phase2-report", totalMonitored: 10,
     healthyCount: 8, damagedCount: 1, deadCount: 1, maturityStatus: "Immature",
     monitoredDate: "2026-10-01", remarks: "Emulator integration observation",
-    monitoredBy: "phase2-participant", requesterRole: "participant",
+    monitoredBy: "phase2-staff", actorRole: "staff",
     ...(await fileData(name)), ...overrides });
 }
 
@@ -44,7 +44,7 @@ async function clearSubmissionFixtures() {
     db.collection("monitoringEvidenceHashes").get().then((snapshot) =>
       Promise.all(snapshot.docs.filter((doc) => doc.data().lifecycleId === submittedLifecycleId)
         .map((doc) => doc.ref.delete()))),
-    fs.rm(path.join(uploadRoot, "monitoring", "phase2-participant"), { recursive: true, force: true }),
+    fs.rm(path.join(uploadRoot, "monitoring", "phase2-staff"), { recursive: true, force: true }),
   ]);
 }
 
@@ -128,7 +128,7 @@ test("concurrent submissions persist exactly one unresolved observation and clea
   assert.equal(stored.history.length, 1);
   assert.equal(stored.history[0].reviewStatus, "Pending Review");
   assert.equal(stored.nextMonitoringDate, null);
-  const files = await fs.readdir(path.join(uploadRoot, "monitoring", "phase2-participant"));
+  const files = await fs.readdir(path.join(uploadRoot, "monitoring", "phase2-staff"));
   assert.equal(files.length, 1, "the rejected transaction upload must be removed");
 });
 
@@ -162,7 +162,7 @@ test("returned observation preserves ID across partial/full corrections and evid
   record = await service.returnMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
     expectedVersion: 0, reason: "Recheck coverage", actorId: "phase2-staff", actorRole: "staff" });
   record = await service.resubmitMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
-    expectedVersion: 1, actorId: "phase2-participant", retainEvidenceRevision: 1,
+    expectedVersion: 1, actorId: "phase2-staff", actorRole: "staff", retainEvidenceRevision: 1,
     totalMonitored: 5, healthyCount: 3, damagedCount: 1, deadCount: 1,
     monitoredDate: "2026-10-01", maturityStatus: "Immature", remarks: "Partial correction" });
   assert.equal(record.history[0].id, observationId);
@@ -172,7 +172,7 @@ test("returned observation preserves ID across partial/full corrections and evid
     expectedVersion: 2, reason: "Check full cohort", actorId: "phase2-staff", actorRole: "staff" });
   const replacement = await fileData("valid-replacement.jpg");
   record = await service.resubmitMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
-    expectedVersion: 3, actorId: "phase2-participant", totalMonitored: 10,
+    expectedVersion: 3, actorId: "phase2-staff", actorRole: "staff", totalMonitored: 10,
     healthyCount: 8, damagedCount: 1, deadCount: 1, monitoredDate: "2026-10-02",
     maturityStatus: "Immature", remarks: "Full correction", ...replacement });
   assert.equal(record.history[0].id, observationId);
@@ -211,9 +211,11 @@ test("newer approved partial observation suppresses older full-cohort analytics"
     startMonitoringDate: "2026-09-15", monitoringEndDate: "2028-09-01", archived: false,
     history: [
       { id: "older-full", workflowVersion: 2, reviewStatus: "Approved",
+        adminDecision: "Approve", adminDecidedBy: "phase2-admin", adminDecidedAt: Timestamp.now(),
         monitoredDate: "2026-10-01", totalMonitored: 10, healthyCount: 0,
         damagedCount: 0, deadCount: 10, isFullCohortAssessment: true },
       { id: "newer-partial", workflowVersion: 2, reviewStatus: "Approved",
+        adminDecision: "Approve", adminDecidedBy: "phase2-admin", adminDecidedAt: Timestamp.now(),
         monitoredDate: "2026-10-10", totalMonitored: 5, healthyCount: 5,
         damagedCount: 0, deadCount: 0, isFullCohortAssessment: false },
     ] });

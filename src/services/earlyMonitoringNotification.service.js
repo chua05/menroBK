@@ -1,6 +1,6 @@
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
-const { createNotificationInTransaction } = require("./notification.service");
+const { createNotificationInTransaction, getRoleRecipientsInTransaction } = require("./notification.service");
 const { dateOnlyInManila, earlyScheduleStatus, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { DEFAULT_BUDGET, processBoundedCollection } = require("../utils/boundedWorker.util");
 
@@ -48,21 +48,23 @@ async function processEarlyMonitoringNotifications(options = {}) {
         const submitted = lifecycleSnapshot.docs.some((doc) =>
           (doc.data().history || []).some((entry) => entry.observationType === "early"));
         if (submitted) return;
-        if (!report.participantId) return;
-        const recipient = await transaction.get(db.collection("users").doc(report.participantId));
-        if (!recipient.exists || recipient.data().status === "inactive") return;
+        const recipients = await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]);
+        if (!recipients.length) return;
         const copy = key.startsWith("overdue_followup_")
           ? ["Early Monitoring Overdue Follow-up", "Early Survival Monitoring remains overdue and is still available before official monitoring opens."]
           : COPY[key];
-        const notificationId = `early_monitoring_${key}_${reportDoc.id}`;
-        const existing = await transaction.get(db.collection("notifications").doc(notificationId));
-        if (existing.exists) return;
-        createNotificationInTransaction(transaction, {
-          notificationId,
-          recipientUserId: report.participantId, type: `early_monitoring_${key.split("_").slice(0, 2).join("_")}`,
-          title: copy[0], message: copy[1], relatedRecordType: "monitoring",
-          relatedRecordId: reportDoc.id, createdAt: Timestamp.now(),
-          details: { openingDate: policy.openingDate, deadlineDate: policy.deadlineDate },
+        const notificationIds = recipients.map((recipient) => `early_monitoring_${key}_${reportDoc.id}_${recipient.id}`);
+        const existing = await Promise.all(notificationIds.map((notificationId) =>
+          transaction.get(db.collection("notifications").doc(notificationId))));
+        recipients.forEach((recipient, index) => {
+          if (existing[index].exists) return;
+          createNotificationInTransaction(transaction, {
+            notificationId: notificationIds[index],
+            recipientUserId: recipient.id, type: `early_monitoring_${key.split("_").slice(0, 2).join("_")}`,
+            title: copy[0], message: copy[1], relatedRecordType: "monitoring",
+            relatedRecordId: reportDoc.id, createdAt: Timestamp.now(),
+            details: { openingDate: policy.openingDate, deadlineDate: policy.deadlineDate },
+          });
         });
       });
       return { reportId: reportSnapshot.id, processed: true };

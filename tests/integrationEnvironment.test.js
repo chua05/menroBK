@@ -65,6 +65,29 @@ test("accepts only the explicit Phase 3C isolated emulator topology", () => {
     ...["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"].map(key => ({ [key]: "rejected-test-value" }))
   ]) assert.throws(() => validateIntegrationEnvironment({ ...isolated, ...change }));
 });
+test("accepts the separate legacy-monitoring topology only with its exact demo project and endpoints", () => {
+  const project = "demo-menro-legacy-monitoring-20261106";
+  const isolated = { ...valid(), MENRO_LEGACY_MONITORING_ISOLATED_EMULATORS: "true",
+    GCLOUD_PROJECT: project, FIREBASE_PROJECT_ID: project, FIRESTORE_EMULATOR_HOST: "127.0.0.1:8381",
+    FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9399", FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9398",
+    FIREBASE_STORAGE_BUCKET: `${project}.firebasestorage.app` };
+  assert.equal(validateIntegrationEnvironment(isolated).legacyMonitoringIsolated, true);
+  for (const change of [
+    { MENRO_LEGACY_MONITORING_ISOLATED_EMULATORS: undefined },
+    { MENRO_LEGACY_MONITORING_ISOLATED_EMULATORS: "false" },
+    { MENRO_PHASE3C_ISOLATED_EMULATORS: "true" },
+    { GCLOUD_PROJECT: "demo-menro-phase3c-isolated" },
+    { FIREBASE_PROJECT_ID: "demo-menro-phase2" },
+    { FIRESTORE_EMULATOR_HOST: "127.0.0.1:8281" },
+    { FIREBASE_AUTH_EMULATOR_HOST: "127.0.0.1:9299" },
+    { FIREBASE_STORAGE_EMULATOR_HOST: "127.0.0.1:9298" },
+    { FIREBASE_STORAGE_BUCKET: "demo-menro-legacy-monitoring-20261106.appspot.com" },
+    { FIRESTORE_EMULATOR_HOST: "example.invalid:8381" },
+    { NODE_ENV: "production" },
+    ...["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]
+      .map(key => ({ [key]: "rejected-test-value" })),
+  ]) assert.throws(() => validateIntegrationEnvironment({ ...isolated, ...change }));
+});
 test("requires an isolated temporary upload root", () => {
   const cwd = path.resolve("C:/work/menrobackend");
   assert.throws(() => resolveUploadRoot(valid(), cwd), /MENRO_UPLOAD_ROOT/);

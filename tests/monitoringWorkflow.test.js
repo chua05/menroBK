@@ -146,19 +146,16 @@ test("an approved partial observation does not advance the official schedule", a
   );
 });
 
-test("returned observations notify the actual reporter rather than the planting owner", async () => {
-  seed(observation({ originalReporterId: "field-reporter", monitoredBy: "field-reporter" }));
+test("returned task assignments notify Staff/Admin, not a historical Participant reporter", async () => {
+  seed(observation({ originalReporterId: "participant-1", monitoredBy: "participant-1" }));
   await service.returnMonitoringObservation({ monitoringId: "monitor-1", observationId: "OBS-1",
     expectedVersion: 0, actorId: "staff-1", actorRole: "staff", reason: "Recheck the field count" });
-  const notification = table("notifications").get(
-    "monitoring_returned_monitor-1_OBS-1_1_field-reporter",
-  );
-  assert.equal(notification.recipientUserId, "field-reporter");
-  assert.equal(notification.relatedSubrecordId, "OBS-1");
-  assert.equal(notification.reason, "Recheck the field count");
+  const notices = [...table("notifications").values()].filter(item => item.type === "monitoring_returned");
+  assert.deepEqual(new Set(notices.map(item => item.recipientUserId)), new Set(["staff-notify", "admin-notify"]));
+  assert.ok(notices.every(item => item.relatedSubrecordId === "OBS-1" && item.reason === "Recheck the field count"));
 });
 
-test("Staff return requires a reason and only the original reporter can resubmit", async () => {
+test("Staff return requires a reason and Staff can correct a returned historical observation", async () => {
   seed();
   await assert.rejects(service.returnMonitoringObservation({ monitoringId: "monitor-1",
     observationId: "OBS-1", expectedVersion: 0, actorId: "staff-1", actorRole: "staff", reason: "  " }),
@@ -170,9 +167,9 @@ test("Staff return requires a reason and only the original reporter can resubmit
   const payload = { monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 1,
     retainEvidenceRevision: 1, totalMonitored: 10, healthyCount: 7, damagedCount: 2,
     deadCount: 1, monitoredDate: "2026-09-02", maturityStatus: "Immature", remarks: "Corrected" };
-  await assert.rejects(service.resubmitMonitoringObservation({ ...payload, actorId: "participant-2" }),
+  await assert.rejects(service.resubmitMonitoringObservation({ ...payload, actorId: "participant-1", actorRole: "participant" }),
     (error) => error.code === "MONITORING_ACTION_FORBIDDEN");
-  await service.resubmitMonitoringObservation({ ...payload, actorId: "participant-1" });
+  await service.resubmitMonitoringObservation({ ...payload, actorId: "staff-other", actorRole: "staff" });
   const stored = table("monitoringRecords").get("monitor-1").history[0];
   assert.equal(stored.id, "OBS-1");
   assert.equal(stored.reviewStatus, "Pending Review");
@@ -188,7 +185,7 @@ test("Staff return requires a reason and only the original reporter can resubmit
 
 test("a different authenticated reporter can submit a partial observation without changing cohort ownership", async () => {
   const ownerId = "planting-owner";
-  const reporterId = "field-reporter-2";
+  const reporterId = "field-staff-2";
   const uploadDirectory = path.join(process.cwd(), "uploads", "monitoring", reporterId);
   table("plantingReports").set("shared-report", {
     participantId: ownerId, eventId: "event-shared", siteId: "shared-site",
@@ -197,7 +194,7 @@ test("a different authenticated reporter can submit a partial observation withou
   table("sites").set("shared-site", { latitude: 12.57, longitude: 123.965 });
   try {
     const result = await service.createMonitoringRecord({
-      plantingReportId: "shared-report", requesterRole: "participant", monitoredBy: reporterId,
+      plantingReportId: "shared-report", actorRole: "staff", monitoredBy: reporterId,
       totalMonitored: 4, healthyCount: 3, damagedCount: 1, deadCount: 0,
       monitoredDate: "2026-10-10", maturityStatus: "Immature", remarks: "Partial field check",
       metadata: { latitude: 12.57, longitude: 123.965, capturedAt: "2026-10-10T08:00:00+08:00" },
@@ -216,6 +213,13 @@ test("a different authenticated reporter can submit a partial observation withou
   }
 });
 
+test("legacy monitoring service rejects Participant submissions before storage writes", async () => {
+  await assert.rejects(service.createMonitoringRecord({
+    plantingReportId: "report-1", monitoredBy: "participant-1", actorRole: "participant",
+  }), error => error.code === "MONITORING_ACTION_FORBIDDEN");
+  assert.equal(table("monitoringRecords").has("report-1"), false);
+});
+
 test("concurrent final decisions allow only one transaction result", async () => {
   seed(observation({ reviewStatus: "Reviewed", reviewVersion: 1,
     staffReviewedBy: "staff-1", staffReviewedAt: { seconds: 1 } }));
@@ -231,14 +235,15 @@ test("concurrent final decisions allow only one transaction result", async () =>
 
 test("concurrent submissions create one pending observation and clean up the rejected upload", async () => {
   const ownerId = "workflow-concurrency-owner";
-  const uploadDirectory = path.join(process.cwd(), "uploads", "monitoring", ownerId);
+  const uploadDirectory = path.join(process.cwd(), "uploads", "monitoring", "staff-concurrent");
+  await fs.rm(uploadDirectory, { recursive: true, force: true });
   table("plantingReports").set("concurrent-report", {
     participantId: ownerId, eventId: "event-1", siteId: "concurrent-site",
     quantityPlanted: 10, plantingDate: "2026-09-01", verificationStatus: "Approved",
   });
   table("sites").set("concurrent-site", { latitude: 12.57, longitude: 123.965 });
   const submission = (imageHash) => service.createMonitoringRecord({
-    plantingReportId: "concurrent-report", requesterRole: "participant", monitoredBy: ownerId,
+    plantingReportId: "concurrent-report", actorRole: "staff", monitoredBy: "staff-concurrent",
     totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
     monitoredDate: "2026-10-10", maturityStatus: "Immature", remarks: "Concurrent field check",
     metadata: { latitude: 12.57, longitude: 123.965, capturedAt: "2026-10-10T08:00:00+08:00" },
@@ -277,7 +282,7 @@ test("returned coverage corrections cannot leave stale official scheduling", asy
   const base = { monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 1,
     retainEvidenceRevision: 1, totalMonitored: 4, healthyCount: 3, damagedCount: 1,
     deadCount: 0, monitoredDate: "2026-09-02", maturityStatus: "Immature",
-    remarks: "Partial correction", actorId: "participant-1" };
+    remarks: "Partial correction", actorId: "staff-other", actorRole: "staff" };
   await service.resubmitMonitoringObservation(base);
   let lifecycle = table("monitoringRecords").get("monitor-1");
   assert.equal(lifecycle.history[0].id, "OBS-1");
@@ -305,7 +310,7 @@ test("replacement evidence stores immutable verification results and rejects dup
   const payload = { monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 1,
     totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
     monitoredDate: "2026-09-02", maturityStatus: "Immature", remarks: "Replacement",
-    actorId: "participant-1", savedEvidence: replacement };
+    actorId: "staff-other", actorRole: "staff", savedEvidence: replacement };
   await service.resubmitMonitoringObservation(payload);
   const evidenceRef = table("monitoringRecords").get("monitor-1").history[0].revisionHistory[1].evidenceRef;
   assert.equal(evidenceRef.siteGpsValid, true);
@@ -319,19 +324,19 @@ test("replacement evidence stores immutable verification results and rejects dup
 });
 
 test("a failed replacement resubmission removes its newly saved evidence file", async () => {
-  const actorId = "unauthorized-replacement-reporter";
+  const actorId = "staff-replacement-reporter";
   const uploadDirectory = path.join(process.cwd(), "uploads", "monitoring", actorId);
   seed(observation({ reviewStatus: "Returned for Rechecking", reviewVersion: 1 }));
   try {
     await assert.rejects(service.resubmitMonitoringObservation({
-      monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 1,
+      monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 99,
       totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
       monitoredDate: "2026-09-02", maturityStatus: "Immature", remarks: "Replacement",
-      actorId, imageHash: "cleanup-replacement-hash", imageDetails: { format: "jpeg" },
+      actorId, actorRole: "staff", imageHash: "cleanup-replacement-hash", imageDetails: { format: "jpeg" },
       metadata: { latitude: 12.57, longitude: 123.965, capturedAt: "2026-09-02T08:00:00+08:00" },
       file: { originalname: "replacement.jpg", mimetype: "image/jpeg", size: 5,
         buffer: Buffer.from("photo") },
-    }), (error) => error.code === "MONITORING_ACTION_FORBIDDEN");
+    }), (error) => error.code === "STALE_OBSERVATION_VERSION");
     assert.deepEqual(await fs.readdir(uploadDirectory), []);
   } finally {
     await fs.rm(uploadDirectory, { recursive: true, force: true });
@@ -348,6 +353,6 @@ test("invalid retained evidence cannot be reused", async () => {
   await assert.rejects(service.resubmitMonitoringObservation({ monitoringId: "monitor-1",
     observationId: "OBS-1", expectedVersion: 1, retainEvidenceRevision: 1,
     totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
-    monitoredDate: "2026-09-02", maturityStatus: "Immature", actorId: "participant-1" }),
+    monitoredDate: "2026-09-02", maturityStatus: "Immature", actorId: "staff-reporter", actorRole: "staff" }),
   (error) => error.code === "OBSERVATION_EVIDENCE_INVALID");
 });

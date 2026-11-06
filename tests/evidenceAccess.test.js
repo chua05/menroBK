@@ -121,7 +121,7 @@ test("official Staff photos exclude requester and non-owner Staff even when they
   }
 });
 
-test("authorizes revision evidence for its reporter, staff, and admin only", async () => {
+test("authorizes revision evidence for its record owner, reporter, staff, and admin only", async () => {
   monitoringRecord = {
     participantId: "legacy-owner",
     history: [{
@@ -139,6 +139,7 @@ test("authorizes revision evidence for its reporter, staff, and admin only", asy
   );
 
   for (const user of [
+    { uid: "legacy-owner", role: "participant" },
     { uid: "reporter", role: "participant" },
     { uid: "staff-user", role: "staff" },
     { uid: "admin-user", role: "admin" },

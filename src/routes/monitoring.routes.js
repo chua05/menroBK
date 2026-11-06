@@ -86,12 +86,13 @@ const upload =
   });
 
 // ========================================
-// PARTICIPANT CREATE MONITORING RECORD
+// MENRO STAFF create legacy monitoring observations. Participant access is
+// read-only through the historical-record endpoint below.
 // ========================================
 router.post(
   "/early",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("staff"),
   evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
@@ -102,9 +103,7 @@ router.post(
 router.post(
   "/",
   verifyToken,
-  authorizeRoles(
-    "participant"
-  ),
+  authorizeRoles("staff"),
   evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,
@@ -160,7 +159,7 @@ router.patch(
 router.patch(
   "/:monitoringId/observations/:observationId/resubmit",
   verifyToken,
-  authorizeRoles("participant"),
+  authorizeRoles("staff"),
   evidenceUploadMaintenanceGate,
   uploadLimiter,
   uploadConcurrencyGuard,

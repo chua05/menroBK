@@ -890,11 +890,32 @@ test("participant monitoring returns owned and reported records and accepts an e
     participantId: "participant-2", plantingReportId: "shared-report",
     history: [{ id: "OBS-SHARED", originalReporterId: "participant-1", monitoredBy: "participant-1" }],
   });
+  const historicalBefore = JSON.parse(JSON.stringify(table("monitoringRecords").get("reported-1")));
   const own = response();
   await controller.getMyMonitoringRecords({ user: { uid: "participant-1" } }, own);
   assert.equal(own.result.code, 200);
   assert.deepEqual(new Set(own.result.body.data.map((item) => item.id)), new Set(["legacy-own-1", "reported-1"]));
   assert.equal(own.result.body.data.some((item) => item.history.some((entry) => entry.id === "OBS-SHARED")), true);
+  assert.deepEqual(table("monitoringRecords").get("reported-1"), historicalBefore,
+    "Participant history reads must not rewrite statuses, evidence, or audit data.");
+});
+
+test("Participant cannot reach legacy monitoring submit or resubmit routes", () => {
+  const routes = require("../src/routes/monitoring.routes");
+  const authorize = (path, method, role) => {
+    const layer = routes.stack.find(item => item.route?.path === path && item.route.methods[method]);
+    assert.ok(layer);
+    let status = null, advanced = false;
+    layer.route.stack[1].handle({ user: { uid: `${role}-1`, role } }, {
+      status(code) { status = code; return this; }, json() { return this; },
+    }, () => { advanced = true; });
+    return { status, advanced };
+  };
+  for (const [path, method] of [["/", "post"], ["/early", "post"],
+    ["/:monitoringId/observations/:observationId/resubmit", "patch"]]) {
+    assert.equal(authorize(path, method, "participant").status, 403);
+    assert.equal(authorize(path, method, "staff").advanced, true);
+  }
 });
 
 test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {
@@ -1126,7 +1147,7 @@ test("global search returns role-safe record links without exposing another part
   });
   table("monitoringRecords").set("search-own-monitoring", {
     recordType: "monitoringLifecycle",
-    participantId: "participant-search", monitoringNumber: "MON-2026-901",
+    participantId: "participant-search", plantingReportId: "search-own-report", monitoringNumber: "MON-2026-901",
     siteName: "Needle Query Site", monitoringDate: "2026-09-26",
   });
   table("monitoringRecords").set("search-other-monitoring", {
@@ -1153,7 +1174,8 @@ test("global search returns role-safe record links without exposing another part
   assert.equal(participantResults.some((item) => item.type === "Generated Report"), false);
   assert.match(participantResults.find((item) => item.id === "search-own").path, /my-requests\?request=search-own/);
   assert.match(participantResults.find((item) => item.id === "search-own-report").path, /my-planting-reports\?report=search-own-report/);
-  assert.match(participantResults.find((item) => item.id === "search-own-monitoring").path, /survival-monitoring\?monitoring=search-own-monitoring/);
+  assert.match(participantResults.find((item) => item.id === "search-own-monitoring").path,
+    /my-planting-reports\?report=search-own-report/);
 
   const awaitingApproval = await globalSearch({
     query: "awaiting approval", role: "participant", userId: "participant-search", limit: 20,
@@ -1217,5 +1239,5 @@ test("new policy reports never synthesize requester aggregate monitoring assignm
   table("plantingReports").set("policy-only-report", { participantId: "new-policy-owner", reportingProgress: "Completed", quantityPlanted: 80, siteId: "policy-site", plantingDate: "2026-10-01", reportingPolicy: { monitoring: "PERMANENT_SAMPLE", requesterMonitoringTasks: false } });
   const rows = await service.getMonitoringRecordsByParticipantId("new-policy-owner");
   assert.equal(rows.some(row => row.plantingReportId === "policy-only-report"), false);
-  await assert.rejects(service.createMonitoringRecord({ plantingReportId: "policy-only-report" }), error => error.code === "PURPOSE_POLICY_MONITORING_WORKFLOW");
+  await assert.rejects(service.createMonitoringRecord({ plantingReportId: "policy-only-report", actorRole: "staff" }), error => error.code === "PURPOSE_POLICY_MONITORING_WORKFLOW");
 });
