@@ -70,6 +70,7 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   if (policy.paused || policy.pilot) return null;
   const verifiedPlantedQuantity = authoritativeQuantity(report);
   if (!verifiedPlantedQuantity) return null;
+  if (report.reportingPolicy && report.reportingPolicy.monitoring !== "PERMANENT_SAMPLE") return null;
 
   const ref = cohorts.doc(cohortIdFor(reportId));
   const existing = await transaction.get(ref);
@@ -95,10 +96,13 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
       eventId: String(report.eventId || "").trim(),
       distributionId: String(report.distributionId || report.requestId || "").trim(),
       siteId: String(report.siteId || event.plantingSiteId || "").trim(),
+      ...(report.reportingPolicy ? { plantingDate: String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10) } : {}),
       species: normalizedSpecies(event, report),
       ...(report.officialPlantingWorkflow === true ? { confirmationBases: report.confirmationBases || [] } : {}),
     },
     verifiedPlantedQuantity,
+    ...(report.reportingPolicy ? { samplingPolicySnapshot: { ...report.reportingPolicy.sampling, policyVersion: report.reportingPolicy.policyVersion, approvedBy: report.reportingPolicy.approvedBy },
+      samplingReadiness: require("./purposePolicy.service").samplingReadiness(verifiedPlantedQuantity, report.reportingPolicy.sampling, String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10)) } : {}),
     authoritativeAt: now,
     baselineStatus: "NOT_STARTED",
     baselineVersion: 0,
@@ -225,6 +229,7 @@ function samplingPlanSnapshot(plan) {
     reviewedBy: plan.reviewedBy || null,
     reviewedAt: plan.reviewedAt || null,
     reviewRemarks: plan.reviewRemarks || null,
+    ...(plan.samplingPolicyVersion !== undefined ? { samplingPolicyVersion: plan.samplingPolicyVersion, estimationEligibilityApproved: plan.estimationEligibilityApproved === true } : {}),
   };
 }
 
@@ -241,16 +246,23 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
     const currentPlan = current.samplingPlan || { version: 0, status: "DRAFT" };
     if (Number(currentPlan.version || 0) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
     if (currentPlan.status === "APPROVED") throw conflict("An approved sampling plan cannot be replaced. Submit an approved replacement through MENRO policy.");
-    const target = provisionalTarget(current.verifiedPlantedQuantity);
+    const readiness = current.samplingPolicySnapshot ? require("./purposePolicy.service").samplingReadiness(current.verifiedPlantedQuantity, current.samplingPolicySnapshot, current.source?.plantingDate) : null;
+    if (readiness?.pending.length) throw conflict("Sampling policy/procedures are pending MENRO approval; automatic and manual sample-plan activation remains blocked.");
+    const target = readiness ? readiness.target : provisionalTarget(current.verifiedPlantedQuantity);
     if (!target) throw new Error("This cohort has no authoritative planted quantity for sampling.");
     const samples = normalizePlannedSamples(selectedSamples, target);
     const distribution = normalizeDistribution(speciesSiteDistribution, samples);
+    if (current.samplingPolicySnapshot && (samples.some(sample => sample.unitType !== "tree") || distribution.some(row => row.sampleIds.some(id => {
+      const selected = samples.find(sample => sample.permanentId === id);
+      return selected.species !== row.species || selected.siteReference !== row.siteReference;
+    })))) throw new Error("New permanent-tree sampling must preserve each selected tree's species and site distribution.");
     const now = Timestamp.now();
     const plan = {
       schemaVersion: 1,
       version: Number(currentPlan.version || 0) + 1,
       status: submitForApproval ? "PENDING_ADMIN_APPROVAL" : "DRAFT",
-      provisionalPolicy: resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
+      provisionalPolicy: current.samplingPolicySnapshot ? "ADMIN_APPROVED_PURPOSE_POLICY_SNAPSHOT" : resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
+      ...(current.samplingPolicySnapshot ? { samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}),
       provisionalTarget: target,
       selectionMethod,
       selectedSamples: samples,
@@ -266,7 +278,8 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
   return getVerifiedPlantingCohort(cohortId, { actorId });
 }
 
-async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve = true, remarks = "" }) {
+async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve = true, remarks = "", estimationEligibilityApproved = false }) {
+  if (typeof estimationEligibilityApproved !== "boolean") throw conflict("Sampling validity attestation must be an explicit boolean.");
   release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
   const ref = cohorts.doc(cohortId);
@@ -276,8 +289,9 @@ async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve
     const current = doc.data(); const plan = current.samplingPlan;
     if (!plan || plan.status !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending sampling plan can be reviewed.");
     if (Number(plan.version) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
+    if (estimationEligibilityApproved && (!current.samplingPolicySnapshot || !Array.isArray(current.samplingReadiness?.pending) || current.samplingReadiness.pending.length || plan.selectedSamples.some(sample => sample.unitType !== "tree"))) throw conflict("Sampling validity cannot be approved while minimums, allocation/selection procedures or tree identities are unresolved.");
     const now = Timestamp.now();
-    const reviewed = { ...plan, status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
+    const reviewed = { ...plan, ...(current.samplingPolicySnapshot ? { estimationEligibilityApproved: approve === true && estimationEligibilityApproved === true, samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}), status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
     const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
     release.writeScope(actorId, cohortId);
     transaction.update(ref, { samplingPlan: reviewed, samplingPlanHistory: [...history, samplingPlanSnapshot(reviewed)], updatedAt: now });

@@ -26,6 +26,10 @@ const WORKFLOWS = new Set([
   "cohort-baseline",
   "sample-monitoring",
 ]);
+const STAFF_ONLY_CAPTURE_WORKFLOWS = new Set([
+  "monitoring-early", "monitoring-official", "monitoring-resubmit",
+  "cohort-baseline", "sample-monitoring",
+]);
 
 class CaptureSessionError extends Error {
   constructor(code, status, message) {
@@ -129,23 +133,38 @@ async function loadBoundResources(actorId, binding) {
   } else {
     if (!docs[1].exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Planting report was not found.");
     const report = docs[1].data();
-    if (String(report.siteId || "") !== binding.siteId ||
-        (report.participantId && String(report.participantId) !== actorId)) {
-      throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The monitoring capture target is not available to this participant.");
+    if (!monitoringReportTargetAllowed(report, binding.siteId, actorId, binding.actorRole || "participant")) {
+      throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The monitoring capture target is not available to this user.");
     }
   }
   return site;
 }
 
+function monitoringReportTargetAllowed(report, siteId, actorId, actorRole) {
+  return String(report.siteId || "") === siteId &&
+    (actorRole === "staff" || !report.participantId || String(report.participantId) === actorId);
+}
+
+function assertCaptureRole(workflow, actorRole, sessionActorRole) {
+  if (!["participant", "staff"].includes(actorRole)) {
+    throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
+  }
+  if (STAFF_ONLY_CAPTURE_WORKFLOWS.has(workflow) &&
+      (actorRole !== "staff" || sessionActorRole !== undefined && sessionActorRole !== "staff")) {
+    throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture monitoring evidence.");
+  }
+}
+
 const release = require("../config/permanentSampleRelease");
 const permanentWorkflow = workflow => ["cohort-baseline", "sample-monitoring"].includes(workflow);
 async function createCaptureSession({ actorId, actorRole = "participant", workflow, ...input }) {
-  if (!cleanId(actorId) || !["participant", "staff"].includes(actorRole)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
+  if (!cleanId(actorId)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Authenticated user is required.");
+  assertCaptureRole(workflow, actorRole);
   if (workflow === "sample-monitoring" && !resolveVerifiedPlantingCohortConfig().enabled) throw problem("COHORT_WORKFLOW_DISABLED", 409, "Verified planting cohort workflow is disabled.");
   if (["cohort-baseline", "sample-monitoring"].includes(workflow) && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can capture cohort evidence.");
   const binding = parseBinding(workflow, input);
   if (permanentWorkflow(workflow)) release.writeScope(actorId, binding.cohortId);
-  await loadBoundResources(actorId, binding);
+  await loadBoundResources(actorId, { ...binding, actorRole });
   const sessionId = crypto.randomUUID();
   const nonce = crypto.randomBytes(32).toString("base64url");
   const now = Date.now();
@@ -229,6 +248,7 @@ async function verifyCaptureSession({ actorId, actorRole, sessionId, nonce, file
   if (!snapshot.exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Camera capture session was not found.");
   const session = snapshot.data();
   if (session.actorId !== actorId) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Camera capture session belongs to another user.");
+  assertCaptureRole(session.workflow, actorRole, session.actorRole);
   if (permanentWorkflow(session.workflow)) {
     if (actorRole !== undefined && actorRole !== "staff") throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "Only MENRO Staff can verify cohort evidence.");
     release.writeScope(actorId, session.cohortId);
@@ -343,5 +363,5 @@ async function prepareConsumption(transaction, sessions) {
 module.exports = {
   COLLECTION, SESSION_TTL_MS, MAX_ACCURACY_METERS, SITE_FALLBACK_METERS, CaptureSessionError,
   createCaptureSession, verifyCaptureSession, resolveSubmissionEvidence, prepareConsumption,
-  _test: { parseBinding, validateLocation, nonceMatches, sha256 },
+  _test: { parseBinding, validateLocation, nonceMatches, sha256, assertCaptureRole, monitoringReportTargetAllowed },
 };

@@ -175,7 +175,7 @@ const submitPlantingReport = async (
       !Number.isInteger(
         parsedQuantity
       ) ||
-      parsedQuantity <= 0
+      (req.body?.confirmationMode === "final" ? parsedQuantity < 0 : parsedQuantity <= 0)
     ) {
       return res.status(400).json({
         success: false,
@@ -224,6 +224,8 @@ const submitPlantingReport = async (
 
           quantityPlanted:
             parsedQuantity,
+          leftoverQuantity,
+          confirmationMode: req.body?.confirmationMode || "partial",
 
           plantingDate,
 

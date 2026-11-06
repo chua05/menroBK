@@ -96,6 +96,7 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     reportType: "parent",
     requestId,
     requestNumber: request.requestNumber || "",
+    ...(request.approvedPurposePolicy ? { reportingPolicy: require("./purposePolicy.service").releasePolicy(request.approvedPurposePolicy, Number(event.seedlingTotalQuantity || 0)) } : {}),
     eventId,
     distributionId: requestId,
     participantId: request.participantId,
@@ -119,7 +120,7 @@ async function parentForEventInTransaction(transaction, eventId, event, now, ini
     createdAt: now,
     updatedAt: now,
   };
-  if (activationState().enabled && Number(initialQuantity) > 0) {
+  if (!data.reportingPolicy && activationState().enabled && Number(initialQuantity) > 0) {
     data.earlyMonitoringOriginalSubmittedAt = now;
   }
   transaction.create(ref, data);

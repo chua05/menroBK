@@ -177,3 +177,18 @@ test("sampling-plan approval route remains Admin-only", () => {
   assert.equal(allowed, false);
   assert.equal(responseCode, 403);
 });
+
+test("new policy plans preserve one configured cohort target, species identity and explicit Admin validity approval", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("configured-policy-plan"), sampling = { policyVersion: 2, percentage: 20, minimum: 1, firstVisitDelayWeeks: 2, intervalMonths: 12, speciesAllocationProcedure: "Approved allocation record", physicalSelectionProcedure: "Approved field selection record" };
+  table("verifiedPlantingCohorts").set(cohortId, { verifiedPlantedQuantity: 10, baselineVersion: 0, source: { plantingDate: "2026-10-01" }, samplingPolicySnapshot: sampling, samplingReadiness: { pending: [] } });
+  const payload = { cohortId, actorId: "staff-1", expectedVersion: 0, selectionMethod: "documented-manual", submitForApproval: true,
+    selectedSamples: [{ permanentId: "TREE-001", unitType: "tree", species: "Narra", siteReference: "North", selectionReason: "Approved documented procedure" }, { permanentId: "TREE-002", unitType: "tree", species: "Mahogany", siteReference: "South", selectionReason: "Approved documented procedure" }],
+    speciesSiteDistribution: [{ species: "Narra", siteReference: "North", sampleIds: ["TREE-001"] }, { species: "Mahogany", siteReference: "South", sampleIds: ["TREE-002"] }] };
+  await assert.rejects(service.saveSamplingPlan({ ...payload, selectedSamples: [payload.selectedSamples[0]] }), /exactly/);
+  await assert.rejects(service.saveSamplingPlan({ ...payload, speciesSiteDistribution: payload.speciesSiteDistribution.map(row => ({ ...row, species: "Wrong species" })) }), /species and site distribution/);
+  await assert.rejects(service.saveSamplingPlan({ ...payload, selectedSamples: payload.selectedSamples.map(row => ({ ...row, unitType: "plot" })) }), /species and site distribution/);
+  const saved = await service.saveSamplingPlan(payload); assert.equal(saved.samplingPlan.provisionalTarget, 2); assert.equal(saved.samplingPlan.samplingPolicyVersion, 2);
+  const approved = await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true, estimationEligibilityApproved: true });
+  assert.equal(approved.samplingPlan.estimationEligibilityApproved, true); assert.equal(approved.samplingPlanHistory.at(-1).samplingPolicyVersion, 2); assert.equal(approved.samplingPlanHistory.at(-1).estimationEligibilityApproved, true);
+});

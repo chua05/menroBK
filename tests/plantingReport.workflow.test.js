@@ -336,6 +336,38 @@ test("legacy Reviewed reports can receive the final Staff decision", async () =>
   assert.equal(table("plantingReports").get("legacy-reviewed").verificationStatus, "Approved");
 });
 
+test("early monitoring assignment goes to Staff/Admin while planting approval remains requester-facing", async () => {
+  const previousActivation = process.env.EARLY_MONITORING_ACTIVATION_AT;
+  process.env.EARLY_MONITORING_ACTIVATION_AT = "2020-01-01T00:00:00.000Z";
+  try {
+    const { dateOnlyInManila, shiftCalendarDate } = require("../src/utils/earlyMonitoring.util");
+    const reportId = "early-assignment-role-test";
+    const now = new Date();
+    const today = dateOnlyInManila(now);
+    table("plantingReports").set(reportId, {
+      participantId: "participant-1", verificationStatus: "Pending Review",
+      createdAt: now, plantingDate: today, siteId: "assignment-test-site",
+    });
+    table("users").set("assignment-test-staff", { role: "staff", status: "active" });
+    table("users").set("assignment-test-admin", { role: "admin", status: "active" });
+    table("users").set("participant-1", { role: "participant", status: "active" });
+
+    const approved = await service.approvePlantingReport(reportId, "staff-1", "Verified", "Staff Name");
+    assert.equal(approved.earlyMonitoring.officialOpeningDate, shiftCalendarDate(today, 14));
+    assert.equal(approved.earlyMonitoring.applicable, true);
+    assert.equal(table("notifications").get(`planting_report_approved_${reportId}_participant-1`).recipientUserId,
+      "participant-1", "planting approval status stays requester-facing");
+    const taskNotices = [...table("notifications").values()].filter(item =>
+      item.relatedRecordId === reportId && item.type === "early_monitoring_scheduled");
+    assert.deepEqual(new Set(taskNotices.map(item => item.recipientUserId)),
+      new Set(["assignment-test-staff", "assignment-test-admin"]));
+    assert.equal(taskNotices.some(item => item.recipientUserId === "participant-1"), false);
+  } finally {
+    if (previousActivation === undefined) delete process.env.EARLY_MONITORING_ACTIVATION_AT;
+    else process.env.EARLY_MONITORING_ACTIVATION_AT = previousActivation;
+  }
+});
+
 test("participants cannot open records outside their authorized scope", async () => {
   seed("owned-1");
   async function readAs(uid) {

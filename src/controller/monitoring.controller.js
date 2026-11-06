@@ -14,6 +14,9 @@ async function addMonitoringRecord(req, res, observationType = "official") {
   // Express supplies next as argument three on the official POST route.
   observationType = observationType === "early" ? "early" : "official";
   try {
+    if (req.user?.role !== "staff") {
+      return res.status(403).json({ success: false, message: "Only MENRO Staff can submit legacy monitoring observations." });
+    }
     const {
       plantingReportId, totalMonitored, healthyCount, damagedCount, deadCount,
       maturityStatus, monitoredDate, remarks,
@@ -74,7 +77,7 @@ async function addMonitoringRecord(req, res, observationType = "official") {
       healthyCount: counts[0], damagedCount: counts[1], deadCount: counts[2],
       maturityStatus, monitoredDate: String(monitoredDate),
       remarks: typeof remarks === "string" ? remarks.trim() : "",
-      monitoredBy: req.user.uid, requesterRole: req.user.role,
+      monitoredBy: req.user.uid, actorRole: req.user.role,
       file: req.file, imageDetails, metadata: { ...metadata, ...captureAudit }, observationType,
       imageHash: generateImageHash(req.file.buffer), captureEvidence,
     });
@@ -169,6 +172,10 @@ const rejectMonitoring = (req, res) => decideMonitoring("reject", req, res);
 
 async function resubmitMonitoring(req, res) {
   try {
+    if (req.user?.role !== "staff") {
+      return res.status(403).json({ success: false, code: "MONITORING_ACTION_FORBIDDEN",
+        message: "Only MENRO Staff can resubmit legacy monitoring observations." });
+    }
     let imageDetails = null;
     let metadata = null;
     let imageHash = null;
@@ -206,7 +213,7 @@ async function resubmitMonitoring(req, res) {
       damagedCount: req.body?.damagedCount, deadCount: req.body?.deadCount,
       monitoredDate: req.body?.monitoredDate, maturityStatus: req.body?.maturityStatus,
       remarks: typeof req.body?.remarks === "string" ? req.body.remarks.trim() : "",
-      actorId: req.user.uid, file: req.file, imageDetails, metadata, imageHash,
+      actorId: req.user.uid, actorRole: req.user.role, file: req.file, imageDetails, metadata, imageHash,
       captureEvidence: req.captureEvidence || null,
     });
     return res.status(200).json({ success: true, message: "Monitoring observation resubmitted for review.", data });

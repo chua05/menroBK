@@ -128,6 +128,7 @@ test("worker uses report ownership, active Staff, deterministic IDs, and suppres
   table("users").set("owner-1", { role: "participant", status: "active" });
   table("users").set("reporter-2", { role: "participant", status: "active" });
   table("users").set("staff-1", { role: "staff", status: "active" });
+  table("users").set("admin-1", { role: "admin", status: "active" });
   table("users").set("inactive-staff", { role: "staff", status: "inactive" });
 
   await Promise.all([
@@ -136,10 +137,39 @@ test("worker uses report ownership, active Staff, deterministic IDs, and suppres
   ]);
   assert.equal(table("notifications").size, 2);
   assert.deepEqual([...table("notifications").values()].map((item) => item.recipientUserId).sort(),
-    ["owner-1", "staff-1"]);
+    ["admin-1", "staff-1"]);
+  assert.equal([...table("notifications").values()].some(item => item.recipientUserId === "owner-1"), false);
   assert.ok([...table("notifications").values()].every((item) =>
     item.relatedRecordId === "monitor-1" && item.type === "official_monitoring_available"));
 
   await processOfficialMonitoringNotifications({ today: "2026-10-16" });
   assert.equal(table("notifications").size, 2);
+});
+
+test("early opening, deadline, and overdue tasks notify only active Staff/Admin", async () => {
+  const reportId = "legacy-early-task-report";
+  table("plantingReports").set(reportId, { ...report,
+    earlyMonitoring: { enabled: true, applicable: true, openingDate: "2026-10-01",
+      deadlineDate: "2026-10-07", officialOpeningDate: "2026-10-20" } });
+  table("users").set("owner-1", { role: "participant", status: "active" });
+  table("users").set("staff-1", { role: "staff", status: "active" });
+  table("users").set("admin-1", { role: "admin", status: "active" });
+  table("users").set("inactive-staff", { role: "staff", status: "inactive" });
+
+  const { processEarlyMonitoringNotifications } = require("../src/services/earlyMonitoringNotification.service");
+  for (const today of ["2026-10-01", "2026-10-05", "2026-10-08"]) {
+    await processEarlyMonitoringNotifications({ today });
+  }
+  const notices = [...table("notifications").values()].filter(item => item.relatedRecordId === reportId);
+  assert.equal(notices.length, 6);
+  assert.deepEqual(new Set(notices.map(item => item.recipientUserId)), new Set(["staff-1", "admin-1"]));
+  assert.equal(notices.some(item => item.recipientUserId === "owner-1" || item.recipientUserId === "inactive-staff"), false);
+});
+
+test("new purpose-policy reports do not generate legacy requester monitoring reminders", async () => {
+  table("plantingReports").set("new-purpose-report", { ...report, reportingPolicy: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", requesterMonitoringTasks: false }, earlyMonitoring: { enabled: true, applicable: true, openingDate: "2026-10-15", deadlineDate: "2026-10-21", officialOpeningDate: "2026-11-01" } });
+  const before = table("notifications").size;
+  await require("../src/services/earlyMonitoringNotification.service").processEarlyMonitoringNotifications({ today: "2026-10-15" });
+  await processOfficialMonitoringNotifications({ today: "2026-10-15" });
+  assert.equal(table("notifications").size, before);
 });

@@ -98,9 +98,9 @@ async function image(date = today, outside = false) {
       IFD3: { GPSLatitudeRef: "N", GPSLatitude: outside ? "12/1 41/1 0/1" : "12/1 40/1 156/10", GPSLongitudeRef: "E", GPSLongitude: "123/1 52/1 30/1" } },
   }).toBuffer();
 }
-async function browserCameraEvidence(binding, bytes) {
-  const session = ok(await api("participant", "POST", "/evidence-capture-sessions", binding));
-  const verification = ok(await api("participant", "POST",
+async function browserCameraEvidence(binding, bytes, actor = "participant") {
+  const session = ok(await api(actor, "POST", "/evidence-capture-sessions", binding));
+  const verification = ok(await api(actor, "POST",
     `/evidence-capture-sessions/${session.captureSessionId}/verify`, form({
       nonce: session.nonce, capturedAt: new Date().toISOString(), latitude: 12.671,
       longitude: 123.875, accuracy: 50, clientImageSha256: hash(bytes),
@@ -206,8 +206,9 @@ test("cloud no-key requests retain duplicate rejection rather than cross-request
 });
 test("official partial observation, count/remarks reuse and replacement retain immutable revisions and quota", async () => {
   const fields = await monitoringFixture(), bytes = await image(), key = randomUUID();
-  const first = ok(await api("participant", "POST", "/monitoring", form(fields, bytes), key));
-  const again = ok(await api("participant", "POST", "/monitoring", form(fields, bytes), key));
+  assert.equal((await api("participant", "POST", "/monitoring", form(fields, bytes), randomUUID())).status, 403);
+  const first = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), key));
+  const again = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), key));
   assert.equal(first.id, again.id); assert.equal(again.history.length, 1);
   const entry = again.history[0]; assert.equal(entry.survivalRate, 92); assert.equal(entry.mortalityRate, 8);
   assert.equal(entry.isFullCohortAssessment, false); assert.equal(again.nextMonitoringDate, null);
@@ -217,23 +218,23 @@ test("official partial observation, count/remarks reuse and replacement retain i
   const correction = { ...fields, expectedVersion: 1, retainEvidenceRevision: 1, healthyCount: 19, damagedCount: 4 };
   const correctionKey = randomUUID();
   const competingCorrections = await Promise.all([
-    api("participant", "PATCH", `${route}/resubmit`, form(correction), correctionKey),
-    api("participant", "PATCH", `${route}/resubmit`, form(correction), correctionKey),
+    api("staff", "PATCH", `${route}/resubmit`, form(correction), correctionKey),
+    api("staff", "PATCH", `${route}/resubmit`, form(correction), correctionKey),
   ]);
   assert.ok(competingCorrections.every(result => [200, 202].includes(result.status)));
   const corrected = ok(competingCorrections.find(result => result.status === 200), 200);
-  const retry = ok(await api("participant", "PATCH", `${route}/resubmit`, form(correction), correctionKey), 200);
+  const retry = ok(await api("staff", "PATCH", `${route}/resubmit`, form(correction), correctionKey), 200);
   assert.equal(retry.history[0].revisionHistory.length, 2); assert.equal(retry.history[0].id, entry.id);
   let saved = await raw(first.id);
   assert.deepEqual(saved.history[0].privateEvidence, saved.history[0].revisionHistory[0].evidenceRef.privateEvidence);
   const originalRef = saved.history[0].privateEvidence;
   ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 2, reason: "Clarify remarks" }), 200);
   const remarks = { ...correction, expectedVersion: 3, remarks: "Clarified remarks" }, remarksKey = randomUUID();
-  ok(await api("participant", "PATCH", `${route}/resubmit`, form(remarks), remarksKey), 200);
+  ok(await api("staff", "PATCH", `${route}/resubmit`, form(remarks), remarksKey), 200);
   ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 4, reason: "Replace evidence" }), 200);
   const replacement = await image(), replacementKey = randomUUID(), updated = { ...remarks, expectedVersion: 5 };
-  ok(await api("participant", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
-  ok(await api("participant", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
+  ok(await api("staff", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
+  ok(await api("staff", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
   saved = await raw(first.id); assert.equal(saved.history[0].revisionHistory.length, 4);
   assert.notEqual(saved.history[0].privateEvidence.objectName, originalRef.objectName);
   for (const [revision, expected] of [[1, bytes], [4, replacement]]) {
@@ -246,14 +247,15 @@ test("official partial observation, count/remarks reuse and replacement retain i
   const approved = ok(await api("admin", "PATCH", `${route}/approve`, { expectedVersion: 7 }), 200);
   assert.equal(approved.history[0].reviewStatus, "Approved"); assert.equal(approved.nextMonitoringDate, null);
   assert.equal(corrected.history[0].revisionNumber, 2);
-  const charges = await db.collection("evidenceUploadIntents").where("actorId", "==", users.participant).get();
+  const charges = await db.collection("evidenceUploadIntents").where("actorId", "==", users.staff).get();
   const observationCharges = charges.docs.filter(doc => doc.data().recordId === entry.id);
   assert.equal(observationCharges.length, 2); assert.ok(observationCharges.every(doc => doc.data().status === "LINKED"));
 });
 test("early observation cloud upload and retry preserve official scheduling isolation", async () => {
   const fields = await monitoringFixture(true), bytes = await image(), key = randomUUID();
-  const first = ok(await api("participant", "POST", "/monitoring/early", form(fields, bytes), key));
-  const retry = ok(await api("participant", "POST", "/monitoring/early", form(fields, bytes), key));
+  assert.equal((await api("participant", "POST", "/monitoring/early", form(fields, bytes), randomUUID())).status, 403);
+  const first = ok(await api("staff", "POST", "/monitoring/early", form(fields, bytes), key));
+  const retry = ok(await api("staff", "POST", "/monitoring/early", form(fields, bytes), key));
   assert.equal(first.id, retry.id); assert.equal(retry.history.length, 1); assert.equal(retry.history[0].observationType, "early");
   assert.equal(retry.nextMonitoringDate, null);
   const result = await api("participant", "GET", `/evidence/monitoring/${first.id}/photos/0`);
@@ -261,8 +263,8 @@ test("early observation cloud upload and retry preserve official scheduling isol
 });
 test("concurrent authenticated retries persist one observation and one intent", async () => {
   const fields = await monitoringFixture(), bytes = await image(), key = randomUUID();
-  const results = await Promise.all([api("participant", "POST", "/monitoring", form(fields, bytes), key),
-    api("participant", "POST", "/monitoring", form(fields, bytes), key)]);
+  const results = await Promise.all([api("staff", "POST", "/monitoring", form(fields, bytes), key),
+    api("staff", "POST", "/monitoring", form(fields, bytes), key)]);
   assert.ok(results.every(result => [201, 202].includes(result.status)), JSON.stringify(results.map(r => r.body)));
   const result = ok(results.find(result => result.status === 201));
   const saved = await raw(result.id); assert.equal(saved.history.length, 1);
@@ -294,7 +296,7 @@ test("Storage success followed by business transaction failure recovers the same
     assert.ok(result.id);
   } finally { db.runTransaction = originalTransaction; }
 });
-test("durably linked business record survives an interrupted HTTP response and same-key replay", async () => {
+test("durably linked Staff monitoring record survives an interrupted HTTP response and same-key replay", async () => {
   const fields = await monitoringFixture(), bytes = await image(), key = randomUUID();
   const originalJson = app.response.json; let interrupt = true;
   app.response.json = function (body) {
@@ -303,9 +305,9 @@ test("durably linked business record survives an interrupted HTTP response and s
     }
     return originalJson.call(this, body);
   };
-  try { await assert.rejects(() => api("participant", "POST", "/monitoring", form(fields, bytes), key)); }
+  try { await assert.rejects(() => api("staff", "POST", "/monitoring", form(fields, bytes), key)); }
   finally { app.response.json = originalJson; }
-  const result = ok(await api("participant", "POST", "/monitoring", form(fields, bytes), key));
+  const result = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), key));
   assert.equal(result.history.length, 1);
 });
 test("guest authorization, cloud linkage, parent photo ordering and retry accounting", async () => {
@@ -362,14 +364,15 @@ test("registered request-linked contributions preserve parent aggregation, immut
 });
 test("invalid site GPS cannot be retained on correction and requires a new immutable image", async () => {
   const fields = await monitoringFixture(), bytes = await image(today, true);
-  const first = ok(await api("participant", "POST", "/monitoring", form(fields, bytes), randomUUID()));
+  assert.equal((await api("participant", "POST", "/monitoring", form(fields, bytes), randomUUID())).status, 403);
+  const first = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), randomUUID()));
   const entry = first.history[0], route = `/monitoring/${first.id}/observations/${entry.id}`;
   ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Invalid site GPS" }), 200);
   const correction = { ...fields, expectedVersion: 1, retainEvidenceRevision: 1 };
-  const invalid = await api("participant", "PATCH", `${route}/resubmit`, form(correction), randomUUID());
+  const invalid = await api("staff", "PATCH", `${route}/resubmit`, form(correction), randomUUID());
   assert.equal(invalid.status, 422); assert.equal(invalid.body.code, "OBSERVATION_EVIDENCE_INVALID");
   const replacement = await image();
-  const corrected = ok(await api("participant", "PATCH", `${route}/resubmit`, form(correction, replacement), randomUUID()), 200);
+  const corrected = ok(await api("staff", "PATCH", `${route}/resubmit`, form(correction, replacement), randomUUID()), 200);
   assert.equal(corrected.history[0].revisionNumber, 2); assert.equal(corrected.history[0].siteGpsValid, true);
 });
 test("missing objects, forged cross-record references and wrong generations have no local fallback or path disclosure", async () => {
@@ -440,10 +443,12 @@ test("browser-camera early monitoring persists privately without advancing offic
   const fields = await monitoringFixture(true), reportBefore = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
   const bytes = await image(), binding = { workflow: "monitoring-early",
     plantingReportId: fields.plantingReportId, siteId: reportBefore.siteId };
-  const camera = await browserCameraEvidence(binding, bytes), key = randomUUID();
-  const first = ok(await api("participant", "POST", "/monitoring/early",
+  const camera = await browserCameraEvidence(binding, bytes, "staff"), key = randomUUID();
+  assert.equal((await api("participant", "POST", "/monitoring/early",
+    form({ ...fields, siteId: reportBefore.siteId }, bytes), randomUUID())).status, 403);
+  const first = ok(await api("staff", "POST", "/monitoring/early",
     form({ ...fields, siteId: reportBefore.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
-  const retry = ok(await api("participant", "POST", "/monitoring/early",
+  const retry = ok(await api("staff", "POST", "/monitoring/early",
     form({ ...fields, siteId: reportBefore.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
   assert.equal(retry.id, first.id);
   const observation = retry.history[0];
@@ -462,10 +467,12 @@ test("browser-camera early monitoring persists privately without advancing offic
 test("browser-camera official monitoring preserves partial-observation KPI scheduling rules", async () => {
   const fields = await monitoringFixture(), report = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
   const bytes = await image(), camera = await browserCameraEvidence({ workflow: "monitoring-official",
-    plantingReportId: fields.plantingReportId, siteId: report.siteId }, bytes), key = randomUUID();
-  const first = ok(await api("participant", "POST", "/monitoring",
+    plantingReportId: fields.plantingReportId, siteId: report.siteId }, bytes, "staff"), key = randomUUID();
+  assert.equal((await api("participant", "POST", "/monitoring",
+    form({ ...fields, siteId: report.siteId }, bytes), randomUUID())).status, 403);
+  const first = ok(await api("staff", "POST", "/monitoring",
     form({ ...fields, siteId: report.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
-  const retry = ok(await api("participant", "POST", "/monitoring",
+  const retry = ok(await api("staff", "POST", "/monitoring",
     form({ ...fields, siteId: report.siteId, evidenceManifest: camera.evidenceManifest }, bytes), key));
   assert.equal(retry.id, first.id);
   const observation = retry.history[0];
@@ -484,18 +491,20 @@ test("browser-camera official monitoring preserves partial-observation KPI sched
 test("browser-camera monitoring resubmission after Staff Return atomically replaces evidence", async () => {
   const fields = await monitoringFixture(), report = (await db.collection("plantingReports").doc(fields.plantingReportId).get()).data();
   const originalBytes = await image(), originalCamera = await browserCameraEvidence({ workflow: "monitoring-official",
-    plantingReportId: fields.plantingReportId, siteId: report.siteId }, originalBytes);
-  const created = ok(await api("participant", "POST", "/monitoring", form({ ...fields, siteId: report.siteId,
+    plantingReportId: fields.plantingReportId, siteId: report.siteId }, originalBytes, "staff");
+  assert.equal((await api("participant", "POST", "/monitoring",
+    form({ ...fields, siteId: report.siteId }, originalBytes), randomUUID())).status, 403);
+  const created = ok(await api("staff", "POST", "/monitoring", form({ ...fields, siteId: report.siteId,
     evidenceManifest: originalCamera.evidenceManifest }, originalBytes), randomUUID()));
   const observation = created.history[0], route = `/monitoring/${created.id}/observations/${observation.id}`;
   ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Retake evidence" }), 200);
   const replacement = await image(), replacementCamera = await browserCameraEvidence({ workflow: "monitoring-resubmit",
     plantingReportId: fields.plantingReportId, siteId: report.siteId, monitoringId: created.id,
-    observationId: observation.id, expectedVersion: 1 }, replacement), key = randomUUID();
+    observationId: observation.id, expectedVersion: 1 }, replacement, "staff"), key = randomUUID();
   const payload = { ...fields, siteId: report.siteId, expectedVersion: 1,
     evidenceManifest: replacementCamera.evidenceManifest };
-  const updated = ok(await api("participant", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
-  const retry = ok(await api("participant", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
+  const updated = ok(await api("staff", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
+  const retry = ok(await api("staff", "PATCH", `${route}/resubmit`, form(payload, replacement), key), 200);
   assert.equal(retry.history[0].revisionNumber, updated.history[0].revisionNumber);
   assert.equal(retry.history[0].reviewStatus, "Pending Review");
   assert.equal(retry.history[0].evidenceSource, "browser-camera");

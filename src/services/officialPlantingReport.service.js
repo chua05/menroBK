@@ -27,8 +27,8 @@ function optionsFor(requestId, request, eventId, event, distribution) {
     if (!Number.isSafeInteger(released) || released !== Number(item.quantity)) throw fail(409, "The release quantities require reconciliation before reporting.");
     return { inventoryId: item.inventoryId, species: item.species || distributed.species || "", quantityReleased: released, availableQuantity: availableForReporting(event, item) };
   });
-  return { requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.organization || "",
-    requestType: request.requestType || request.workflow?.effectiveRequestType || "", expectedVersion: Number(event.officialReportingVersion || 0), siteId: event.plantingSiteId, siteName: event.plantingSiteName || "", eventName: event.name || "", plantingDate: event.date || "", items };
+  return { ...(request.reportingPolicy ? { reportingPolicy: request.reportingPolicy } : {}), requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.organization || "",
+    requestType: request.requestType || request.workflow?.effectiveRequestType || require("../utils/requestClassification.util").classifyRequest(request.workflow) || "", expectedVersion: Number(event.officialReportingVersion || 0), siteId: event.plantingSiteId, siteName: event.plantingSiteName || "", eventName: event.name || "", plantingDate: event.date || "", items };
 }
 async function listReleasedOptions(user, { cursor, requestId } = {}) {
   staff(user);
@@ -55,7 +55,7 @@ async function listReleasedOptions(user, { cursor, requestId } = {}) {
       const site = siteDoc?.exists ? siteDoc.data() : {};
       options.push({ ...option, requestNumber: request.requestNumber || doc.id, distributionNumber: distribution.data().distributionNumber || distribution.id,
         siteName: site.siteName || option.siteName, barangay: site.barangay || event.data().barangay || "",
-        latitude: Number.isFinite(site.latitude) ? site.latitude : null, longitude: Number.isFinite(site.longitude) ? site.longitude : null,
+        latitude: site.latitude !== null && String(site.latitude).trim() !== "" && Number.isFinite(Number(site.latitude)) ? Number(site.latitude) : null, longitude: site.longitude !== null && String(site.longitude).trim() !== "" && Number.isFinite(Number(site.longitude)) ? Number(site.longitude) : null,
         coverageRadiusMeters: Number.isFinite(site.coverageRadiusMeters) && site.coverageRadiusMeters > 0 ? site.coverageRadiusMeters : null,
         startTime: event.data().startTime || event.data().time || "", endTime: event.data().endTime || "" });
     }
@@ -192,7 +192,7 @@ async function reviewOfficialSubmission(user, id, approve, reason = "") {
     }
     if (Object.values(acceptedByInventory).reduce((sum, value) => sum + value, 0) !== accepted) throw fail(409, "Confirmed planted quantities require reconciliation before monitoring.");
     const now = Timestamp.now();
-    const earlyMonitoring = progress === "Completed" && accepted > 0 && !parent.earlyMonitoring ? buildEarlyMonitoringPolicy({ originalSubmittedAt: parent.earlyMonitoringOriginalSubmittedAt || parent.createdAt || now,
+    const earlyMonitoring = !parent.reportingPolicy && progress === "Completed" && accepted > 0 && !parent.earlyMonitoring ? buildEarlyMonitoringPolicy({ originalSubmittedAt: parent.earlyMonitoringOriginalSubmittedAt || parent.createdAt || now,
       verifiedAt: now, officialOpeningDate: shiftCalendarDate(String(parent.plantingDate || parent.eventDate || event.date || ""), 14) }) : null;
     const nextParent = { ...parent, quantityPlanted: active, activeSubmittedQuantity: active, acceptedQuantity: accepted,
       acceptedSeedlingsByInventory: acceptedByInventory, confirmationBases: [...confirmationBases].sort(), pendingReviewQuantity: pending, declaredLeftoverQuantity: declaredLeftovers, acceptedLeftoverQuantity: acceptedLeftovers,

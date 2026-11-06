@@ -33,6 +33,19 @@ const {
 } = require("../controller/seedlingRequest.controller");
 const { parseRequestLetterSubmission } = require("../middleware/requestLetterUpload.middleware");
 
+const walkIn = require("../controller/walkInRequest.controller");
+const { uploadConcurrencyGuard } = require("../middleware/upload.middleware");
+const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
+const { evidenceUploadMaintenanceGate } = require("../middleware/evidenceUploadMaintenance.middleware");
+const walkInUpload = require("multer")({ storage: require("multer").memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 2, fields: 1, fieldSize: 100000 } }).fields([{ name: "acknowledgement", maxCount: 1 }, { name: "requestLetter", maxCount: 1 }]);
+router.post("/walk-in", verifyToken, authorizeRoles("staff"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
+  (req, res, next) => walkInUpload(req, res, error => error ? res.status(400).json({ success: false, message: "Upload valid acknowledgement/request-letter files within the 10 MB limit." }) : next()), walkIn.submitWalkIn);
+router.patch("/walk-in/:id/resubmit", verifyToken, authorizeRoles("staff"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
+  (req, res, next) => walkInUpload(req, res, error => error ? res.status(400).json({ success: false, message: "Upload valid signed acknowledgement files within the size limit." }) : next()), walkIn.resubmitWalkIn);
+router.patch("/walk-in/:id/schedule", verifyToken, authorizeRoles("staff"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
+  (req, res, next) => walkInUpload(req, res, error => error ? res.status(400).json({ success: false, message: "Upload a signed acknowledgement within the size limit." }) : next()), walkIn.recordSchedule);
+router.get("/:id/acknowledgement", verifyToken, authorizeRoles("staff", "admin"), walkIn.acknowledgement);
+
 // Non-sensitive capability used to coordinate staggered frontend/backend releases.
 router.get("/capabilities", verifyToken, authorizeRoles("participant", "staff"), getSeedlingRequestCapabilities);
 

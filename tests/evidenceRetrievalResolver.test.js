@@ -106,7 +106,7 @@ test("default legacy path reuses actual record/revision authorization and existi
     const resolved = await resolver.resolve(revision, user);
     assert.deepEqual(await fsp.readFile(resolved.evidence.absolutePath), bytes);
   }
-  await assert.rejects(() => resolver.resolve(revision, { uid: "cohort-owner", role: "participant" }), { code: "EVIDENCE_FORBIDDEN" });
+  await assert.rejects(() => resolver.resolve(revision, { uid: "other", role: "participant" }), { code: "EVIDENCE_FORBIDDEN" });
   const current = await resolver.resolve({ kind: "monitoring", recordId: "cohort", entryIndex: "0" }, owner);
   assert.equal(current.evidence.absolutePath, monitoringPath);
 });

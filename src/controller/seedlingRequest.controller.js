@@ -1,3 +1,4 @@
+const { contract: requestContract, classifyRequest } = require("../utils/requestClassification.util");
 const {
   createSeedlingRequest,
   getAllSeedlingRequests,
@@ -83,14 +84,7 @@ const REQUEST_TYPE_SELECTABLE_SECTORS = new Set([
   "Other (please specify)",
 ]);
 
-const getEffectiveRequestType = (workflow = {}) => {
-  const sector = cleanString(workflow.sector);
-  return (["Barangay Official", "Private Sector / Business",
-    "Civic Organization / NGO", "Government Agency"].includes(sector) ||
-    (REQUEST_TYPE_SELECTABLE_SECTORS.has(sector) && workflow.requestingAs === "group"))
-    ? "organization"
-    : "individual";
-};
+const getEffectiveRequestType = (workflow = {}) => classifyRequest(workflow);
 
 const scheduleValidationError = (eventProposal = {}, workflow = {}) =>
   validatePlantingSchedule({
@@ -107,25 +101,24 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
   const requireField = (field, message) => {
     if (!cleanString(workflow[field])) errors[field] = message;
   };
-  const allowedSectors = new Set(["Resident / Individual", "Barangay Official", "School / Student",
-    "Private Sector / Business", "Civic Organization / NGO", "Government Agency", "Other (please specify)"]);
+  const allowedSectors = new Set([...requestContract.sectors, "School / Student"]);
   if (!allowedSectors.has(cleanString(workflow.sector))) errors.sector = "Please select a valid sector.";
   if (REQUEST_TYPE_SELECTABLE_SECTORS.has(workflow.sector)) {
     if (workflow.sector === "Other (please specify)") requireField("sectorOther", "Please specify the sector.");
     if (!["individual", "group"].includes(workflow.requestingAs)) errors.requestingAs = "Select how you are requesting.";
   }
   const effectiveRequestType = getEffectiveRequestType(workflow);
+  if (!effectiveRequestType) errors.requestingAs = "Select an explicit requester classification; legacy School / Student is ambiguous.";
+  if (workflow.requestContractVersion === 2 && effectiveRequestType === "organization") requireField("organizationName", "Enter the school or organization name.");
   if (cleanString(workflow.effectiveRequestType) &&
       cleanString(workflow.effectiveRequestType) !== effectiveRequestType) {
     errors.effectiveRequestType = "The request type does not match the selected sector.";
   }
   // Old stored requests remain readable and can retain their legacy fields. New
   // wizard submissions send effectiveRequestType and therefore use this contract.
-  if (cleanString(workflow.effectiveRequestType)) {
+  if (workflow.requestContractVersion === 2 || cleanString(workflow.effectiveRequestType)) {
     const selectedPurpose = cleanString(workflow.purpose);
-    const allowedPurposes = effectiveRequestType === "organization"
-      ? ORGANIZATION_PURPOSES
-      : INDIVIDUAL_PURPOSES;
+    const allowedPurposes = workflow.requestContractVersion === 2 ? new Set([...requestContract.purposes, ...ORGANIZATION_PURPOSES, ...INDIVIDUAL_PURPOSES]) : effectiveRequestType === "organization" ? ORGANIZATION_PURPOSES : INDIVIDUAL_PURPOSES;
     if (!allowedPurposes.has(selectedPurpose)) {
       errors.purpose = "Select a purpose for the selected request type.";
     } else if (["Other", "Other (Please Specify)"].includes(selectedPurpose)) {
@@ -340,7 +333,7 @@ const validateResubmissionPayload = (body = {}) => {
     plantingLocation: cleanString(plantingLocation),
     preferredReleaseDate,
     expectedVersion: requireExpectedVersion(body),
-    workflow: workflow && typeof workflow === "object" ? workflow : {},
+    workflow: { ...(workflow && typeof workflow === "object" ? workflow : {}), effectiveRequestType: getEffectiveRequestType(workflow) },
     eventProposal: {
       eventName: groupRequest
         ? cleanString(eventProposal.eventName)
@@ -371,8 +364,8 @@ const submitSeedlingRequest = async (
     return res.status(req.user?.uid ? 403 : 401).json({ success: false, message: "Authenticated Participant or Staff requester access is required." });
   }
   try {
-    const participantId =
-      req.user.uid;
+    const requesterIdentity = req.requesterContext || req.user;
+    const participantId = requesterIdentity.uid;
 
     const forbiddenSensitiveFields = [
       "identificationType",
@@ -445,18 +438,19 @@ const submitSeedlingRequest = async (
     }
 
     // Profile identity is server-owned; never trust request-body overrides.
-    const participantName = req.user.fullName || req.user.name || "";
-    const organization = req.user.organization || "";
-    const contactNumber = req.user.contactNumber || "";
+    const participantName = requesterIdentity.fullName || requesterIdentity.name || "";
+    const organization = requesterIdentity.organization || (groupRequest ? cleanString(workflow?.organizationName) : "");
+    const organizationRequired = groupRequest || (req.user.role !== "staff" && workflow?.requestContractVersion !== 2 && workflow?.sector !== "Student (Individual)");
+    const contactNumber = requesterIdentity.contactNumber || "";
 
-    if (!cleanString(organization) && (req.user.role !== "staff" || groupRequest)) {
+    if (!cleanString(organization) && organizationRequired) {
       return res.status(400).json({
         success: false,
         message: "Your organization information is missing from your profile. Please update your profile before submitting this request.",
       });
     }
 
-    if (!cleanString(contactNumber)) {
+    if (!cleanString(contactNumber) && !req.walkInContext) {
       return res.status(400).json({
         success: false,
         message: "Your contact number is missing from your profile. Please update your profile before submitting this request.",
@@ -472,10 +466,8 @@ const submitSeedlingRequest = async (
       !cleanString(
         participantName
       ) ||
-      (!cleanString(organization) && (req.user.role !== "staff" || groupRequest)) ||
-      !cleanString(
-        contactNumber
-      ) ||
+      (!cleanString(organization) && organizationRequired) ||
+      (!cleanString(contactNumber) && !req.walkInContext) ||
       !cleanString(
         purpose
       ) ||
@@ -658,8 +650,10 @@ const submitSeedlingRequest = async (
         preferredReleaseDate,
 
         clientSubmissionId: cleanString(clientSubmissionId),
+        purposePolicyManaged: true,
+        ...(req.walkInContext ? { walkIn: req.walkInContext } : {}),
 
-        workflow: { ...(workflow && typeof workflow === "object" ? workflow : {}), fullName: cleanString(participantName), contactNumber: cleanString(contactNumber) },
+        workflow: { ...(workflow && typeof workflow === "object" ? workflow : {}), effectiveRequestType, fullName: cleanString(participantName), contactNumber: cleanString(contactNumber) },
 
         ...(privateRequestLetter ? { requestLetter: { privateDocument: privateRequestLetter } } : {}),
 
@@ -740,7 +734,7 @@ const submitSeedlingRequest = async (
 
         inventoryReleased:
           false,
-      }, validatedIdentification, { uid: participantId, role: req.user.role });
+      }, validatedIdentification, { uid: req.user.uid, role: req.user.role, fullName: req.user.fullName || "", ...(req.walkInContext ? { walkInRequesterId: participantId } : {}) });
 
     return res.status(201).json({
       success: true,
@@ -958,6 +952,7 @@ const markRequestReviewed =
             reviewedBy: req.user.uid,
             reviewedByName: req.user.fullName || req.user.name || "",
             siteVerification: req.body?.siteVerification,
+            policyProposal: req.body?.policyProposal,
             items: validatedItems,
             purpose: cleanString(purpose),
             plantingLocation: cleanString(plantingLocation),
@@ -1041,7 +1036,9 @@ const resubmitRequest = async (req, res) => {
   try {
     requireExpectedVersion(req.body);
     const requestData = validateResubmissionPayload(req.body);
-    requestData.workflow = { ...requestData.workflow, fullName: cleanString(req.user.fullName || req.user.name), contactNumber: cleanString(req.user.contactNumber) };
+    const identity = req.requesterContext || req.user;
+    requestData.workflow = { ...requestData.workflow, fullName: cleanString(identity.fullName || identity.name), contactNumber: cleanString(identity.contactNumber) };
+    if (req.walkInContext) requestData.walkIn = req.walkInContext;
     if (req.file) {
       const requestLetterStorageEnabled = require("../config/requestLetterStorage")
         .resolveRequestLetterStorageConfig().enabled;
@@ -1049,14 +1046,15 @@ const resubmitRequest = async (req, res) => {
         return res.status(503).json({ success: false, message: "Secure request-letter storage is not enabled." });
       }
       requestData.requestLetter = { privateDocument: await require("../services/requestLetterStorage.service").uploadRequestLetter({
-        requestId: req.params.id, participantId: req.user.uid,
+        requestId: req.params.id, participantId: identity.uid,
         clientSubmissionId: `replacement-${req.params.id}-${requestData.expectedVersion}`, file: req.file,
       }) };
     }
     const request = await resubmitSeedlingRequest(
       req.params.id,
-      req.user.uid,
-      requestData
+      identity.uid,
+      requestData,
+      { uid: req.user.uid, role: req.user.role, fullName: req.user.fullName || "" }
     );
 
     return res.status(200).json({
@@ -1101,7 +1099,7 @@ const approveRequest = async (
 
   try {
     // Approval does not require a reason.
-    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason, requireExpectedVersion(req.body));
+    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason, requireExpectedVersion(req.body), req.body?.policyDecision);
 
     return res.status(200).json({
       success: true,
@@ -1116,6 +1114,7 @@ const approveRequest = async (
       error
     );
 
+    if (error.code === "PURPOSE_POLICY_INVALID") return res.status(error.status || 400).json({ success: false, message: error.message, fieldErrors: error.fieldErrors });
     const publicMessages = [
       "Seedling request not found.",
       "Only reviewed requests can be approved.",

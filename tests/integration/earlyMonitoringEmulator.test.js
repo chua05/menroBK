@@ -18,6 +18,8 @@ const NOTIFICATION_REPORT_ID = "early-acceptance-notification-report";
 const PARTICIPANT_ID = "phase2-participant";
 const SITE_ID = "phase2-site";
 const EVENT_ID = "early-acceptance-event";
+const NOTIFY_STAFF_ID = `phase3c-early-staff-${crypto.randomUUID()}`;
+const NOTIFY_ADMIN_ID = `phase3c-early-admin-${crypto.randomUUID()}`;
 const uploadRoot = process.env.MENRO_UPLOAD_ROOT;
 const today = dateOnlyInManila();
 // The committed synthetic evidence fixtures carry a 2026-10-01 capture date.
@@ -43,13 +45,14 @@ async function removeFixtures() {
   const hashes = await db.collection("monitoringEvidenceHashes").get();
   const batch = db.batch();
   [REPORT_ID, NOTIFICATION_REPORT_ID].forEach((id) => batch.delete(db.collection("plantingReports").doc(id)));
+  [NOTIFY_STAFF_ID, NOTIFY_ADMIN_ID].forEach((id) => batch.delete(db.collection("users").doc(id)));
   batch.delete(db.collection("monitoringRecords").doc(lifecycleId));
   hashes.docs.filter((doc) => doc.data().lifecycleId === lifecycleId).forEach((doc) => batch.delete(doc.ref));
   const notices = await db.collection("notifications").where("relatedRecordId", "in", [REPORT_ID, NOTIFICATION_REPORT_ID]).get();
   notices.docs.forEach((doc) => batch.delete(doc.ref));
   await batch.commit();
   await db.collection("workerCheckpoints").doc("early-monitoring-notifications").delete();
-  await fs.rm(path.join(uploadRoot, "monitoring", PARTICIPANT_ID), { recursive: true, force: true });
+  await fs.rm(path.join(uploadRoot, "monitoring", "phase2-staff"), { recursive: true, force: true });
 }
 
 async function seedReport() {
@@ -65,16 +68,23 @@ async function seedReport() {
   });
 }
 
+async function seedNotificationRecipients() {
+  await Promise.all([
+    db.collection("users").doc(NOTIFY_STAFF_ID).set({ role: "staff", status: "active", testFixture: true }),
+    db.collection("users").doc(NOTIFY_ADMIN_ID).set({ role: "admin", status: "active", testFixture: true }),
+  ]);
+}
+
 async function submitEarly(name = "valid-original.jpg", overrides = {}) {
   return monitoring.createMonitoringRecord({ plantingReportId: REPORT_ID,
     totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
     maturityStatus: "Immature", monitoredDate: openingDate,
-    remarks: "Early emulator acceptance observation", monitoredBy: PARTICIPANT_ID,
-    requesterRole: "participant", observationType: "early",
+    remarks: "Early emulator acceptance observation", monitoredBy: "phase2-staff",
+    actorRole: "staff", observationType: "early",
     ...(await evidence(name)), ...overrides });
 }
 
-test.beforeEach(async () => { await removeFixtures(); await seedReport(); });
+test.beforeEach(async () => { await removeFixtures(); await seedReport(); await seedNotificationRecipients(); });
 test.after(removeFixtures);
 
 test("concurrent early submissions create one immutable early observation", async () => {
@@ -113,7 +123,7 @@ test("returned early correction preserves ID and remains allowed after official 
     "earlyMonitoring.officialOpeningDate": shiftCalendarDate(today, -1),
   });
   lifecycle = await monitoring.resubmitMonitoringObservation({ monitoringId: lifecycleId,
-    observationId, expectedVersion: 1, actorId: PARTICIPANT_ID, retainEvidenceRevision: 1,
+    observationId, expectedVersion: 1, actorId: "phase2-staff", actorRole: "staff", retainEvidenceRevision: 1,
     totalMonitored: 5, healthyCount: 3, damagedCount: 1, deadCount: 1,
     monitoredDate: openingDate, maturityStatus: "Immature", remarks: "Corrected early sample" });
   assert.equal(lifecycle.history[0].id, observationId);
@@ -132,7 +142,7 @@ test("an unresolved early observation does not block an eligible official observ
   const official = await monitoring.createMonitoringRecord({ plantingReportId: REPORT_ID,
     totalMonitored: 10, healthyCount: 7, damagedCount: 2, deadCount: 1,
     maturityStatus: "Immature", monitoredDate: today, remarks: "Official while early is pending",
-    monitoredBy: PARTICIPANT_ID, requesterRole: "participant", observationType: "official",
+    monitoredBy: "phase2-staff", actorRole: "staff", observationType: "official",
     ...(await evidence("valid-replacement.jpg")) });
   assert.equal(early.history[0].reviewStatus, "Pending Review");
   assert.equal(official.history.filter((entry) => entry.reviewStatus === "Pending Review").length, 2);
@@ -150,10 +160,15 @@ test("concurrent notification worker retries create one deterministic notice", a
     processEarlyMonitoringNotifications({ today }),
     processEarlyMonitoringNotifications({ today }),
   ]);
-  const id = `early_monitoring_available_${NOTIFICATION_REPORT_ID}`;
-  const notice = await db.collection("notifications").doc(id).get();
-  assert.equal(notice.exists, true);
-  assert.equal(notice.data().recipientUserId, PARTICIPANT_ID);
   const notices = await db.collection("notifications").where("relatedRecordId", "==", NOTIFICATION_REPORT_ID).get();
-  assert.equal(notices.size, 1);
+  const recipients = await Promise.all(notices.docs.map(async notice => {
+    const user = await db.collection("users").doc(notice.data().recipientUserId).get();
+    assert.ok(user.exists);
+    assert.ok(["staff", "admin"].includes(user.data().role));
+    return user.id;
+  }));
+  assert.ok(recipients.includes(NOTIFY_STAFF_ID));
+  assert.ok(recipients.includes(NOTIFY_ADMIN_ID));
+  assert.equal(new Set(recipients).size, notices.size);
+  assert.ok(notices.docs.every(doc => doc.data().type.startsWith("early_monitoring_")));
 });

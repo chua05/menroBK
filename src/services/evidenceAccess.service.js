@@ -197,7 +197,8 @@ async function monitoringRevisionEvidenceForUser(recordId, observationId, revisi
   if (matches.length !== 1) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   const observation = matches[0];
   const authorized = ["admin", "staff"].includes(user.role) ||
-    observation.originalReporterId === user.uid || observation.monitoredBy === user.uid;
+    record.participantId === user.uid || observation.originalReporterId === user.uid ||
+    observation.monitoredBy === user.uid;
   if (!authorized) throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
   const revision = (observation.revisionHistory || []).find(
     (entry) => Number(entry.revisionNumber) === Number(revisionNumber)

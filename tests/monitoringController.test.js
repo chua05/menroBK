@@ -35,7 +35,7 @@ function response() {
 
 function request(overrides = {}) {
   return {
-    user: { uid: "reporter-1", role: "participant" },
+    user: { uid: "staff-reporter-1", role: "staff" },
     file: { buffer: Buffer.from("image"), originalname: "field.jpg" },
     body: {
       plantingReportId: "report-1", totalMonitored: "25",
@@ -53,7 +53,8 @@ test("monitoring controller forwards partial coverage, actual date, and authenti
   assert.equal(res.statusCode, 201);
   assert.equal(captured.totalMonitored, 25);
   assert.equal(captured.monitoredDate, "2026-10-10");
-  assert.equal(captured.monitoredBy, "reporter-1");
+  assert.equal(captured.monitoredBy, "staff-reporter-1");
+  assert.equal(captured.actorRole, "staff");
   assert.deepEqual([captured.healthyCount, captured.damagedCount, captured.deadCount], [20, 3, 2]);
 });
 
@@ -66,10 +67,19 @@ test("monitoring controller rejects condition counts that do not equal coverage"
   assert.equal(captured, null);
 });
 
+test("monitoring controller rejects Participant submissions before processing evidence", async () => {
+  captured = null;
+  const req = request(); req.user = { uid: "participant-1", role: "participant" };
+  const res = response();
+  await addMonitoringRecord(req, res);
+  assert.equal(res.statusCode, 403);
+  assert.equal(captured, null);
+});
+
 test("resubmission controller rejects screenshot replacement evidence before persistence", async () => {
   captured = null;
   screenshot = true;
-  const req = request();
+  const req = request(); req.user = { uid: "staff-reporter-1", role: "staff" };
   req.params = { monitoringId: "monitor-1", observationId: "OBS-1" };
   req.body.expectedVersion = "1";
   const res = response();
@@ -81,4 +91,16 @@ test("resubmission controller rejects screenshot replacement evidence before per
   } finally {
     screenshot = false;
   }
+});
+
+test("monitoring controller rejects Participant corrections before processing replacement evidence", async () => {
+  captured = null;
+  const req = request(); req.user = { uid: "participant-1", role: "participant" };
+  req.params = { monitoringId: "monitor-1", observationId: "OBS-1" };
+  req.body.expectedVersion = "1";
+  const res = response();
+  await resubmitMonitoring(req, res);
+  assert.equal(res.statusCode, 403);
+  assert.equal(res.body.code, "MONITORING_ACTION_FORBIDDEN");
+  assert.equal(captured, null);
 });

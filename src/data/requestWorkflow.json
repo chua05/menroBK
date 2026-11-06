@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "sectors": ["Resident / Individual", "Barangay Official", "Student (Individual)", "School Organization Representative", "Private Sector / Business", "Civic Organization / NGO", "Government Agency", "Other (please specify)"],
+  "purposes": ["Household / Backyard", "Agroforestry / Fruit Tree", "Reforestation / Mangrove / Riverbank / Slope", "School / Community / Roadside Greening", "Replacement Planting", "Special Occasion", "Other"],
+  "organizationSectors": ["Barangay Official", "School Organization Representative", "Private Sector / Business", "Civic Organization / NGO", "Government Agency"],
+  "legacyPurposes": {
+    "Backyard / Home Planting": "Household / Backyard",
+    "Fruit-Bearing Tree Planting": "Agroforestry / Fruit Tree",
+    "Farm / Agricultural Planting": "Agroforestry / Fruit Tree",
+    "Land Rehabilitation / Reforestation": "Reforestation / Mangrove / Riverbank / Slope",
+    "Reforestation / Rehabilitation": "Reforestation / Mangrove / Riverbank / Slope",
+    "School Activity": "School / Community / Roadside Greening",
+    "Barangay Activity": "School / Community / Roadside Greening",
+    "Community Activity": "School / Community / Roadside Greening"
+  }
+}

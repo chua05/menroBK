@@ -271,6 +271,9 @@ async function savePhoto(file, participantId) {
 }
 
 async function createMonitoringRecord(data) {
+  if (data.actorRole !== "staff") {
+    throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can submit legacy monitoring observations.", 403);
+  }
   const { idempotencyKey, file, imageDetails, metadata, imageHash, captureEvidence, ...payload } = data;
   return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.monitoredBy },
     workflow: data.observationType === "early" ? "monitoring-early" : "monitoring-official",
@@ -284,6 +287,7 @@ async function createMonitoringRecordImpl(data) {
   const reportDoc = await reportRef.get();
   if (!reportDoc.exists) throw new Error("Planting report not found.");
   const report = { id: reportDoc.id, ...reportDoc.data() };
+  if (report.reportingPolicy) throw workflowError("PURPOSE_POLICY_MONITORING_WORKFLOW", "New purpose-policy cohorts use authorized Staff monitoring, not requester aggregate tasks.");
   if (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") throw new Error("Only completed planting reports can be monitored.");
   if (!report.siteId) throw new Error("Planting report has no associated planting site.");
 
@@ -348,6 +352,7 @@ async function createMonitoringRecordImpl(data) {
       if (duplicateDoc.exists) throw new Error("Duplicate monitoring image detected.");
       if (!currentReportDoc.exists) throw new Error("Planting report not found.");
       const currentReport = { id: currentReportDoc.id, ...currentReportDoc.data() };
+      if (currentReport.reportingPolicy) throw workflowError("PURPOSE_POLICY_MONITORING_WORKFLOW", "This report uses the Staff monitoring policy.");
       if (currentReport.verificationStatus !== "Approved" && currentReport.reportingProgress !== "Completed") {
         throw new Error("Only completed planting reports can be monitored.");
       }
@@ -529,7 +534,7 @@ async function createMonitoringRecordImpl(data) {
       entry.auditHistory = [{
         action: "Submitted",
         actorId: data.monitoredBy,
-        actorRole: data.requesterRole,
+        actorRole: data.actorRole,
         fromStatus: null,
         toStatus: PHASE_TWO_STATUSES.PENDING,
         revisionNumber: 1,
@@ -627,7 +632,7 @@ async function getMonitoringRecordsByParticipantId(participantId) {
   const byReport = new Map(existing.map((record) => [record.plantingReportId, record]));
   for (const doc of reportSnapshot.docs) {
     const report = { id: doc.id, ...doc.data() };
-    if ((report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || byReport.has(doc.id)) continue;
+    if (report.reportingPolicy || (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || byReport.has(doc.id)) continue;
     try {
       const id = lifecycleId(participantId, doc.id, report.eventId || "", report.siteId || "");
       byReport.set(doc.id, present(baseLifecycle(id, report)));
@@ -665,6 +670,8 @@ async function transitionObservation({
   await db.runTransaction(async (transaction) => {
     const roleRecipients = action === "review"
       ? await getRoleRecipientsInTransaction(transaction, ["admin"])
+      : action === "return"
+        ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"])
       : [];
     const doc = await transaction.get(ref);
     if (!doc.exists) throw workflowError("MONITORING_NOT_FOUND", "Monitoring record not found.", 404);
@@ -725,9 +732,9 @@ async function transitionObservation({
       ...workflowCounts(history), updatedAt: now });
     const reporterId = observation.originalReporterId || observation.monitoredBy;
     if (action === "return") {
-      createNotificationInTransaction(transaction, {
-        notificationId: `monitoring_returned_${monitoringId}_${observation.id}_${updated.reviewVersion}_${reporterId}`,
-        recipientUserId: reporterId,
+      roleRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `monitoring_returned_${monitoringId}_${observation.id}_${updated.reviewVersion}_${recipient.id}`,
+        recipientUserId: recipient.id,
         type: "monitoring_returned",
         title: "Monitoring Observation Returned for Rechecking",
         message: `${observation.id} was returned for rechecking. Reason: ${updated.returnReason}`,
@@ -737,7 +744,7 @@ async function transitionObservation({
         reason: updated.returnReason,
         createdAt: now,
         details: { observationId: observation.id, siteId: observation.siteId || current.siteId },
-      });
+      }));
     } else if (action === "review") {
       roleRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
         notificationId: `monitoring_reviewed_admin_${monitoringId}_${observation.id}_${updated.reviewVersion}_${recipient.id}`,
@@ -778,6 +785,9 @@ const approveMonitoringObservation = (args) => transitionObservation({ ...args, 
 const rejectMonitoringObservation = (args) => transitionObservation({ ...args, action: "reject", text: args.reason || "" });
 
 async function resubmitMonitoringObservation(data) {
+  if (data.actorRole !== "staff") {
+    throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can resubmit legacy monitoring observations.", 403);
+  }
   const { idempotencyKey, file, imageDetails, metadata, imageHash, savedEvidence, captureEvidence, ...payload } = data;
   return require("./evidenceWorkflow.service").runWorkflow({ actor: { uid: data.actorId },
     workflow: "monitoring-resubmit", target: `${data.monitoringId}:${data.observationId}`,
@@ -795,7 +805,6 @@ async function resubmitMonitoringObservationImpl(data) {
     const doc = await ref.get();
     const history = doc.data()?.history || [];
     const observation = history[uniqueObservationIndex(history, data.observationId)];
-    if (observation.originalReporterId !== data.actorId) throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only the original reporter can resubmit this observation.", 403);
     assertVersion(observation, data.expectedVersion);
     if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
     if (data.file) privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(
@@ -876,9 +885,6 @@ async function resubmitMonitoringObservationImpl(data) {
       assertVersion(observation, data.expectedVersion);
       if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) {
         throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
-      }
-      if (observation.originalReporterId !== data.actorId) {
-        throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only the original reporter can resubmit this observation.", 403);
       }
       const reportRef = reports.doc(observation.plantingReportId || current.plantingReportId);
       const siteRef = sites.doc(observation.siteId || current.siteId);
@@ -983,7 +989,7 @@ async function resubmitMonitoringObservationImpl(data) {
         reviewVersion: Number(observation.reviewVersion || 0) + 1,
         revisionNumber, revisionHistory: [...revisions, revision], updatedAt: now };
       updated.auditHistory = appendAudit(observation, { action: "Resubmitted", actorId: data.actorId,
-        actorRole: "participant", fromStatus: observation.reviewStatus,
+        actorRole: data.actorRole, fromStatus: observation.reviewStatus,
         toStatus: PHASE_TWO_STATUSES.PENDING, revisionNumber, actedAt: now });
       history[index] = updated;
       const nextMonitoringDate = officialNextMonitoringDate(history, current);

@@ -103,7 +103,7 @@ async function processOfficialMonitoringNotifications(options = {}) {
         const reportDoc = await transaction.get(reportSnapshot.ref);
         if (!reportDoc.exists) return;
         const report = reportDoc.data();
-        if (report.archived === true ||
+        if (report.reportingPolicy || report.archived === true ||
             (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed")) return;
         const recordsSnapshot = await transaction.get(
           db.collection("monitoringRecords").where("plantingReportId", "==", reportDoc.id)
@@ -114,12 +114,8 @@ async function processOfficialMonitoringNotifications(options = {}) {
         const schedule = officialSchedule(report, records);
         if (!schedule || schedule.outstanding || schedule.openingDate !== today || today >= schedule.monitoringEndDate) return;
 
-        const staff = await getRoleRecipientsInTransaction(transaction, ["staff"]);
-        const participantId = clean(report.participantId);
-        const participantDoc = participantId
-          ? await transaction.get(db.collection("users").doc(participantId)) : null;
-        const recipientIds = new Set(staff.map((recipient) => recipient.id));
-        if (participantDoc?.exists && participantDoc.data().status !== "inactive") recipientIds.add(participantId);
+        const staffAndAdmins = await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]);
+        const recipientIds = new Set(staffAndAdmins.map((recipient) => recipient.id));
         if (recipientIds.size === 0) return;
 
         const monitoringId = records.find((record) => record.recordType === "monitoringLifecycle" ||

@@ -361,6 +361,8 @@ async function createPlantingReport(data, files) {
     "quantityPlanted", "plantingDate", "plantingLocation", "eventId", "eventName", "remarks",
     "submittedByName", "submittedBySector", "submittedByContactNumber"].map(key => [key, payload[key]]));
   if (Number(payload.leftoverQuantity || 0) !== 0) fingerprintPayload.leftoverQuantity = Number(payload.leftoverQuantity);
+  if (payload.confirmationMode === "final") fingerprintPayload.confirmationMode = "final";
+  if (payload.confirmationMode && !["final", "partial"].includes(payload.confirmationMode)) throw Object.assign(new Error("Select a final or partial planting confirmation."), { status: 400 });
   return runWorkflow({ actor: { uid: data.participantId }, workflow: "planting-report",
     key: idempotencyKey, payload: fingerprintPayload, files },
   operation => createPlantingReportImpl({ ...payload, workflowOperation: operation }, files),
@@ -485,7 +487,7 @@ const createPlantingReportImpl = async (
     !Number.isInteger(
       quantityPlanted
     ) ||
-    quantityPlanted <= 0
+    (data.confirmationMode === "final" ? quantityPlanted < 0 : quantityPlanted <= 0)
   ) {
     throw new Error(
       "Please enter a valid quantity of planted seedlings."
@@ -1303,6 +1305,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       quantityReleased,
 
       quantityPlanted,
+      confirmationMode: data.confirmationMode || "partial",
 
       plantingDate:
         data.plantingDate,
@@ -1544,6 +1547,9 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         const current = Number(event.recordedSeedlingsByInventory?.[inventoryId] || 0);
         const reserved = Number(event.pendingSeedlingsByInventory?.[inventoryId] || 0);
         const remaining = Math.max(0, Number(currentAllocation.quantity) - current - reserved - Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0));
+        if (data.confirmationMode === "final" && (quantityPlanted + leftovers !== remaining || remaining <= 0)) {
+          throw Object.assign(new Error("The final confirmation must cover the current remaining released balance. Refresh before submitting."), { status: 409, fieldErrors: { quantityPlanted: "Final planted = current remaining reportable quantity minus final leftovers." } });
+        }
         if (quantityPlanted + leftovers > remaining) {
           const message = `Quantity exceeds the remaining reportable quantity. Only ${remaining} trees remain available for reporting.`;
           throw Object.assign(new Error(message), { status: 400, fieldErrors: { quantityPlanted: message } });
@@ -2015,13 +2021,25 @@ const approvePlantingReport =
         const reportingProgress = progressFor({ released, active, accepted, pending,
           leftovers: Number(parent.declaredLeftoverQuantity || 0), acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0) + leftover, pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
         const now = Timestamp.now();
-        const earlyMonitoring = reportingProgress === "Completed" && !parent.earlyMonitoring
+        const earlyMonitoring = !parent.reportingPolicy && reportingProgress === "Completed" && !parent.earlyMonitoring
           ? buildEarlyMonitoringPolicy({
             originalSubmittedAt: parent.earlyMonitoringOriginalSubmittedAt ||
               (activationState().enabled ? now : parent.createdAt),
             verifiedAt: now,
             officialOpeningDate: shiftCalendarDate(String(parent.plantingDate || parent.eventDate || ""), 14),
           }) : null;
+        const monitoringRecipients = earlyMonitoring?.applicable
+          ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
+        await ensureCohortForAuthoritativeReportInTransaction(transaction, {
+          reportId: parentId,
+          report: {
+            ...parent,
+            acceptedQuantity: accepted,
+            reportingProgress,
+            verificationStatus: reportingProgress,
+          },
+          now,
+        });
         transaction.update(contributionRef, {
           staffReviewStatus: "Accepted", reviewedBy: approvedBy,
           reviewedByName: reviewedByName || "", reviewedAt: now,
@@ -2035,24 +2053,15 @@ const approvePlantingReport =
           updatedAt: now,
           ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
         });
-        await ensureCohortForAuthoritativeReportInTransaction(transaction, {
-          reportId: parentId,
-          report: {
-            ...parent,
-            acceptedQuantity: accepted,
-            reportingProgress,
-            verificationStatus: reportingProgress,
-          },
-          now,
-        });
-        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
-          notificationId: `early_monitoring_scheduled_${parentId}`,
-          recipientUserId: parent.participantId,
+
+        if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${parentId}_${recipient.id}`,
+          recipientUserId: recipient.id,
           type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
           message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
           relatedRecordType: "monitoring", relatedRecordId: parentId, createdAt: now,
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
-        });
+        }));
         createVerificationLogInTransaction(transaction, {
           plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
           previousStatus: "Pending Review", newStatus: "Accepted",
@@ -2111,6 +2120,8 @@ const approvePlantingReport =
           verifiedAt: now,
           officialOpeningDate: shiftCalendarDate(String(currentReport.plantingDate || ""), 14),
         });
+        const monitoringRecipients = earlyMonitoring?.applicable
+          ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
 
         transaction.update(
           reportRef,
@@ -2190,14 +2201,14 @@ const approvePlantingReport =
           relatedRecordId: id,
           createdAt: now,
         });
-        if (earlyMonitoring?.applicable) createNotificationInTransaction(transaction, {
-          notificationId: `early_monitoring_scheduled_${id}`,
-          recipientUserId: currentReport.participantId,
+        if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+          notificationId: `early_monitoring_scheduled_${id}_${recipient.id}`,
+          recipientUserId: recipient.id,
           type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
           message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
           relatedRecordType: "monitoring", relatedRecordId: id, createdAt: now,
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
-        });
+        }));
       }
     );
 
