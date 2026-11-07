@@ -27,7 +27,8 @@ function optionsFor(requestId, request, eventId, event, distribution) {
     if (!Number.isSafeInteger(released) || released !== Number(item.quantity)) throw fail(409, "The release quantities require reconciliation before reporting.");
     return { inventoryId: item.inventoryId, species: item.species || distributed.species || "", quantityReleased: released, availableQuantity: availableForReporting(event, item) };
   });
-  return { ...(request.reportingPolicy ? { reportingPolicy: request.reportingPolicy } : {}), requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.organization || "",
+  return { ...(request.reportingPolicy ? { reportingPolicy: request.reportingPolicy } : {}), requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.participantType || request.userType || distribution.participantType || "",
+    requestingAs: request.workflow?.requestingAs || "", organizationName: request.workflow?.organizationName || request.organization || "",
     requestType: request.requestType || request.workflow?.effectiveRequestType || require("../utils/requestClassification.util").classifyRequest(request.workflow) || "", expectedVersion: Number(event.officialReportingVersion || 0), siteId: event.plantingSiteId, siteName: event.plantingSiteName || "", eventName: event.name || "", plantingDate: event.date || "", items };
 }
 async function listReleasedOptions(user, { cursor, requestId } = {}) {

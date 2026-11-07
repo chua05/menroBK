@@ -146,7 +146,7 @@ const createDistributionRecordInTransaction = (
       requestData.participantName,
 
     participantType:
-      requestData.participantType || requestData.userType || "",
+      requestData.workflow?.sector || requestData.participantType || requestData.userType || "",
 
     barangay:
       requestData.barangay || requestData.participantBarangay || "",

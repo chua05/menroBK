@@ -145,3 +145,21 @@ test("release discovery pages are bounded and use backend document cursors witho
   await assert.rejects(service.listReleasedOptions(staff, { cursor: "../other" }), error => error.status === 400);
   await assert.rejects(service.listReleasedOptions({ uid: "participant", role: "participant" }), error => error.status === 403);
 });
+
+test("release options map authoritative requester, site, schedule and references without inventing sector or coordinates", async () => {
+  const fixture = seed("mapped");
+  Object.assign(memory.records("seedlingRequests").get(fixture.requestId), { requestNumber: "REQ-2026-123", workflow: { sector: "Resident / Individual", requestingAs: "individual", organizationName: "Actual organization" } });
+  Object.assign(memory.records("events").get(fixture.eventId), { name: "Approved activity", endTime: "10:00" });
+  memory.records("sites").set("site-fixture", { siteName: "Registered site", barangay: "Bical", latitude: 12.6, longitude: 123.9, coverageRadiusMeters: 50 });
+  const result = await service.listReleasedOptions(staff, { requestId: fixture.requestId });
+  assert.equal(result.options.length, 1);
+  const option = result.options[0];
+  assert.equal(option.requesterName, "Real requester"); assert.equal(option.participantSector, "Resident / Individual");
+  assert.equal(option.organizationName, "Actual organization"); assert.equal(option.latitude, 12.6); assert.equal(option.longitude, 123.9);
+  assert.equal(option.siteName, "Registered site"); assert.equal(option.barangay, "Bical"); assert.equal(option.startTime, "08:00"); assert.equal(option.endTime, "10:00");
+  assert.equal(option.requestNumber, "REQ-2026-123");
+  const request = memory.records("seedlingRequests").get(fixture.requestId); request.workflow = {}; request.organization = "Not a sector";
+  const missing = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0]; assert.equal(missing.participantSector, "");
+  memory.records("sites").get("site-fixture").latitude = null;
+  assert.equal((await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0].latitude, null);
+});
