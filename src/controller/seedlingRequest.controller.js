@@ -131,11 +131,10 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
     }
   }
   ["addressProvince", "addressMunicipality", "addressBarangay", "street", "siteBarangay",
-    "releaseMethod", "caretaker", "carePlan", "monitoringFrequency"]
+    "releaseMethod"]
     .forEach((field) => requireField(field, "This field is required."));
   const area = require("../utils/plantingArea.util").plantingArea(workflow.areaChoice, workflow.exactArea, { optional: workflow.siteMode === "proposed" });
   if (area.error) errors[area.field] = area.error;
-  if (workflow.monitoringFrequency === "Other") requireField("monitoringOther", "Specify the monitoring frequency.");
   if (!["existing", "proposed"].includes(workflow.siteMode)) errors.siteMode = "Select a valid planting-site option.";
   if (workflow.siteMode === "existing") requireField("existingSiteId", "Select a planting site.");
   if (workflow.siteMode === "proposed") {
