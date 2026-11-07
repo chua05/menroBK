@@ -204,7 +204,9 @@ function nonceMatches(savedHash, nonce) {
 function validateLocation(site, input) {
   const latitude = Number(input.latitude);
   const longitude = Number(input.longitude);
-  const accuracyMeters = Number(input.accuracy);
+  // Number("") and Number(null) are 0, which would pass as a perfect fix.
+  const blankAccuracy = input.accuracy === null || input.accuracy === undefined || String(input.accuracy).trim() === "";
+  const accuracyMeters = blankAccuracy ? Number.NaN : Number(input.accuracy);
   if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
       !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
     throw problem("CAPTURE_LOCATION_INVALID", 422, "A valid device location is required for camera evidence.");

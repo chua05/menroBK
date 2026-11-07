@@ -75,6 +75,16 @@ test("location validation rejects inaccurate, outside-Bulan, and outside-site ca
     error => error.code === "CAPTURE_LOCATION_OUTSIDE_SITE");
 });
 
+test("missing or blank GPS accuracy is rejected instead of counting as zero", () => {
+  const site = { latitude: 13, longitude: 124, coverageRadiusMeters: 100 };
+  for (const accuracy of [undefined, null, "", "   ", "unknown", NaN, -1]) {
+    assert.throws(() => _test.validateLocation(site, { latitude: 13, longitude: 124, accuracy }),
+      error => error.code === "CAPTURE_LOCATION_INACCURATE", String(accuracy));
+  }
+  assert.equal(_test.validateLocation(site, { latitude: 13, longitude: 124, accuracy: "0" }).accuracyMeters, 0);
+  assert.equal(_test.validateLocation(site, { latitude: 13, longitude: 124, accuracy: "50" }).accuracyMeters, 50);
+});
+
 test("GPS accuracy and 50 metre site fallback are enforced independently at their boundaries", () => {
   const site = { latitude: 13, longitude: 124 };
   const latitudeAt = meters => 13 + meters / 111195;
