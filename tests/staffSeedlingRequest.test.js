@@ -218,7 +218,7 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
     return { uploadIntentId: intent, ...validated, bytes: undefined, objectName: `private-test/${requestId}`, bucket: "demo-only", generation: "1" };
   });
   const body = payload(); body.workflow.requestContractVersion = 2; body.workflow.purpose = "Household / Backyard"; body.purpose = "Household / Backyard";
-  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "", receiptReference: "WALKIN-ACK-001", encodedBy: "spoofed-staff", encodedByName: "Spoofed name" };
+  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "(056) 211-1234", receiptReference: "WALKIN-ACK-001", encodedBy: "spoofed-staff", encodedByName: "Spoofed name" };
   async function send(role, acknowledgement = true, path = "/walk-in", method = "POST") {
     const form = new FormData(); form.append("request", JSON.stringify(body));
     if (acknowledgement) form.append("acknowledgement", new Blob([image], { type: "image/png" }), "signed-acknowledgement.png");

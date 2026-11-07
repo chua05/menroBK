@@ -1,4 +1,5 @@
 const { contract: requestContract, classifyRequest } = require("../utils/requestClassification.util");
+const { ORGANIZATION_KEY, requesterDetailField } = require("../utils/requesterDetails.util");
 const {
   createSeedlingRequest,
   getAllSeedlingRequests,
@@ -104,12 +105,16 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
   const allowedSectors = new Set([...requestContract.sectors, "School / Student"]);
   if (!allowedSectors.has(cleanString(workflow.sector))) errors.sector = "Please select a valid sector.";
   if (REQUEST_TYPE_SELECTABLE_SECTORS.has(workflow.sector)) {
-    if (workflow.sector === "Other (please specify)") requireField("sectorOther", "Please specify the sector.");
+    if (workflow.sector === "Other (please specify)") requireField("sectorOther", "Specify the requester type.");
     if (!["individual", "group"].includes(workflow.requestingAs)) errors.requestingAs = "Select how you are requesting.";
   }
   const effectiveRequestType = getEffectiveRequestType(workflow);
   if (!effectiveRequestType) errors.requestingAs = "Select an explicit requester classification; legacy School / Student is ambiguous.";
-  if (workflow.requestContractVersion === 2 && effectiveRequestType === "organization") requireField("organizationName", "Enter the school or organization name.");
+  const requesterDetail = requesterDetailField(workflow);
+  if (workflow.requestContractVersion === 2 && requesterDetail) {
+    requireField(requesterDetail.key, `Enter the ${requesterDetail.label}.`);
+    if (cleanString(workflow[requesterDetail.key]).length > 160) errors[requesterDetail.key] = `Use at most 160 characters for the ${requesterDetail.label}.`;
+  }
   if (cleanString(workflow.effectiveRequestType) &&
       cleanString(workflow.effectiveRequestType) !== effectiveRequestType) {
     errors.effectiveRequestType = "The request type does not match the selected sector.";
@@ -438,8 +443,11 @@ const submitSeedlingRequest = async (
 
     // Profile identity is server-owned; never trust request-body overrides.
     const participantName = requesterIdentity.fullName || requesterIdentity.name || "";
-    const organization = requesterIdentity.organization || (groupRequest ? cleanString(workflow?.organizationName) : "");
-    const organizationRequired = groupRequest || (req.user.role !== "staff" && workflow?.requestContractVersion !== 2 && workflow?.sector !== "Student (Individual)");
+    const requesterDetail = workflow?.requestContractVersion === 2 ? requesterDetailField(workflow) : null;
+    // The typed name identifies who this request is for, so it outranks the profile value.
+    const typedOrganization = requesterDetail?.key === ORGANIZATION_KEY ? cleanString(workflow.organizationName) : "";
+    const organization = typedOrganization || requesterIdentity.organization || (groupRequest ? cleanString(workflow?.organizationName) : "");
+    const organizationRequired = (groupRequest && (!requesterDetail || requesterDetail.key === ORGANIZATION_KEY)) || (req.user.role !== "staff" && workflow?.requestContractVersion !== 2 && workflow?.sector !== "Student (Individual)");
     const contactNumber = requesterIdentity.contactNumber || "";
 
     if (!cleanString(organization) && organizationRequired) {

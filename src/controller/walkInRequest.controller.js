@@ -3,6 +3,7 @@ const { submitSeedlingRequest, resubmitRequest } = require("./seedlingRequest.co
 const { deriveSeedlingRequestDocumentId } = require("../services/seedlingRequest.service");
 const letters = require("../services/requestLetterStorage.service");
 const { db } = require("../config/firebase");
+const { isValidPhilippineContactNumber } = require("../utils/philippineContact.util");
 const clean = value => typeof value === "string" ? value.trim() : "";
 async function submitWalkIn(req, res, resubmitting = false) {
   if (!req.user?.uid || req.user.role !== "staff") return res.status(req.user?.uid ? 403 : 401).json({ success: false, message: "Staff access is required." });
@@ -12,7 +13,7 @@ async function submitWalkIn(req, res, resubmitting = false) {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(body?.clientSubmissionId || "")) throw Object.assign(new Error("Use a valid submission identifier."), { status: 400 });
     const errors = {};
     if (!clean(citizen?.fullName) || citizen.fullName.length > 160) errors.fullName = "Enter the actual citizen requester name.";
-    if (clean(citizen?.contactNumber) && !/^09\d{9}$/.test(citizen.contactNumber)) errors.contactNumber = "Enter a valid available mobile number or leave it blank.";
+    if (!isValidPhilippineContactNumber(clean(citizen?.contactNumber))) errors.contactNumber = "Enter a valid Philippine mobile or landline number.";
     if (!clean(citizen?.receiptReference) || citizen.receiptReference.length > 120) errors.receiptReference = "Enter the acknowledgement receipt reference.";
     if (!req.files?.acknowledgement?.[0]) errors.acknowledgement = "Upload the citizen's signed acknowledgement (PDF, JPEG or PNG).";
     if (Object.keys(errors).length) return res.status(400).json({ success: false, message: "Complete the walk-in requester and acknowledgement fields.", fieldErrors: errors });
