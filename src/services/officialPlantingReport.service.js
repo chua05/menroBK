@@ -73,7 +73,7 @@ async function submitOfficialReport(user, input) {
   if (!["menro-field-report", "release-based"].includes(input.confirmationBasis)) throw fail(400, "Select a confirmation basis.", { confirmationBasis: "Select a confirmation basis." });
   if (!Array.isArray(input.items) || !input.items.length || input.items.length > 10 || new Set(input.items.map(row => row.inventoryId)).size !== input.items.length) throw fail(400, "Select each released species once.", { items: "Select each released species once." });
   for (const row of input.items) if (!safeId(row.inventoryId) || !wholeQuantity(row.leftoverQuantity) ||
-      input.confirmationBasis === "menro-field-report" && !wholeQuantity(row.quantityPlanted)) throw fail(400, "Quantities must be nonnegative whole numbers.", { items: "Quantities must be nonnegative whole numbers." });
+      row.quantityPlanted !== undefined && !wholeQuantity(row.quantityPlanted)) throw fail(400, "Quantities must be nonnegative whole numbers.", { items: "Quantities must be nonnegative whole numbers." });
   if (typeof input.remarks !== "string" || input.remarks.length > 2000) throw fail(400, "Remarks must be at most 2000 characters.", { remarks: "Remarks must be at most 2000 characters." });
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) throw fail(400, "Refresh the release before reporting.");
   const operationId = digest(`${user.uid}:${input.clientSubmissionId}`);
@@ -116,8 +116,11 @@ async function submitOfficialReport(user, input) {
       const item = option.items.find(item => item.inventoryId === row.inventoryId);
       if (!item) throw fail(400, "Select only species from the authoritative release.", { items: "Select only species from the authoritative release." });
       const leftoverQuantity = Number(row.leftoverQuantity);
-      const quantity = input.confirmationBasis === "release-based" ? item.availableQuantity - leftoverQuantity : Number(row.quantityPlanted);
-      if (quantity < 0 || quantity + leftoverQuantity > item.availableQuantity) throw fail(409, "Planted and leftover quantities exceed the available reportable balance.", { items: "Refresh the release and enter quantities within its available balance." });
+      // Planted is always the balance minus leftovers; a client value can only confirm it.
+      const quantity = item.availableQuantity - leftoverQuantity;
+      const submitted = input.confirmationBasis === "menro-field-report" && row.quantityPlanted !== undefined ? Number(row.quantityPlanted) : quantity;
+      if (quantity < 0 || submitted + leftoverQuantity > item.availableQuantity) throw fail(409, "Planted and leftover quantities exceed the available reportable balance.", { items: "Refresh the release and enter quantities within its available balance." });
+      if (submitted !== quantity) throw fail(409, "Quantity planted must equal the available balance minus leftovers. Refresh the release and try again.", { items: "Refresh the release and enter the final leftover quantity." });
       recorded[row.inventoryId] = Number(recorded[row.inventoryId] || 0) + quantity;
       leftovers[row.inventoryId] = Number(leftovers[row.inventoryId] || 0) + leftoverQuantity;
       return { id: `${operationId}_${index}`, inventoryId: row.inventoryId, species: item.species, quantity, leftoverQuantity, releasedQuantity: item.quantityReleased };

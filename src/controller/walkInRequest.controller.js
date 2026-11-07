@@ -15,9 +15,8 @@ async function submitWalkIn(req, res, resubmitting = false) {
     if (!clean(citizen?.fullName) || citizen.fullName.length > 160) errors.fullName = "Enter the actual citizen requester name.";
     if (!isValidPhilippineContactNumber(clean(citizen?.contactNumber))) errors.contactNumber = "Enter a valid Philippine mobile or landline number.";
     if (!clean(citizen?.assistedByName) || clean(citizen.assistedByName).length > 160) errors.assistedByName = "Enter the name of the assisting staff.";
-    if (!clean(citizen?.receiptReference) || citizen.receiptReference.length > 120) errors.receiptReference = "Enter the acknowledgement receipt reference.";
-    if (!req.files?.acknowledgement?.[0]) errors.acknowledgement = "Upload the citizen's signed acknowledgement (PDF, JPEG or PNG).";
-    if (Object.keys(errors).length) return res.status(400).json({ success: false, message: "Complete the walk-in requester and acknowledgement fields.", fieldErrors: errors });
+    if (clean(citizen?.receiptReference).length > 120) errors.receiptReference = "Use at most 120 characters for the receipt reference.";
+    if (Object.keys(errors).length) return res.status(400).json({ success: false, message: "Complete the walk-in requester fields.", fieldErrors: errors });
     let prior;
     if (resubmitting) {
       const snapshot = await db.collection("seedlingRequests").doc(req.params.id).get();
@@ -27,15 +26,16 @@ async function submitWalkIn(req, res, resubmitting = false) {
     }
     const subjectId = prior?.participantId || `walkin_${createHash("sha256").update(`${req.user.uid}:${body.clientSubmissionId}`).digest("hex").slice(0, 32)}`;
     const requestId = resubmitting ? req.params.id : deriveSeedlingRequestDocumentId(subjectId, body.clientSubmissionId);
-    const file = req.files.acknowledgement[0];
-    if (!["application/pdf", "image/jpeg", "image/png"].includes(file.mimetype)) throw Object.assign(new Error("Use a signed PDF, JPEG or PNG acknowledgement."), { status: 400 });
+    // Acknowledgements are no longer collected on the form; earlier clients may still send one.
+    const file = req.files?.acknowledgement?.[0];
+    if (file && !["application/pdf", "image/jpeg", "image/png"].includes(file.mimetype)) throw Object.assign(new Error("Use a signed PDF, JPEG or PNG acknowledgement."), { status: 400 });
     // Reuse the accepted private document validator, immutable upload intent,
     // generation checks and authenticated streaming; this is not planting evidence.
-    const acknowledgement = await letters.uploadRequestLetter({ requestId, participantId: subjectId, clientSubmissionId: resubmitting ? `replacement-${requestId}-${body.expectedVersion}-ack` : `${body.clientSubmissionId}-ack`, file });
+    const acknowledgement = file ? await letters.uploadRequestLetter({ requestId, participantId: subjectId, clientSubmissionId: resubmitting ? `replacement-${requestId}-${body.expectedVersion}-ack` : `${body.clientSubmissionId}-ack`, file }) : null;
     req.body = { ...body }; delete req.body.citizen;
-    req.file = req.files.requestLetter?.[0];
+    req.file = req.files?.requestLetter?.[0];
     req.requesterContext = { uid: subjectId, fullName: clean(citizen.fullName), contactNumber: clean(citizen.contactNumber), organization: clean(body.workflow?.organizationName) };
-    req.walkInContext = { requesterId: subjectId, encodedBy: req.user.uid, encodedByName: req.user.fullName || "MENRO Staff", assistedByName: clean(citizen.assistedByName), receiptReference: clean(citizen.receiptReference), acknowledgement, acknowledgementStatus: "RECEIVED_PENDING_MANUAL_REVIEW", citizenHasAccount: false };
+    req.walkInContext = { requesterId: subjectId, encodedBy: req.user.uid, encodedByName: req.user.fullName || "MENRO Staff", assistedByName: clean(citizen.assistedByName), receiptReference: clean(citizen.receiptReference), acknowledgement, acknowledgementStatus: acknowledgement ? "RECEIVED_PENDING_MANUAL_REVIEW" : "NOT_COLLECTED", citizenHasAccount: false };
     return resubmitting ? resubmitRequest(req, res) : submitSeedlingRequest(req, res);
   } catch (error) { return res.status(error.status || 400).json({ success: false, message: error.status && error.status >= 500 ? "Secure acknowledgement storage is unavailable. Retry the same submission." : "The walk-in submission or acknowledgement is invalid." }); }
 }

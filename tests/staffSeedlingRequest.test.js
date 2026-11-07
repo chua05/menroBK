@@ -226,7 +226,6 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
     return { status: response.status, ...(await response.json()) };
   }
   assert.equal((await send(null)).status, 401); assert.equal((await send("participant")).status, 403);
-  const missing = await send("staff", false); assert.equal(missing.status, 400); assert.ok(missing.fieldErrors.acknowledgement);
   body.citizen.assistedByName = "   "; const unnamed = await send("staff"); assert.equal(unnamed.status, 400); assert.ok(unnamed.fieldErrors.assistedByName);
   body.citizen.assistedByName = "x".repeat(161); assert.ok((await send("staff")).fieldErrors.assistedByName);
   body.citizen.assistedByName = "  Maria Santos ";
@@ -281,6 +280,29 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   assert.equal(memory.records("walkInAcknowledgements").get(request.id).history.length, 3);
   assert.ok(![...memory.records("notifications").values()].some(n => n.recipientUserId === request.participantId));
   assert.equal(memory.records("distributions").get(request.id).reportingPolicy.reportingOverdueApplicable, false);
+
+  const useBody = extra => { for (const key of Object.keys(body)) delete body[key]; Object.assign(body, payload(), { purpose: "Household / Backyard" }, extra); body.workflow.requestContractVersion = 2; body.workflow.purpose = "Household / Backyard"; };
+  const citizen = { fullName: "Plain Walk-in Citizen", contactNumber: "09171234567", assistedByName: "Maria Santos" };
+  useBody({ citizen: { ...citizen } });
+  const plain = await send("staff", false); assert.equal(plain.status, 201, JSON.stringify(plain));
+  assert.equal(plain.data.walkIn.acknowledgement, null); assert.equal(plain.data.walkIn.receiptReference, "");
+  assert.equal(memory.records("walkInAcknowledgements").get(plain.data.id).descriptor, null);
+  assert.equal((await http(`/seedling-requests/${plain.data.id}/acknowledgement`, "officer")).status, 404);
+  const plainReturned = await http(`/seedling-requests/${plain.data.id}/return`, "officer", "PATCH", { expectedVersion: plain.data.requestVersion, reason: "Clarify the site" });
+  assert.equal(plainReturned.status, 200, JSON.stringify(plainReturned));
+  body.expectedVersion = plainReturned.data.requestVersion;
+  const plainResubmitted = await send("staff", false, `/walk-in/${plain.data.id}/resubmit`, "PATCH");
+  assert.equal(plainResubmitted.status, 200, JSON.stringify(plainResubmitted)); assert.equal(plainResubmitted.data.walkIn.acknowledgement, null);
+
+  useBody({ citizen: { ...citizen, fullName: "Earlier Walk-in Citizen", receiptReference: "OLD-RECEIPT-1" } });
+  const earlier = await send("staff", true); assert.equal(earlier.status, 201, JSON.stringify(earlier));
+  const earlierReturned = await http(`/seedling-requests/${earlier.data.id}/return`, "officer", "PATCH", { expectedVersion: earlier.data.requestVersion, reason: "Clarify the site" });
+  body.expectedVersion = earlierReturned.data.requestVersion; delete body.citizen.receiptReference;
+  const earlierResubmitted = await send("staff", false, `/walk-in/${earlier.data.id}/resubmit`, "PATCH");
+  assert.equal(earlierResubmitted.status, 200, JSON.stringify(earlierResubmitted));
+  assert.equal(earlierResubmitted.data.walkIn.receiptReference, "OLD-RECEIPT-1");
+  assert.equal(earlierResubmitted.data.walkIn.acknowledgement.originalName, earlier.data.walkIn.acknowledgement.originalName);
+  assert.equal(earlierResubmitted.data.walkIn.acknowledgementStatus, "RECEIVED_PENDING_MANUAL_REVIEW");
 
 });
 

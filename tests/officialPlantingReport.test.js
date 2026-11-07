@@ -10,7 +10,7 @@ require.cache[firebasePath] = { id: firebasePath, filename: firebasePath, loaded
 const service = require("../src/services/officialPlantingReport.service");
 const { summarizeSubmissions } = require("../src/services/parentPlantingReport.service");
 const staff = { uid: "staff-real", fullName: "Verified Staff", role: "staff" }, admin = { uid: "admin-real", role: "admin" };
-function seed(suffix, requestType = "individual", released = 10) {
+function seed(suffix, requestType = "individual", released = 8) {
   const requestId = `req-${suffix}`, eventId = `evt-${suffix}`, reportId = `event_${eventId}`;
   memory.records("seedlingRequests").set(requestId, { status: "Released", eventId, participantId: "requester-real", participantName: "Real requester", requestType, workflow: { sector: "Resident / Individual" } });
   memory.records("distributions").set(requestId, { requestId, eventId, participantId: "requester-real", status: "Released", items: [{ inventoryId: "narra", releasedQuantity: released }] });
@@ -33,7 +33,7 @@ function verifiedEvidence(id) {
 test("Staff reporting derives identities and release quantities; requester documentation remains optional", async () => {
   const fixture = seed("optional");
   const result = await service.submitOfficialReport(staff, payload(fixture.requestId));
-  assert.equal(result.activeSubmittedQuantity, 6); assert.equal(result.declaredLeftoverQuantity, 2); assert.equal(result.remainingAvailableQuantity, 2); assert.equal(result.acceptedQuantity, 0);
+  assert.equal(result.activeSubmittedQuantity, 6); assert.equal(result.declaredLeftoverQuantity, 2); assert.equal(result.remainingAvailableQuantity, 0); assert.equal(result.acceptedQuantity, 0);
   assert.equal(result.submissions[0].submittedByName, "Verified Staff"); assert.equal(result.submissions[0].requesterName, "Real requester");
   assert.equal(result.submissions[0].staffReviewStatus, "Pending Review"); assert.equal(result.submissions[0].adminApprovalRequired, true); assert.deepEqual(result.submissions[0].photos, []);
 });
@@ -43,7 +43,7 @@ test("Participant/Admin/unauthenticated cannot create Staff reports and body ide
   await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), staffName: "spoof" }), /Unsupported/);
 });
 test("release-based individual confirmation excludes leftovers and never trusts a client planted total", async () => {
-  const fixture = seed("release");
+  const fixture = seed("release", "individual", 10);
   const input = { ...payload(fixture.requestId, 999999, 2), confirmationBasis: "release-based" };
   const report = await service.submitOfficialReport(staff, input);
   assert.equal(report.quantityPlanted, 8); assert.equal(report.acceptedQuantity, 0); assert.equal(report.remainingAvailableQuantity, 0);
@@ -58,6 +58,28 @@ test("organization cannot use release-based confirmation", async () => {
   await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), confirmationBasis: "release-based" }), error => error.status === 400);
   assert.equal(memory.records("events").get(fixture.eventId).recordedSeedlingQuantity, undefined);
 });
+test("planted quantity is derived from the available balance minus leftovers", async () => {
+  const fixture = seed("derived");
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity: 3 }] });
+  const event = memory.records("events").get(fixture.eventId);
+  assert.equal(event.recordedSeedlingQuantity, 5); assert.equal(event.leftoverSeedlingQuantity, 3);
+  assert.equal(report.quantityPlanted, 5); assert.equal(report.declaredLeftoverQuantity, 3);
+});
+test("leftover defaults mean all available seedlings were planted", async () => {
+  const fixture = seed("all-planted");
+  await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity: 0 }] });
+  assert.equal(memory.records("events").get(fixture.eventId).recordedSeedlingQuantity, 8);
+});
+test("leftovers cannot be negative or exceed the available balance", async () => {
+  const fixture = seed("leftover-limits"); const send = leftoverQuantity => service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity }] });
+  await assert.rejects(send(-1), error => error.status === 400);
+  await assert.rejects(send(9), error => error.status === 409 && /exceed/.test(error.message));
+});
+test("a planted value that disagrees with the balance is rejected instead of a partial report", async () => {
+  const fixture = seed("partial-rejected");
+  await assert.rejects(service.submitOfficialReport(staff, payload(fixture.requestId, 3, 2)), error => error.status === 409 && /Refresh/.test(error.message));
+  assert.equal(Number(memory.records("events").get(fixture.eventId).recordedSeedlingQuantity || 0), 0);
+});
 test("per-species planted plus leftovers are reserved atomically and retries consume once", async () => {
   const fixture = seed("retry"); const input = payload(fixture.requestId, 6, 2);
   const results = await Promise.allSettled([service.submitOfficialReport(staff, input), service.submitOfficialReport(staff, input)]);
@@ -66,8 +88,6 @@ test("per-species planted plus leftovers are reserved atomically and retries con
   await assert.rejects(service.submitOfficialReport(staff, { ...input, items: [{ inventoryId: "narra", quantityPlanted: 1, leftoverQuantity: 1 }] }), error => error.status === 409);
   await assert.rejects(service.submitOfficialReport(staff, payload(fixture.requestId, 1, 0)), /balance changed/);
   await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId, 3, 0), expectedVersion: 1 }), /exceed/);
-  const next = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 2, 0), expectedVersion: 1 });
-  assert.equal(next.quantityPlanted, 8); assert.equal(next.declaredLeftoverQuantity, 2); assert.equal(next.remainingAvailableQuantity, 0);
 });
 test("concurrent different submissions cannot over-consume one release", async () => {
   const fixture = seed("race");
@@ -75,8 +95,8 @@ test("concurrent different submissions cannot over-consume one release", async (
   assert.equal(results.filter(row => row.status === "fulfilled").length, 1); assert.equal(results.filter(row => row.status === "rejected" && row.reason.status === 409).length, 1);
 });
 test("Admin return releases only this submission's quantities and correction preserves history", async () => {
-  const fixture = seed("correction");
-  const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 6, 2)); const id = report.submissions[0].id;
+  const fixture = seed("correction", "individual", 10);
+  const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 8, 2)); const id = report.submissions[0].id;
   await assert.rejects(service.reviewOfficialSubmission(staff, id, true), error => error.status === 403);
   await assert.rejects(service.reviewOfficialSubmission(admin, id, false, "  "), error => error.status === 400);
   const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity");
@@ -102,7 +122,7 @@ test("historical summaries remain unchanged; leftovers are never a planted or su
 });
 
 test("the 2 previously planted + 6 new planted + 2 leftover example confirms eight and preserves history", async () => {
-  const fixture = seed("historical-example");
+  const fixture = seed("historical-example", "individual", 10);
   const prior = { reportId: fixture.reportId, inventoryId: "narra", quantity: 2, verificationStatus: "Verified", staffReviewStatus: "Not Required", photos: [{ hasEvidence: true }] };
   memory.records("plantingContributions").set("historical-two", prior);
   Object.assign(memory.records("events").get(fixture.eventId), { recordedSeedlingsByInventory: { narra: 2 }, recordedSeedlingQuantity: 2 });

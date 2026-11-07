@@ -716,7 +716,7 @@ const createSeedlingRequest =
       const counterDoc = await transaction.get(counterRef);
       const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
       let acknowledgementRef;
-      if (authorizedWalkIn) {
+      if (authorizedWalkIn && data.walkIn.acknowledgement) {
         acknowledgementRef = db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId);
         const acknowledgementDoc = await transaction.get(acknowledgementRef);
         const record = acknowledgementDoc.data();
@@ -1279,10 +1279,12 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
     let acknowledgementRef, priorAcknowledgement;
     if (data.walkIn) {
       if (actor?.role !== "staff" || actor.uid !== request.walkIn?.encodedBy || data.walkIn.requesterId !== request.participantId) throw Object.assign(new Error("Only the authorized encoder may correct this walk-in request."), { status: 403 });
+      if (data.walkIn.acknowledgement) {
       acknowledgementRef = db.collection("walkInAcknowledgements").doc(id);
       const [priorDoc, intentDoc] = await Promise.all([transaction.get(acknowledgementRef), transaction.get(db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId))]);
       priorAcknowledgement = priorDoc.data(); const intent = intentDoc.data();
       if (!priorDoc.exists || !intentDoc.exists || intent.status !== "UPLOADED" || intent.requestId !== id || intent.participantId !== participantId || intent.sha256 !== data.walkIn.acknowledgement.sha256) throw new Error("The replacement signed acknowledgement could not be linked.");
+      }
     }
     const replacementDocument = data.requestLetter?.privateDocument;
     const legacyMetadata = request.workflow?.requestLetter && typeof request.workflow.requestLetter === "object"
@@ -1303,7 +1305,11 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
       transaction.update(db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId), { status: "LINKED", linkedAt: now, updatedAt: now });
     }
     transaction.update(requestRef, {
-      ...(data.walkIn ? { walkIn: { ...data.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(data.walkIn.acknowledgement) }, participantName: nextWorkflow.fullName, contactNumber: nextWorkflow.contactNumber } : {}),
+      ...(data.walkIn ? { walkIn: data.walkIn.acknowledgement
+        ? { ...data.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(data.walkIn.acknowledgement) }
+        // A correction without a new file keeps what an earlier walk-in already recorded.
+        : { ...data.walkIn, acknowledgement: request.walkIn?.acknowledgement || null, receiptReference: request.walkIn?.receiptReference || "", acknowledgementStatus: request.walkIn?.acknowledgementStatus || data.walkIn.acknowledgementStatus },
+      participantName: nextWorkflow.fullName, contactNumber: nextWorkflow.contactNumber } : {}),
       items: canonicalItems,
       totalQuantity,
       purpose: cleanString(data.purpose),
