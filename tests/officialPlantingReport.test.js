@@ -158,6 +158,9 @@ test("release options map authoritative requester, site, schedule and references
   assert.equal(option.organizationName, "Actual organization"); assert.equal(option.latitude, 12.6); assert.equal(option.longitude, 123.9);
   assert.equal(option.siteName, "Registered site"); assert.equal(option.barangay, "Bical"); assert.equal(option.startTime, "08:00"); assert.equal(option.endTime, "10:00");
   assert.equal(option.requestNumber, "REQ-2026-123");
+  assert.equal(option.polygon, null);
+  memory.records("sites").get("site-fixture").polygon = [{ lat: 12.6, lng: 123.9 }, { lat: 12.7, lng: 123.9 }, { lat: 12.7, lng: 124 }];
+  assert.deepEqual((await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0].polygon, memory.records("sites").get("site-fixture").polygon);
   const request = memory.records("seedlingRequests").get(fixture.requestId); request.workflow = {}; request.organization = "Not a sector";
   const missing = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0]; assert.equal(missing.participantSector, "");
   memory.records("sites").get("site-fixture").latitude = null;

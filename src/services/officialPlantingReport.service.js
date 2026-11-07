@@ -58,6 +58,7 @@ async function listReleasedOptions(user, { cursor, requestId } = {}) {
         siteName: site.siteName || option.siteName, barangay: site.barangay || event.data().barangay || "",
         latitude: site.latitude !== null && String(site.latitude).trim() !== "" && Number.isFinite(Number(site.latitude)) ? Number(site.latitude) : null, longitude: site.longitude !== null && String(site.longitude).trim() !== "" && Number.isFinite(Number(site.longitude)) ? Number(site.longitude) : null,
         coverageRadiusMeters: Number.isFinite(site.coverageRadiusMeters) && site.coverageRadiusMeters > 0 ? site.coverageRadiusMeters : null,
+        polygon: Array.isArray(site.polygon) ? site.polygon : null,
         startTime: event.data().startTime || event.data().time || "", endTime: event.data().endTime || "" });
     }
     catch (error) { if (error.status !== 409) throw error; /* Reconciliation is fail-closed; never invent an allocation. */ }
