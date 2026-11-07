@@ -218,7 +218,7 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
     return { uploadIntentId: intent, ...validated, bytes: undefined, objectName: `private-test/${requestId}`, bucket: "demo-only", generation: "1" };
   });
   const body = payload(); body.workflow.requestContractVersion = 2; body.workflow.purpose = "Household / Backyard"; body.purpose = "Household / Backyard";
-  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "(056) 211-1234", receiptReference: "WALKIN-ACK-001", encodedBy: "spoofed-staff", encodedByName: "Spoofed name" };
+  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "(056) 211-1234", assistedByName: "  Maria Santos ", receiptReference: "WALKIN-ACK-001", encodedBy: "spoofed-staff", encodedByName: "Spoofed name" };
   async function send(role, acknowledgement = true, path = "/walk-in", method = "POST") {
     const form = new FormData(); form.append("request", JSON.stringify(body));
     if (acknowledgement) form.append("acknowledgement", new Blob([image], { type: "image/png" }), "signed-acknowledgement.png");
@@ -227,9 +227,12 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   }
   assert.equal((await send(null)).status, 401); assert.equal((await send("participant")).status, 403);
   const missing = await send("staff", false); assert.equal(missing.status, 400); assert.ok(missing.fieldErrors.acknowledgement);
+  body.citizen.assistedByName = "   "; const unnamed = await send("staff"); assert.equal(unnamed.status, 400); assert.ok(unnamed.fieldErrors.assistedByName);
+  body.citizen.assistedByName = "x".repeat(161); assert.ok((await send("staff")).fieldErrors.assistedByName);
+  body.citizen.assistedByName = "  Maria Santos ";
   const result = await send("staff"); assert.equal(result.status, 201, JSON.stringify(result)); const request = result.data;
   assert.equal(request.participantName, "Actual Walk-in Citizen"); assert.notEqual(request.participantId, identities.staff.uid);
-  assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.encodedByName, identities.staff.fullName); assert.equal(request.walkIn.citizenHasAccount, false);
+  assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.encodedByName, identities.staff.fullName); assert.equal(request.walkIn.assistedByName, "Maria Santos"); assert.equal(request.walkIn.citizenHasAccount, false);
   for (const [action, body] of [["review", { items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate, expectedVersion: 0 }], ["return", { reason: "Encoder cannot decide", expectedVersion: 0 }], ["release", { expectedVersion: 0, availableReleaseDate: "2099-01-01", items: [{ inventoryId: "narra", releasedQuantity: 2 }] }]]) {
     const denied = await http(`/seedling-requests/${request.id}/${action}`, "staff", "PATCH", body);
     assert.equal(denied.status, 403); assert.equal(denied.code, "REQUEST_SELF_PROCESSING_FORBIDDEN");
@@ -245,10 +248,11 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   const returned = await http(`/seedling-requests/${request.id}/return`, "officer", "PATCH", { expectedVersion: 0, reason: "Clarify the signed care plan" });
   assert.equal(returned.status, 200, JSON.stringify(returned));
   body.expectedVersion = returned.data.requestVersion; body.citizen.receiptReference = "WALKIN-CORRECTION-002";
-  body.workflow.carePlan = "Corrected signed citizen plan";
+  body.workflow.carePlan = "Corrected signed citizen plan"; body.citizen.assistedByName = "Jose Reyes";
   assert.equal((await send("officer", true, `/walk-in/${request.id}/resubmit`, "PATCH")).status, 404);
   const corrected = await send("staff", true, `/walk-in/${request.id}/resubmit`, "PATCH");
   assert.equal(corrected.status, 200, JSON.stringify(corrected)); assert.equal(corrected.data.id, request.id);
+  assert.equal(corrected.data.walkIn.assistedByName, "Jose Reyes"); assert.equal(corrected.data.walkIn.encodedBy, identities.staff.uid);
   assert.equal(corrected.data.participantId, request.participantId); assert.equal(corrected.data.reviewHistory.at(-1).actorRole, "staff");
   assert.equal(memory.records("walkInAcknowledgements").get(request.id).history.length, 1);
   assert.equal(JSON.stringify(corrected).includes("private-test/"), false);
