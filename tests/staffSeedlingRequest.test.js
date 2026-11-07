@@ -218,7 +218,7 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
     return { uploadIntentId: intent, ...validated, bytes: undefined, objectName: `private-test/${requestId}`, bucket: "demo-only", generation: "1" };
   });
   const body = payload(); body.workflow.requestContractVersion = 2; body.workflow.purpose = "Household / Backyard"; body.purpose = "Household / Backyard";
-  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "", receiptReference: "WALKIN-ACK-001" };
+  body.citizen = { fullName: "Actual Walk-in Citizen", contactNumber: "", receiptReference: "WALKIN-ACK-001", encodedBy: "spoofed-staff", encodedByName: "Spoofed name" };
   async function send(role, acknowledgement = true, path = "/walk-in", method = "POST") {
     const form = new FormData(); form.append("request", JSON.stringify(body));
     if (acknowledgement) form.append("acknowledgement", new Blob([image], { type: "image/png" }), "signed-acknowledgement.png");
@@ -229,7 +229,11 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   const missing = await send("staff", false); assert.equal(missing.status, 400); assert.ok(missing.fieldErrors.acknowledgement);
   const result = await send("staff"); assert.equal(result.status, 201, JSON.stringify(result)); const request = result.data;
   assert.equal(request.participantName, "Actual Walk-in Citizen"); assert.notEqual(request.participantId, identities.staff.uid);
-  assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.citizenHasAccount, false);
+  assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.encodedByName, identities.staff.fullName); assert.equal(request.walkIn.citizenHasAccount, false);
+  for (const [action, body] of [["review", { items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate, expectedVersion: 0 }], ["return", { reason: "Encoder cannot decide", expectedVersion: 0 }], ["release", { expectedVersion: 0, availableReleaseDate: "2099-01-01", items: [{ inventoryId: "narra", releasedQuantity: 2 }] }]]) {
+    const denied = await http(`/seedling-requests/${request.id}/${action}`, "staff", "PATCH", body);
+    assert.equal(denied.status, 403); assert.equal(denied.code, "REQUEST_SELF_PROCESSING_FORBIDDEN");
+  }
   assert.equal(request.reviewHistory[0].actorId, identities.staff.uid); assert.equal(request.status, "Pending");
   assert.equal(request.walkIn.receiptReference, "WALKIN-ACK-001"); assert.equal(JSON.stringify(result).includes("private-test/"), false);
   assert.ok(memory.records("walkInAcknowledgements").has(request.id));
@@ -274,4 +278,13 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   assert.ok(![...memory.records("notifications").values()].some(n => n.recipientUserId === request.participantId));
   assert.equal(memory.records("distributions").get(request.id).reportingPolicy.reportingOverdueApplicable, false);
 
+});
+
+test("citizen and encoder remain unable to process an assisted request after a role change", () => {
+  const { assertIndependentRequestAction } = require("../src/utils/requestSeparation.util");
+  const historic = { participantId: "citizen", walkIn: { encodedBy: "encoder" }, status: "Pending", requestVersion: 0 };
+  const before = JSON.stringify(historic);
+  for (const uid of ["citizen", "encoder"]) assert.throws(() => assertIndependentRequestAction(historic, uid), error => error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN");
+  assert.doesNotThrow(() => assertIndependentRequestAction(historic, "independent-officer"));
+  assert.equal(JSON.stringify(historic), before);
 });
