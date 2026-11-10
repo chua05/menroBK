@@ -19,10 +19,22 @@ function normalizeRequestPlantingArea(workflow) {
   if (!workflow || !["existing", "proposed"].includes(workflow.siteMode)) return workflow;
   const clientWorkflow = { ...workflow };
   // Site registration and review metadata are owned by MENRO, never by a requester.
-  for (const field of ["officialSiteId", "officialSiteNumber", "proposedSiteVerification", "siteVerification", "reviewedBy", "reviewedAt"]) delete clientWorkflow[field];
+  for (const field of ["officialSiteId", "officialSiteNumber", "proposedSiteVerification", "siteVerification", "reviewedBy", "reviewedAt", "areaSource"]) delete clientWorkflow[field];
+  // An existing site's registered area is authoritative; requester area input is ignored
+  // and replaced from the site record by applyRegisteredSiteArea().
+  if (workflow.siteMode === "existing") return { ...clientWorkflow, areaChoice: "", exactArea: "", areaHectares: null, plantingAreaHectares: null };
   const area = plantingArea(workflow.areaChoice, workflow.exactArea, { optional: workflow.siteMode === "proposed" });
   if (area.error) throw Object.assign(new Error(area.error), { status: 400, fieldErrors: { [area.field]: area.error } });
   return { ...clientWorkflow, areaHectares: area.hectares, ...(workflow.siteMode === "proposed" ? { siteReviewRequired: true } : {}), exactArea: EXACT_AREA_CHOICES.has(workflow.areaChoice) ? workflow.exactArea : "" };
+}
+function registeredSiteArea(site) {
+  const hectares = Number(site?.areaHectares);
+  return site?.areaHectares !== null && site?.areaHectares !== "" && Number.isFinite(hectares) && hectares > 0 ? hectares : null;
+}
+function applyRegisteredSiteArea(workflow, site) {
+  if (!workflow || workflow.siteMode !== "existing" || !site) return workflow;
+  const hectares = registeredSiteArea(site);
+  return { ...workflow, areaHectares: hectares, plantingAreaHectares: hectares, areaSource: "registered-site" };
 }
 function verifiedProposedSite(values, staffId) {
   const area = plantingArea("Other / Exact Area", values?.areaHectares);
@@ -34,4 +46,4 @@ function verifiedProposedSite(values, staffId) {
   if (!staffId) throw new Error("An authenticated Staff reviewer is required.");
   return { areaHectares: area.hectares, maximumCapacity: Number(capacity), reviewedBy: staffId };
 }
-module.exports = { plantingArea, EXACT_AREA_CHOICES, normalizeRequestPlantingArea, verifiedProposedSite };
+module.exports = { plantingArea, EXACT_AREA_CHOICES, normalizeRequestPlantingArea, verifiedProposedSite, registeredSiteArea, applyRegisteredSiteArea };

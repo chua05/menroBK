@@ -138,8 +138,11 @@ const validateWorkflow = (workflow = {}, purpose = "") => {
   ["addressProvince", "addressMunicipality", "addressBarangay", "street", "siteBarangay",
     "releaseMethod"]
     .forEach((field) => requireField(field, "This field is required."));
-  const area = require("../utils/plantingArea.util").plantingArea(workflow.areaChoice, workflow.exactArea, { optional: workflow.siteMode === "proposed" });
-  if (area.error) errors[area.field] = area.error;
+  // Existing sites use their registered area, so no requester area is validated for them.
+  if (workflow.siteMode !== "existing") {
+    const area = require("../utils/plantingArea.util").plantingArea(workflow.areaChoice, workflow.exactArea, { optional: workflow.siteMode === "proposed" });
+    if (area.error) errors[area.field] = area.error;
+  }
   if (!["existing", "proposed"].includes(workflow.siteMode)) errors.siteMode = "Select a valid planting-site option.";
   if (workflow.siteMode === "existing") requireField("existingSiteId", "Select a planting site.");
   if (workflow.siteMode === "proposed") {

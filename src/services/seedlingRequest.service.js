@@ -4,7 +4,7 @@ const {
 } = require("../config/firebase");
 const crypto = require("crypto");
 const { assertIndependentRequestAction } = require("../utils/requestSeparation.util");
-const { plantingArea, normalizeRequestPlantingArea } = require("../utils/plantingArea.util");
+const { plantingArea, normalizeRequestPlantingArea, applyRegisteredSiteArea } = require("../utils/plantingArea.util");
 
 const {
   Timestamp,
@@ -677,6 +677,8 @@ const createSeedlingRequest =
       throw new Error("Selected planting site is archived.");
     }
 
+    if (site && requestData.workflow) requestData.workflow = applyRegisteredSiteArea(requestData.workflow, site);
+
     // site.utilizationPercentage now comes from site.service
     const utilization = Number(site?.utilizationPercentage || 0);
 
@@ -1290,7 +1292,7 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
     const legacyMetadata = request.workflow?.requestLetter && typeof request.workflow.requestLetter === "object"
       ? request.workflow.requestLetter
       : null;
-    const nextWorkflow = data.workflow && typeof data.workflow === "object" ? { ...data.workflow } : {};
+    const nextWorkflow = data.workflow && typeof data.workflow === "object" ? applyRegisteredSiteArea({ ...data.workflow }, site) : {};
     const purposePolicyCandidate = request.purposePolicyManaged ? purposePolicy.candidateFor({ purpose: data.purpose, workflow: nextWorkflow }, await purposePolicy.currentPolicy()) : null;
     if (!replacementDocument && legacyMetadata) nextWorkflow.requestLetter = legacyMetadata;
     if (replacementDocument) nextWorkflow.requestLetter = null;

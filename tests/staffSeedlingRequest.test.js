@@ -45,7 +45,7 @@ let server, base;
 test.before(async () => {
   process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY = Buffer.alloc(32, 9).toString("base64");
   memory.records("seedlingInventory").set("narra", { species: "Narra", availableQuantity: 100, currentQuantity: 100, reservedQuantity: 0, distributedQuantity: 0 });
-  memory.records("sites").set("site-1", { siteName: "Existing Site", barangay: "Bical", status: "active", maximumCapacity: 1000, planted: 0, latitude: 12.65, longitude: 123.91 });
+  memory.records("sites").set("site-1", { siteName: "Existing Site", barangay: "Bical", status: "active", maximumCapacity: 1000, planted: 0, latitude: 12.65, longitude: 123.91, areaHectares: 1.75 });
   for (const user of Object.values(identities)) memory.records("users").set(user.uid, { ...user, status: "active" });
   memory.records("users").set(identities.staff.uid, { ...identities.staff, status: "active" });
   const app = express(); app.use(express.json()); app.use("/api/seedling-requests", routes); app.use("/api/inventory", inventoryRoutes);
@@ -80,7 +80,7 @@ test("Staff submits with verified identity, Pending status, canonical inventory 
   assert.equal(request.participantId, identities.staff.uid); assert.equal(request.participantName, identities.staff.fullName);
   assert.equal(request.workflow.fullName, identities.staff.fullName); assert.equal(request.workflow.contactNumber, identities.staff.contactNumber);
   assert.equal(request.requesterRole, "staff"); assert.equal(request.reviewHistory[0].actorRole, "staff"); assert.equal(request.status, "Pending");
-  assert.equal(request.items[0].species, "Narra"); assert.equal(request.workflow.areaHectares, 0.5);
+  assert.equal(request.items[0].species, "Narra"); assert.equal(request.workflow.areaHectares, 1.75, "an existing site uses its registered area, not the submitted 0.5");
   assert.equal(request.processingEstimate.workingDaysMinimum, 5); assert.equal(memory.records("seedlingInventory").get("narra").availableQuantity, 100);
   assert.equal((await submit("staff", body)).id, request.id);
   const notices = [...memory.records("notifications").values()].filter(n => n.relatedRecordId === request.id);
@@ -98,7 +98,10 @@ test("Participant submission stays accepted; Admin and unauthenticated submissio
 
 test("Staff uses unchanged conditional area and ID validation; invalid submissions create nothing", async () => {
   for (const value of ["", "-1", "Infinity", "NaN"]) {
-    const body = payload(); body.workflow.exactArea = value;
+    const body = payload();
+    // Requester area is only collected (optionally) for a proposed site.
+    Object.assign(body.workflow, { siteMode: "proposed", existingSiteId: "", siteName: "Proposed Site", specificLocation: "Purok 3", latitude: "12.65", longitude: "123.91", niyogan: "no", landType: "Residential / Private Property", currentCondition: "Open lot", exactArea: value });
+    body.eventProposal.plantingSiteId = "PROPOSED";
     const before = unchangedSnapshot(); const response = await http("/seedling-requests", "staff", "POST", body);
     assert.equal(response.status, 400); assert.ok(response.fieldErrors.exactArea); assert.equal(unchangedSnapshot(), before);
   }
