@@ -26,6 +26,7 @@ const REQUEST_ID = `${PREFIX}-request`;
 const EVENT_ID = `${PREFIX}-event`;
 const REPORT_ID = `event_${EVENT_ID}`;
 const INVENTORY_ID = `${PREFIX}-narra`;
+const SECOND_INVENTORY_ID = `${PREFIX}-mahogany`;
 
 async function cleanup() {
   const deletions = [];
@@ -65,17 +66,20 @@ async function seed() {
   await db.collection("sites").doc(SITE_ID).set({ siteId: SITE_ID, siteName: "View Report Browser Site",
     barangay: "Bical", municipality: "Bulan", province: "Sorsogon", latitude: 12.671, longitude: 123.875,
     coverageRadiusMeters: 100, status: "active", archived: false, testFixture: true });
+  // Two released seedling types, so the table must list both (the Participant reports Narra only).
   const item = { inventoryId: INVENTORY_ID, species: "Narra", requestedQuantity: 25, releasedQuantity: 25, quantity: 25 };
+  const secondItem = { inventoryId: SECOND_INVENTORY_ID, species: "Mahogany", requestedQuantity: 15, releasedQuantity: 15, quantity: 15 };
   await db.collection("seedlingRequests").doc(REQUEST_ID).set({ status: "Released", eventId: EVENT_ID,
     participantId: USERS[0][0], participantName: "Browser Planter", requestNumber: "REQ-VIEW-BROWSER",
-    items: [item], testFixture: true });
+    items: [item, secondItem], testFixture: true });
   await db.collection("distributions").doc(REQUEST_ID).set({ status: "Released", requestId: REQUEST_ID,
     eventId: EVENT_ID, participantId: USERS[0][0], participantName: "Browser Planter",
-    plantingSiteId: SITE_ID, items: [item], totalQuantityReleased: 25, testFixture: true });
+    plantingSiteId: SITE_ID, items: [item, secondItem], totalQuantityReleased: 40, testFixture: true });
   const event = { name: "View Report browser planting", sourceRequestId: REQUEST_ID, plantingSiteId: SITE_ID,
     plantingSiteName: "View Report Browser Site", barangay: "Bical", date: "2026-10-01", startTime: "08:00",
     endTime: "11:00", status: "Completed", recordStatus: "Scheduled", allocationReleasedAt: Timestamp.now(),
-    seedlingItems: [{ inventoryId: INVENTORY_ID, species: "Narra", quantity: 25 }], seedlingTotalQuantity: 25,
+    seedlingItems: [{ inventoryId: INVENTORY_ID, species: "Narra", quantity: 25 },
+      { inventoryId: SECOND_INVENTORY_ID, species: "Mahogany", quantity: 15 }], seedlingTotalQuantity: 40,
     testFixture: true };
   await db.collection("events").doc(EVENT_ID).set(event);
   await db.runTransaction((transaction) => parentForEventInTransaction(transaction, EVENT_ID, event, Timestamp.now()));
