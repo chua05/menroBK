@@ -1960,10 +1960,13 @@ const getAllPlantingReports = async (
     );
   });
 
-  const detailedReports = await Promise.all(reports.map((report) =>
+  // Staff/Admin-only listing (route RBAC). The `participantId` here is a
+  // filter, not the viewer, so participant redaction must not be applied —
+  // doing so blanked submitter name, barangay, organization and contact
+  // details for Staff and Admin.
+  return Promise.all(reports.map((report) =>
     report.reportType === "parent" ? reportDetails(report.id, report) : report
   ));
-  return detailedReports.map((report) => participantSafeReport(report, participantId));
   };
 
 

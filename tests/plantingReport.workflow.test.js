@@ -487,3 +487,75 @@ test("decision controllers refuse a missing Return or Reject reason before calli
   await controller.forwardReport({ params: { id: "missing-report" }, body: {}, user: { uid: "admin-1", role: "admin" } }, res);
   assert.equal(status, 403, "Admin cannot perform the Staff review step");
 });
+
+test("saved submission reads as Submitted with Pending Review, in chronological order, for Staff", async () => {
+  const eventId = "event-submitted-view";
+  const reportId = `event_${eventId}`;
+  table("plantingReports").set(reportId, {
+    reportType: "parent", reportNumber: "RPT-2026-200", requestId: "request-view", eventId,
+    participantId: "requester-1", participantName: "Requester", quantityReleased: 50,
+    reportingProgress: "Awaiting Submission", verificationStatus: "Pending", createdAt: new Date("2026-11-09T13:07:00Z"),
+  });
+  table("events").set(eventId, { seedlingItems: [{ inventoryId: "narra", quantity: 50, species: "Narra" }] });
+
+  const empty = (await service.getAllPlantingReports()).find((report) => report.id === reportId);
+  assert.equal(empty.submissionStatus, "Awaiting Submission");
+  assert.equal(empty.reviewStatus, "Not Submitted");
+  assert.equal(empty.submissions.length, 0);
+  assert.equal(empty.photos.length, 0);
+
+  // Doc ids deliberately sort opposite to submission time.
+  table("plantingContributions").set("zz-first", {
+    reportId, eventId, participantId: "requester-1", contributorId: "requester-1",
+    contributorName: "Requester", submittedByName: "First Submitter", submittedBySector: "Individual",
+    submittedByContactNumber: "09170000001", participantBarangay: "Zone 1", organizationAffiliation: "Org A",
+    inventoryId: "narra", species: "Narra", quantity: 10, recordedAt: new Date("2026-11-10T01:00:00Z"),
+    verificationStatus: "Verified", staffReviewStatus: "Pending Review", staffApprovalRequired: true,
+    latitude: 12.66, longitude: 123.88, photoCapturedAt: "2026-11-10T00:59:00Z",
+    photos: [{ privateEvidence: { provider: "firebase" }, metadata: { latitude: 12.66, longitude: 123.88 } }],
+  });
+  table("plantingContributions").set("aa-second", {
+    reportId, eventId, participantId: "member-2", contributorId: "member-2",
+    contributorName: "Member", submittedByName: "Second Submitter", submittedBySector: "Youth",
+    submittedByContactNumber: "09170000002", inventoryId: "narra", species: "Narra", quantity: 5,
+    recordedAt: new Date("2026-11-10T02:00:00Z"),
+    verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", staffApprovalRequired: true,
+    photos: [{ photoPath: "planting-reports/test/second.jpg" }],
+  });
+
+  const report = (await service.getAllPlantingReports()).find((item) => item.id === reportId);
+  assert.equal(report.submissionStatus, "Submitted");
+  assert.equal(report.reviewStatus, "Pending Review");
+  assert.equal(report.reportingProgress, "Partial", "quantity progress is unchanged");
+  assert.notEqual(report.reportingProgress, "Completed");
+  assert.deepEqual(report.submissions.map((entry) => entry.id), ["zz-first", "aa-second"]);
+  assert.equal(report.submittedByName, "Second Submitter", "latest submission is the most recent one");
+  assert.equal(report.photos.length, 2);
+  assert.equal(report.photos[0]._evidenceRecordId, "zz-first", "private evidence keeps its contribution link");
+  assert.equal(report.pendingReviewQuantity, 15);
+  // Staff/Admin listing must not be participant-redacted.
+  assert.equal(report.submissions[0].submittedByContactNumber, "09170000001");
+  assert.equal(report.participantBarangay, "Zone 1");
+  assert.equal(report.organizationAffiliation, "Org A");
+
+  const single = await service.getPlantingReportById(reportId);
+  assert.deepEqual(single.submissions.map((entry) => entry.id), ["zz-first", "aa-second"]);
+
+  // Participants still receive redacted copies of other contributors' contact data.
+  const participantView = service.participantSafeReport(report, "member-2");
+  assert.equal(participantView.submissions[0].submittedByContactNumber, "");
+  assert.equal(participantView.submissions[1].submittedByContactNumber, "09170000002");
+});
+
+test("report review stage follows the staged workflow, never ahead of its least-reviewed submission", () => {
+  const { reviewStatusFor, normalizeSubmission } = require("../src/services/parentPlantingReport.service");
+  const n = (entry) => normalizeSubmission({ verificationStatus: "Verified", ...entry });
+  assert.equal(reviewStatusFor([]), "Not Submitted");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Pending Review" })]), "Pending Review");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Pending Review", workflowStatus: "Reviewed" })]), "Reviewed");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Pending Review", officialStaffReport: true })]), "Pending Admin Approval");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Rejected", workflowStatus: "Returned for Correction" })]), "Returned for Correction");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Rejected" })]), "Rejected");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Accepted" }), n({ staffReviewStatus: "Rejected" })]), "Completed");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Accepted" }), n({ staffReviewStatus: "Pending Review" })]), "Pending Review");
+});

@@ -58,6 +58,37 @@ function summarizeSubmissions(entries, releasedQuantity) {
     rejectedQuantity, returnedQuantity, remainingAvailableQuantity, reportingProgress, declaredLeftoverQuantity, acceptedLeftoverQuantity, pendingReviewLeftoverQuantity };
 }
 
+function timestampMillis(value) {
+  if (!value) return 0;
+  if (typeof value.toMillis === "function") return value.toMillis();
+  if (typeof value.toDate === "function") return value.toDate().getTime();
+  const seconds = value._seconds ?? value.seconds;
+  if (Number.isFinite(Number(seconds))) return Number(seconds) * 1000;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+// Report-level review stage, summarised from each submission's workflowStatus
+// (see plantingReviewWorkflow.util). Earliest unfinished stage wins so the
+// report never looks further along than its least-reviewed submission.
+const REVIEW_STAGE_ORDER = [
+  WORKFLOW_STATUS.PENDING_REVIEW,
+  WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL,
+  WORKFLOW_STATUS.REVIEWED,
+  WORKFLOW_STATUS.RETURNED,
+];
+
+function reviewStatusFor(normalizedSubmissions) {
+  if (normalizedSubmissions.length === 0) return "Not Submitted";
+  const stages = normalizedSubmissions
+    .filter((entry) => entry.verificationStatus !== "Invalid" && !entry.correctedBySubmission)
+    .map((entry) => entry.workflowStatus || deriveWorkflowStatus(entry));
+  for (const stage of REVIEW_STAGE_ORDER) if (stages.includes(stage)) return stage;
+  if (stages.length > 0 && stages.every((stage) => stage === WORKFLOW_STATUS.REJECTED)) return WORKFLOW_STATUS.REJECTED;
+  if (stages.includes(WORKFLOW_STATUS.COMPLETED)) return WORKFLOW_STATUS.COMPLETED;
+  return WORKFLOW_STATUS.REJECTED;
+}
+
 function parentRef(eventId) {
   if (typeof eventId !== "string" || !eventId || eventId.includes("/")) {
     throw new Error("Invalid planting event ID.");
@@ -144,7 +175,13 @@ async function reportDetails(id, data) {
   ]);
   const event = eventDoc.exists ? eventDoc.data() : {};
   const allContributions = submissionSnapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-  const contributions = allContributions.filter((entry) => entry.officialStaffReport === true || Array.isArray(entry.photos) && entry.photos.length > 0);
+  // Chronological order so "latest" really is the most recent submission. The
+  // evidence endpoint resolves photo indexes through this same function, so
+  // list photo indexes and secure photo retrieval stay aligned.
+  const contributions = allContributions
+    .filter((entry) => entry.officialStaffReport === true || Array.isArray(entry.photos) && entry.photos.length > 0)
+    .sort((a, b) => timestampMillis(a.recordedAt) - timestampMillis(b.recordedAt) ||
+      String(a.id).localeCompare(String(b.id)));
   const participantById = new Map(participantSnapshot.docs.map((doc) => [doc.id, doc.data()]));
   const quantityReleased = (event.seedlingItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   const summary = summarizeSubmissions(contributions, quantityReleased || data.quantityReleased);
@@ -181,8 +218,14 @@ async function reportDetails(id, data) {
     photos: evidence,
     participantName: data.participantName || "",
     participantType: data.participantType || "",
-    submittedByName: latestContribution?.contributorName || "",
-    submittedByType: latestContribution?.participantUserType || "",
+    submittedByName: latestContribution?.submittedByName || latestContribution?.contributorName || "",
+    submittedByType: latestContribution?.submittedBySector || latestContribution?.participantUserType || "",
+    submissionCount: contributions.length,
+    lastSubmittedAt: latestContribution?.recordedAt ?? null,
+    // Submission progress and Staff review are separate: a saved submission is
+    // "Submitted" while its review remains "Pending Review" until Staff decides.
+    submissionStatus: contributions.length > 0 ? "Submitted" : "Awaiting Submission",
+    reviewStatus: reviewStatusFor(summary.submissions),
     participantBarangay: primaryContribution?.participantBarangay || data.participantBarangay || data.barangay || "",
     organizationAffiliation: primaryContribution?.organizationAffiliation || data.organizationAffiliation || "",
     participantContactNumber: primaryContribution?.participantContactNumber || data.participantContactNumber || "",
@@ -277,4 +320,4 @@ async function finalizeParent(id, requesterId) {
 }
 
 module.exports = { parentRef, parentForEventInTransaction, reportDetails, finalizeParent,
-  normalizeSubmission, summarizeSubmissions };
+  normalizeSubmission, summarizeSubmissions, reviewStatusFor };
