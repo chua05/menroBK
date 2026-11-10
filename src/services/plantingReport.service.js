@@ -5,9 +5,18 @@ const {
   getRoleRecipientsInTransaction,
 } = require("./notification.service");
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
-const { parentForEventInTransaction, reportDetails } = require("./parentPlantingReport.service");
+const { parentForEventInTransaction, reportDetails, normalizeSubmission } = require("./parentPlantingReport.service");
 const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
 const { availableForReporting, progressFor, wholeQuantity } = require("../utils/plantingBalance.util");
+const {
+  FINAL_REPORT_VERSION, finalReportIdFor, isFinalReportRow, parseFinalItems, finalRowsFor,
+  assertNoActiveFinalReport, nextFinalRevision, sortGroupRows,
+} = require("../utils/finalPlantingReport.util");
+
+// One final Planting Report per event is required for new event-linked
+// submissions. Set PLANTING_FINAL_REPORT_ENFORCED=false only to exercise the
+// legacy per-type path (historical-compatibility tests, emergency rollback).
+const finalReportEnforced = () => String(process.env.PLANTING_FINAL_REPORT_ENFORCED ?? "true").trim().toLowerCase() !== "false";
 
 const {
   createVerificationLogInTransaction,
@@ -364,7 +373,15 @@ const toTimestampOrNull = (
 // CREATE PLANTING REPORT
 // --------------------------------
 async function createPlantingReport(data, files) {
-  const { idempotencyKey, ...payload } = data;
+  const { idempotencyKey, items, ...payload } = data;
+  if (items !== undefined) {
+    // Final report: per-type leftovers (+ reasons); planted is computed per type.
+    payload.finalItems = parseFinalItems(items);
+    payload.inventoryId = payload.finalItems[0].inventoryId;
+    payload.quantityPlanted = 0;
+    payload.leftoverQuantity = 0;
+    payload.confirmationMode = "final";
+  }
   if (payload.leftoverQuantity != null && payload.leftoverQuantity !== "" && !wholeQuantity(payload.leftoverQuantity)) {
     throw Object.assign(new Error("Leftovers must be a nonnegative whole number."), { status: 400, fieldErrors: { leftoverQuantity: "Enter a nonnegative whole number." } });
   }
@@ -374,6 +391,7 @@ async function createPlantingReport(data, files) {
     "submittedByName", "submittedBySector", "submittedByContactNumber"].map(key => [key, payload[key]]));
   if (Number(payload.leftoverQuantity || 0) !== 0) fingerprintPayload.leftoverQuantity = Number(payload.leftoverQuantity);
   if (payload.confirmationMode === "final") fingerprintPayload.confirmationMode = "final";
+  if (payload.finalItems) fingerprintPayload.finalItems = payload.finalItems;
   if (payload.correctionOf !== undefined && payload.correctionOf !== "") {
     if (typeof payload.correctionOf !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.correctionOf)) {
       throw Object.assign(new Error("Invalid correction reference."), { status: 400 });
@@ -701,6 +719,7 @@ if (submittedEventId) {
 
 }
 
+if (data.finalItems && !linkedEvent?.sourceRequestId) throw Object.assign(new Error("A final planting report requires an authoritative linked release and event."), { status: 409 });
 if (!linkedEvent?.sourceRequestId && leftovers > 0) throw Object.assign(new Error("Leftovers require an authoritative linked release and event."), { status: 409, fieldErrors: { leftoverQuantity: "MENRO must reconcile this legacy release before recording leftovers." } });
 if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
   throw new Error(`Quantity exceeds the remaining reportable quantity. Only ${quantityReleased} trees remain available for reporting.`);
@@ -1570,6 +1589,162 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
             normalizeBarangay(event.barangay) !== normalizeBarangay(site.barangay)) {
           throw new Error("The selected planting event does not match the selected site and barangay.");
         }
+        if (data.finalItems) {
+          // ONE FINAL PLANTING REPORT (v4): every released type with a remaining
+          // balance in one submission; one geotagged evidence set for the group.
+          if (!event.allocationReleasedAt) throw new Error("Seedling tree item has not been released for this event.");
+          parentId = `event_${submittedEventId}`;
+          const existingRows = (await transaction.get(contributionCollection.where("reportId", "==", parentId))).docs
+            .map((doc) => ({ id: doc.id, ...doc.data() }));
+          let correctedRows = [];
+          if (data.correctionOf) {
+            const target = existingRows.find((row) => row.id === data.correctionOf);
+            correctedRows = !target ? [] : isFinalReportRow(target)
+              ? existingRows.filter((row) => row.finalReportGroupId === target.finalReportGroupId) : [target];
+            if (!correctedRows.length || correctedRows.some((row) => row.officialStaffReport === true ||
+                (row.contributorId || row.participantId) !== data.participantId || row.correctedBySubmission ||
+                deriveWorkflowStatus(row) !== WORKFLOW_STATUS.RETURNED)) {
+              throw workflowFail(409, "Only your own planting report returned for correction can be resubmitted.");
+            }
+          }
+          assertNoActiveFinalReport(existingRows);
+          const balances = (event.seedlingItems || []).map((item) => ({
+            inventoryId: item.inventoryId, species: item.species,
+            remaining: Math.max(0, Number(item.quantity || 0) - Number(event.recordedSeedlingsByInventory?.[item.inventoryId] || 0) -
+              Number(event.pendingSeedlingsByInventory?.[item.inventoryId] || 0) - Number(event.leftoverSeedlingsByInventory?.[item.inventoryId] || 0)),
+          }));
+          const rows = finalRowsFor(data.finalItems, balances);
+          const hashDocs = await Promise.all(uploadedPhotos.map((photo) => transaction.get(evidenceHashCollection.doc(photo.imageHash))));
+          if (hashDocs.some((doc) => doc.exists)) throw new Error("Duplicate planting image detected.");
+          const planted = rows.reduce((sum, row) => sum + row.quantity, 0);
+          const leftoverTotal = rows.reduce((sum, row) => sum + row.leftoverQuantity, 0);
+          const totalReleased = Number(event.seedlingTotalQuantity || 0);
+          const parent = await parentForEventInTransaction(transaction, submittedEventId, event, now, planted,
+            "Fully Reported — Awaiting Review", { activeSubmittedQuantity: planted, declaredLeftoverQuantity: leftoverTotal,
+              acceptedQuantity: 0, pendingReviewQuantity: planted,
+              reportingProgress: progressFor({ released: totalReleased, active: planted, accepted: 0, pending: planted,
+                leftovers: leftoverTotal, pendingLeftovers: leftoverTotal }) });
+          if (!parent.created && !["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial",
+            "Fully Reported — Awaiting Review"].includes(parent.data.reportingProgress || parent.data.verificationStatus)) {
+            throw workflowFail(409, "This planting report has already been finalized.");
+          }
+          // All reads are done; writes follow.
+          if (complete) complete({ collection: "plantingReports", recordId: parentId, contributionId: contributionRef.id });
+          consumeCaptures(`${parentId}:${contributionRef.id}`);
+          const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
+          const leftoverLedger = { ...(event.leftoverSeedlingsByInventory || {}) };
+          for (const row of rows) {
+            recorded[row.inventoryId] = Number(recorded[row.inventoryId] || 0) + row.quantity;
+            leftoverLedger[row.inventoryId] = Number(leftoverLedger[row.inventoryId] || 0) + row.leftoverQuantity;
+          }
+          transaction.update(eventRef, {
+            recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftoverLedger,
+            recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + planted,
+            leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) + leftoverTotal,
+            officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
+            remainingSeedlingQuantity: Math.max(0, event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) - planted - leftoverTotal),
+            updatedAt: now,
+          });
+          if (!parent.created) {
+            const nextActive = Number(parent.data.activeSubmittedQuantity ?? parent.data.quantityPlanted ?? 0) + planted;
+            const nextPending = Number(parent.data.pendingReviewQuantity || 0) + planted;
+            const nextLeftovers = Number(parent.data.declaredLeftoverQuantity || 0) + leftoverTotal;
+            const nextPendingLeftovers = Number(parent.data.pendingReviewLeftoverQuantity || 0) + leftoverTotal;
+            const nextProgress = progressFor({ released: totalReleased || Number(parent.data.quantityReleased || 0), active: nextActive,
+              accepted: Number(parent.data.acceptedQuantity || 0), pending: nextPending, leftovers: nextLeftovers,
+              acceptedLeftovers: Number(parent.data.acceptedLeftoverQuantity || 0), pendingLeftovers: nextPendingLeftovers });
+            transaction.update(parent.ref, {
+              quantityPlanted: nextActive, activeSubmittedQuantity: nextActive, pendingReviewQuantity: nextPending,
+              declaredLeftoverQuantity: nextLeftovers, pendingReviewLeftoverQuantity: nextPendingLeftovers,
+              remainingAvailableQuantity: Math.max(0, (totalReleased || Number(parent.data.quantityReleased || 0)) - nextActive - nextLeftovers),
+              reportingProgress: nextProgress, verificationStatus: nextProgress, submittedAt: now, updatedAt: now,
+              ...(!parent.data.earlyMonitoringOriginalSubmittedAt && activationState().enabled ? { earlyMonitoringOriginalSubmittedAt: now } : {}),
+            });
+          }
+          const finalReportId = finalReportIdFor(submittedEventId);
+          const finalReportRevision = nextFinalRevision(existingRows);
+          const correctionFor = (inventory) => correctedRows.find((row) => row.inventoryId === inventory) || null;
+          const shared = {
+            workflowStatus: WORKFLOW_STATUS.PENDING_REVIEW, reportId: parentId, requestId: event.sourceRequestId, eventId: submittedEventId,
+            participantId: data.participantId, contributorId: data.participantId,
+            contributorName: data.participantName || distribution.participantName || "", authenticatedSubmitterUid: data.participantId,
+            submittedByName: data.submittedByName, submittedBySector: data.submittedBySector, submittedByContactNumber: data.submittedByContactNumber,
+            participantType: isOriginalRequester ? "requester" : "participant", participantUserType: data.participantType || "",
+            participantBarangay: data.participantBarangay || "", organizationAffiliation: data.organizationAffiliation || "",
+            participantContactNumber: data.participantContactNumber || "", recordedAt: now,
+            automatedVerificationStatus: automatedStatus, verificationStatus: submissionVerificationStatus,
+            staffReviewStatus: submissionStaffReviewStatus, staffApprovalRequired: true, submissionWorkflowVersion: FINAL_REPORT_VERSION,
+            confirmationMode: "final", finalReportId, finalReportGroupId: contributionRef.id, finalReportRevision,
+            ...(correctedRows.length ? { finalReportCorrectionOfGroup: correctedRows[0].finalReportGroupId || correctedRows[0].id } : {}),
+            verificationDetails: suspiciousFlags, reviewedBy: "", reviewedByName: "", reviewedAt: null, rejectionReason: "", suspiciousFlags,
+            plantingDate: data.plantingDate, latitude: photoLatitude, longitude: photoLongitude, locationSource,
+            gpsAccuracyMeters: primaryPhoto.locationAccuracyMeters, locationCapturedAt: primaryPhoto.locationCapturedAt,
+            photoCapturedAt: primaryPhoto.photoCapturedAt, gpsMetadataPresent: allGpsMetadataPresent, gpsValid: allGpsValid,
+            siteGpsDistanceMeters, siteCoverageRadiusMeters: hasSavedCoverageRadius ? savedCoverageRadiusMeters : null,
+            siteGpsToleranceMeters: hasSavedCoverageRadius ? savedCoverageRadiusMeters : SITE_GPS_TOLERANCE_METERS,
+            siteGpsValid, siteLocationStatus, municipalityScope: "inside", siteMatch: siteGpsValid,
+            locationVerificationStatus: siteGpsValid ? "site_match" : "site_mismatch", requiresStaffReview: true, verifiedAt: now,
+          };
+          rows.forEach((row, index) => {
+            const allocation = (event.seedlingItems || []).find((item) => item.inventoryId === row.inventoryId) || {};
+            const distributionItem = distributionItems.find((item) => String(item.inventoryId || "") === row.inventoryId) || {};
+            const prior = correctionFor(row.inventoryId);
+            const ref = index === 0 ? contributionRef : contributionCollection.doc(`${contributionRef.id}-${index}`);
+            transaction.create(ref, {
+              ...shared, finalReportGroupIndex: index,
+              inventoryId: row.inventoryId, species: allocation.species || row.species,
+              requestedQuantity: Number(distributionItem.requestedQuantity ?? allocation.quantity ?? 0),
+              releasedQuantity: Number(distributionItem.releasedQuantity ?? distributionItem.quantity ?? allocation.quantity ?? 0),
+              quantity: row.quantity, leftoverQuantity: row.leftoverQuantity, leftoverReason: row.leftoverReason,
+              // The group's single evidence set lives on its first row.
+              photos: index === 0 ? uploadedPhotos : [], imageHashes: index === 0 ? uploadedPhotos.map((photo) => photo.imageHash) : [],
+              ...(index === 0 ? {} : { evidenceSubmissionId: contributionRef.id }),
+              ...(prior ? { correctionOf: prior.id, revision: Number(prior.revision || 0) + 1 } : { revision: 0 }),
+            });
+          });
+          for (const photo of uploadedPhotos) {
+            transaction.create(evidenceHashCollection.doc(photo.imageHash), {
+              reportId: parentId, contributionId: contributionRef.id, eventId: submittedEventId, createdAt: now,
+            });
+          }
+          for (const row of correctedRows) {
+            transaction.update(contributionCollection.doc(row.id), { correctedBySubmission: contributionRef.id, correctedAt: now, updatedAt: now });
+          }
+          const submitterName = data.submittedByName || data.participantName || distribution.participantName || "a participant";
+          createVerificationLogInTransaction(transaction, {
+            plantingReportId: parentId, submissionId: contributionRef.id,
+            action: correctedRows.length ? "Participant Resubmission" : "Participant Final Report Submission",
+            previousStatus: correctedRows.length ? WORKFLOW_STATUS.RETURNED : "", newStatus: WORKFLOW_STATUS.PENDING_REVIEW,
+            performedBy: data.participantId, performedByRole: "participant", performedByName: submitterName,
+            remarks: correctedRows.length ? `Corrected final report ${correctedRows[0].finalReportGroupId || correctedRows[0].id}.` : "", createdAt: now,
+          });
+          staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+            notificationId: `planting_report_submitted_staff_${parentId}_${contributionRef.id}_${recipient.id}`,
+            recipientUserId: recipient.id, type: "planting_report_submitted_staff", title: "New Planting Report Submitted",
+            message: `${submitterName} submitted the final planting report for ${linkedEvent?.name || site.siteName || parentId}.`,
+            relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: contributionRef.id, createdAt: now,
+            details: { submitterName, eventName: linkedEvent?.name || "", siteName: site.siteName || "", submittedAt: now },
+          }));
+          createNotificationInTransaction(transaction, {
+            notificationId: `planting_report_submitted_${parentId}_${contributionRef.id}_${data.participantId}`,
+            recipientUserId: data.participantId, type: "planting_report_submitted", title: "Planting Report Submitted",
+            message: "Your final planting report was submitted and is pending MENRO Staff verification.",
+            relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: contributionRef.id, createdAt: now,
+          });
+          if (suspiciousFlags.length > 0 || automatedStatus === "Flagged") {
+            staffRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+              notificationId: `planting_evidence_flagged_${parentId}_${contributionRef.id}_${recipient.id}`,
+              recipientUserId: recipient.id, type: "planting_evidence_flagged", title: "Planting Evidence Requires Review",
+              message: `Evidence submitted by ${submitterName} has verification findings requiring Staff review.`,
+              relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: contributionRef.id, createdAt: now,
+              details: { suspiciousFlags },
+            }));
+          }
+          return;
+        }
+        if (finalReportEnforced()) {
+          throw workflowFail(409, "Submit one final planting report covering every released seedling type.");
+        }
         const currentAllocation = (event.seedlingItems || []).find((item) => item.inventoryId === inventoryId);
         if (!event.allocationReleasedAt || !currentAllocation) {
           throw new Error("Seedling tree item has not been released for this event.");
@@ -2097,23 +2272,32 @@ const submitterOf = (submission) => submission.contributorId || submission.parti
 
 // Releases a pending contribution's planted and leftover quantities back to
 // the event balance (Admin rejection and Staff return share this ledger rule).
+// Releases one submission, or every row of a final report (`rows`), back to
+// the reportable balance in a single set of ledger writes.
 function releaseContributionInTransaction(transaction, {
-  contributionRef, current, parentRef, parent, eventRef, event, now, contributionUpdate, returned,
+  contributionRef, current, rows, parentRef, parent, eventRef, event, now, contributionUpdate, returned,
 }) {
-  const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
-  const inventoryId = current.inventoryId;
+  const entries = rows || [{ ref: contributionRef, current }];
+  const quantity = entries.reduce((sum, entry) => sum + Number(entry.current.quantity || 0), 0);
+  const leftover = entries.reduce((sum, entry) => sum + Number(entry.current.leftoverQuantity || 0), 0);
   const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
-  recorded[inventoryId] = Math.max(0, Number(recorded[inventoryId] || 0) - quantity);
+  const leftoverLedger = { ...(event.leftoverSeedlingsByInventory || {}) };
+  for (const { current: entry } of entries) {
+    recorded[entry.inventoryId] = Math.max(0, Number(recorded[entry.inventoryId] || 0) - Number(entry.quantity || 0));
+    if (Number(entry.leftoverQuantity || 0)) {
+      leftoverLedger[entry.inventoryId] = Number(leftoverLedger[entry.inventoryId] || 0) - Number(entry.leftoverQuantity || 0);
+    }
+  }
   const nextActive = Math.max(0, Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0) - quantity);
   const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
   const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
   const accepted = Number(parent.acceptedQuantity || 0);
   const reportingProgress = progressFor({ released, active: nextActive, accepted, pending: nextPending,
     leftovers: Number(parent.declaredLeftoverQuantity || 0) - leftover, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
-  transaction.update(contributionRef, contributionUpdate);
+  entries.forEach((entry) => transaction.update(entry.ref, contributionUpdate));
   transaction.update(eventRef, {
     recordedSeedlingsByInventory: recorded,
-    ...(leftover ? { leftoverSeedlingsByInventory: { ...(event.leftoverSeedlingsByInventory || {}), [inventoryId]: Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0) - leftover }, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover } : {}),
+    ...(leftover ? { leftoverSeedlingsByInventory: leftoverLedger, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover } : {}),
     recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
     officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
     remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
@@ -2158,6 +2342,48 @@ function notifyStaffReviewerInTransaction(transaction, submission, { key, record
   });
 }
 
+// The rows a review decision applies to: every row of a final report (v4),
+// or just the one legacy submission. Reads only; call before any write.
+async function decisionRowsInTransaction(transaction, contributionRef, currentDoc) {
+  const current = { ...currentDoc.data(), id: currentDoc.id || contributionRef.id };
+  if (!isFinalReportRow(current)) return [{ ref: contributionRef, current }];
+  const snapshot = await transaction.get(contributionCollection.where("finalReportGroupId", "==", current.finalReportGroupId));
+  const rows = sortGroupRows(snapshot.docs.map((doc) => ({ ...doc.data(), id: doc.id }))
+    .filter((row) => row.reportId === current.reportId));
+  if (!rows.some((row) => row.id === current.id)) throw workflowFail(409, "The final planting report changed. Refresh and try again.");
+  return rows.map((row) => ({ ref: contributionCollection.doc(row.id), current: row }));
+}
+
+// Audit fields naming every row decided together (final reports only).
+function groupLogFields(rows) {
+  return rows.length > 1 || isFinalReportRow(rows[0]?.current)
+    ? { finalReportId: rows[0].current.finalReportId || "", finalReportGroupId: rows[0].current.finalReportGroupId || "",
+      submissionIds: rows.map((row) => row.current.id) }
+    : {};
+}
+
+// Per-species confirmed planted totals after approving `approvedIds`, using the
+// same acceptance rule as officialPlantingReport.reviewOfficialSubmission.
+async function acceptedTotalsInTransaction(transaction, parentId, approvedIds, expectedAccepted) {
+  const approved = new Set([].concat(approvedIds));
+  const snapshot = await transaction.get(contributionCollection.where("reportId", "==", parentId));
+  const acceptedSeedlingsByInventory = {}, bases = new Set();
+  for (const row of snapshot.docs) {
+    const data = normalizeSubmission(row.data());
+    if ((data.officialStaffReport === true || data.photos?.length || data.finalReportGroupId) && data.verificationStatus !== "Invalid" &&
+        (approved.has(row.id) || data.staffReviewStatus === "Accepted" ||
+          data.staffApprovalRequired !== true && data.verificationStatus === "Verified" && data.staffReviewStatus === "Not Required")) {
+      acceptedSeedlingsByInventory[data.inventoryId] = Number(acceptedSeedlingsByInventory[data.inventoryId] || 0) + Number(data.quantity || 0);
+      bases.add(data.confirmationBasis || "documented-participant-report");
+    }
+  }
+  const total = Object.values(acceptedSeedlingsByInventory).reduce((sum, value) => sum + value, 0);
+  if (total !== expectedAccepted) {
+    throw workflowFail(409, "Confirmed planted quantities require reconciliation before monitoring.");
+  }
+  return { acceptedSeedlingsByInventory, confirmationBases: [...bases].sort() };
+}
+
 // --------------------------------
 // STAFF FORWARD TO ADMIN (Reviewed)
 // --------------------------------
@@ -2175,18 +2401,19 @@ const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, re
     await db.runTransaction(async (transaction) => {
       const currentDoc = await transaction.get(contributionRef);
       if (!currentDoc.exists) throw new Error("Planting report submission not found.");
-      const current = currentDoc.data();
-      assertAwaitingStaffReview(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+      const rows = await decisionRowsInTransaction(transaction, contributionRef, currentDoc);
+      const current = rows[0].current, id = current.id;
+      rows.forEach((row) => assertAwaitingStaffReview(deriveWorkflowStatus(row.current), row.current.staffReviewStatus === "Pending Review"));
       parentId = current.reportId;
       const adminRecipients = await getRoleRecipientsInTransaction(transaction, ["admin"]);
       const now = Timestamp.now();
-      transaction.update(contributionRef, {
+      rows.forEach((row) => transaction.update(row.ref, {
         workflowStatus: WORKFLOW_STATUS.REVIEWED,
         staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
         staffReviewRemarks: note, updatedAt: now,
-      });
+      }));
       createVerificationLogInTransaction(transaction, {
-        plantingReportId: parentId, submissionId: id, action: "Staff Review — Forwarded to Admin",
+        plantingReportId: parentId, submissionId: id, ...groupLogFields(rows), action: "Staff Review — Forwarded to Admin",
         previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.REVIEWED,
         performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: note, createdAt: now,
       });
@@ -2252,27 +2479,32 @@ const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, re
 // RETURN FOR CORRECTION
 // Staff returns participant reports; Admin returns official Staff reports.
 // --------------------------------
-const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, reviewerRole) => {
+const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, reviewerRole, options = {}) => {
   const actor = reviewActor(returnedBy, returnedByName, reviewerRole);
   const reason = requiredReason(remarks, "return");
   const contributionRef = contributionCollection.doc(id);
   const contributionDoc = await contributionRef.get();
   if (contributionDoc.exists && contributionDoc.data().officialStaffReport === true) {
-    return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "return", reason);
+    return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "return", reason, options);
   }
   assertActorRole(actor, "staff", STAFF_REVIEW_ONLY);
+  // Participant returns keep their single-reason workflow.
+  if (Array.isArray(options.fields) && options.fields.length) {
+    throw workflowFail(400, "Field-specific correction applies only to Staff-submitted planting reports.");
+  }
   if (contributionDoc.exists) {
     let parentId = "";
     await db.runTransaction(async (transaction) => {
       const currentDoc = await transaction.get(contributionRef);
       if (!currentDoc.exists) throw new Error("Planting report submission not found.");
-      const current = currentDoc.data();
-      assertAwaitingStaffReview(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+      const rows = await decisionRowsInTransaction(transaction, contributionRef, currentDoc);
+      const current = rows[0].current, id = current.id;
+      rows.forEach((row) => assertAwaitingStaffReview(deriveWorkflowStatus(row.current), row.current.staffReviewStatus === "Pending Review"));
       parentId = current.reportId;
       const ledger = await loadContributionLedgerInTransaction(transaction, current);
       const now = Timestamp.now();
       releaseContributionInTransaction(transaction, {
-        ...ledger, contributionRef, current, now, returned: true,
+        ...ledger, rows, now, returned: true,
         contributionUpdate: {
           staffReviewStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.RETURNED,
           staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
@@ -2281,7 +2513,7 @@ const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, rev
         },
       });
       createVerificationLogInTransaction(transaction, {
-        plantingReportId: parentId, submissionId: id, action: "Staff Return for Correction",
+        plantingReportId: parentId, submissionId: id, ...groupLogFields(rows), action: "Staff Return for Correction",
         previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.RETURNED,
         performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: reason, createdAt: now,
       });
@@ -2351,14 +2583,16 @@ const approvePlantingReport =
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
-        const current = currentDoc.data();
-        assertAwaitingAdminDecision(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+        const rows = await decisionRowsInTransaction(transaction, contributionRef, currentDoc);
+        const current = rows[0].current, id = current.id;
+        rows.forEach((row) => assertAwaitingAdminDecision(deriveWorkflowStatus(row.current), row.current.staffReviewStatus === "Pending Review"));
         parentId = current.reportId;
         const parentRef = reportRefFor(parentId);
         const parentDoc = await transaction.get(parentRef);
         if (!parentDoc.exists) throw new Error("Planting report not found.");
         const parent = parentDoc.data();
-        const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
+        const quantity = rows.reduce((sum, row) => sum + Number(row.current.quantity || 0), 0);
+        const leftover = rows.reduce((sum, row) => sum + Number(row.current.leftoverQuantity || 0), 0);
         const accepted = Number(parent.acceptedQuantity || 0) + quantity;
         const pending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
         const released = Number(parent.quantityReleased || 0);
@@ -2375,24 +2609,31 @@ const approvePlantingReport =
           }) : null;
         const monitoringRecipients = earlyMonitoring?.applicable
           ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
+        // Reports that also hold official Staff submissions carry per-species
+        // confirmed totals that cohorts read. Keep them current here exactly as
+        // the official Admin decision does (all reads happen before any write).
+        const perSpecies = parent.officialPlantingWorkflow === true
+          ? await acceptedTotalsInTransaction(transaction, parentId, rows.map((row) => row.current.id), accepted) : null;
         await ensureCohortForAuthoritativeReportInTransaction(transaction, {
           reportId: parentId,
           report: {
             ...parent,
             acceptedQuantity: accepted,
+            ...(perSpecies || {}),
             reportingProgress,
             verificationStatus: reportingProgress,
           },
           now,
         });
-        transaction.update(contributionRef, {
+        rows.forEach((row) => transaction.update(row.ref, {
           staffReviewStatus: "Accepted", workflowStatus: WORKFLOW_STATUS.COMPLETED,
           reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
           adminDecisionBy: actor.uid, adminDecisionByName: actor.fullName, adminDecisionAt: now,
           reviewRemarks: note, updatedAt: now,
-        });
+        }));
         transaction.update(parentRef, {
           acceptedQuantity: accepted, pendingReviewQuantity: pending,
+          ...(perSpecies || {}),
           ...(leftover ? { acceptedLeftoverQuantity: Number(parent.acceptedLeftoverQuantity || 0) + leftover, pendingReviewLeftoverQuantity: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover } : {}),
           reportingProgress,
           verificationStatus: reportingProgress,
@@ -2409,7 +2650,7 @@ const approvePlantingReport =
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
         }));
         createVerificationLogInTransaction(transaction, {
-          plantingReportId: parentId, submissionId: id, action: "Admin Approval",
+          plantingReportId: parentId, submissionId: id, ...groupLogFields(rows), action: "Admin Approval",
           previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.COMPLETED,
           performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName,
           remarks: note, createdAt: now,
@@ -2510,13 +2751,14 @@ const rejectPlantingReport =
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
-        const current = currentDoc.data();
-        assertAwaitingAdminDecision(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+        const rows = await decisionRowsInTransaction(transaction, contributionRef, currentDoc);
+        const current = rows[0].current, id = current.id;
+        rows.forEach((row) => assertAwaitingAdminDecision(deriveWorkflowStatus(row.current), row.current.staffReviewStatus === "Pending Review"));
         parentId = current.reportId;
         const ledger = await loadContributionLedgerInTransaction(transaction, current);
         const now = Timestamp.now();
         releaseContributionInTransaction(transaction, {
-          ...ledger, contributionRef, current, now, returned: false,
+          ...ledger, rows, now, returned: false,
           contributionUpdate: {
             staffReviewStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.REJECTED,
             reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
@@ -2525,7 +2767,7 @@ const rejectPlantingReport =
           },
         });
         createVerificationLogInTransaction(transaction, {
-          plantingReportId: parentId, submissionId: id, action: "Admin Rejection",
+          plantingReportId: parentId, submissionId: id, ...groupLogFields(rows), action: "Admin Rejection",
           previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.REJECTED,
           performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName, remarks: reason, createdAt: now,
         });

@@ -129,6 +129,10 @@ const submitPlantingReport = async (
       });
     }
 
+    // A final planting report sends every released type in `items`; the
+    // backend computes Planted = Remaining - Leftovers per type.
+    const finalItems = req.body?.items !== undefined && req.body?.items !== "" ? req.body.items : undefined;
+
     // --------------------------------
     // REQUIRED FIELDS
     // --------------------------------
@@ -137,8 +141,7 @@ const submitPlantingReport = async (
       !siteId ||
       !barangay ||
       !eventId ||
-      quantityPlanted ===
-        undefined ||
+      (finalItems === undefined && quantityPlanted === undefined) ||
       !plantingDate ||
       !plantingLocation ||
       !String(submittedByName || "").trim() ||
@@ -171,13 +174,14 @@ const submitPlantingReport = async (
     // QUANTITY
     // --------------------------------
     const parsedQuantity =
-      Number(quantityPlanted);
+      finalItems !== undefined ? 0 : Number(quantityPlanted);
 
     if (
-      !Number.isInteger(
-        parsedQuantity
-      ) ||
-      (req.body?.confirmationMode === "final" ? parsedQuantity < 0 : parsedQuantity <= 0)
+      finalItems === undefined && (
+        !Number.isInteger(
+          parsedQuantity
+        ) ||
+        (req.body?.confirmationMode === "final" ? parsedQuantity < 0 : parsedQuantity <= 0))
     ) {
       return res.status(400).json({
         success: false,
@@ -227,7 +231,8 @@ const submitPlantingReport = async (
           quantityPlanted:
             parsedQuantity,
           leftoverQuantity,
-          confirmationMode: req.body?.confirmationMode || "partial",
+          confirmationMode: finalItems !== undefined ? "final" : req.body?.confirmationMode || "partial",
+          ...(finalItems !== undefined ? { items: finalItems } : {}),
 
           plantingDate,
 
@@ -482,7 +487,9 @@ function decisionHandler(action, { success, failure, requiresReason, reasonPromp
       if (requiresReason && !remarks.trim()) {
         return res.status(400).json({ success: false, message: reasonPrompt, fieldErrors: { remarks: reasonPrompt } });
       }
-      const report = await action(req.params.id, req.user.uid, remarks, req.user.fullName, req.user.role);
+      // Field-specific Return for Correction sends the selected fields (validated by the service).
+      const options = req.body?.fields !== undefined ? { fields: req.body.fields } : {};
+      const report = await action(req.params.id, req.user.uid, remarks, req.user.fullName, req.user.role, options);
       return res.status(200).json({ success: true, message: success, data: report });
     } catch (error) {
       const known = [400, 401, 403, 404, 409].includes(error.status) ? error.status : LEGACY_DECISION_STATUS.get(error.message);

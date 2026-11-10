@@ -284,7 +284,7 @@ async function getEventParticipants(eventId) {
   const byParticipant = new Map();
   for (const doc of contributionSnapshot.docs) {
     const entry = doc.data();
-    if (!Array.isArray(entry.photos) || entry.photos.length === 0 || entry.staffReviewStatus === "Rejected") continue;
+    if ((!Array.isArray(entry.photos) || entry.photos.length === 0) && !entry.finalReportGroupId || entry.staffReviewStatus === "Rejected") continue;
     const value = byParticipant.get(entry.participantId) || { quantityPlanted: 0, submissionCount: 0 };
     value.quantityPlanted += Number(entry.quantity || 0);
     value.submissionCount += 1;
@@ -305,7 +305,149 @@ async function getEventParticipants(eventId) {
   });
 }
 
+
+// --------------------------------------------------------------------------
+// GUEST ATTENDANCE (attendance-only registration through the event link)
+// --------------------------------------------------------------------------
+// Attendance is documentation of who attended. It never creates planting
+// contributions, never reserves seedlings and is never read by balances,
+// planting verification, analytics or monitoring. Records live in their own
+// collection, one per event + contact number.
+const attendance = db.collection("eventAttendance");
+const MAX_ADDRESS_LENGTH = 200;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+
+const attendanceFail = (status, message, fieldErrors) =>
+  Object.assign(new Error(message), { status, ...(fieldErrors ? { fieldErrors } : {}) });
+
+// Scheduled start of the event in Bulan (Asia/Manila, UTC+8).
+function eventStartsAt(event = {}) {
+  const date = String(event.date || "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+  const time = /^\d{2}:\d{2}$/.test(String(event.startTime || event.time || "")) ? String(event.startTime || event.time) : "00:00";
+  const start = new Date(`${date}T${time}:00+08:00`);
+  return Number.isFinite(start.getTime()) ? start : null;
+}
+
+// Attendance is accepted during or after the event, until the link expires or
+// is revoked. Completed events stay open; cancelled or archived ones do not.
+function attendanceState(event = {}, now = new Date()) {
+  const status = String(event.status || "").trim().toLowerCase();
+  const recordStatus = String(event.recordStatus || "").trim().toLowerCase();
+  if (!event || event.archived === true || event.isArchived === true || event.isDeleted === true ||
+      status === "cancelled" || ["cancelled", "archived"].includes(recordStatus)) {
+    return { open: false, reason: "cancelled" };
+  }
+  const startsAt = eventStartsAt(event);
+  if (!startsAt) return { open: false, reason: "unscheduled" };
+  if (now < startsAt) return { open: false, reason: "not-started", opensAt: startsAt.toISOString() };
+  return { open: true, opensAt: startsAt.toISOString() };
+}
+
+// Same signed, unexpired, unrevoked link as before; only the event rule differs.
+async function validateAttendanceInvitation(token) {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]+\.[a-f0-9]{64}\.[a-f0-9]{64}$/.test(token)) {
+    throw attendanceFail(404, "Guest event not found.");
+  }
+  const eventId = token.split(".")[0];
+  const invitationDoc = await invitations.doc(eventId).get();
+  const invitation = invitationDoc.data();
+  if (!invitationDoc.exists || !invitation?.active || invitation.revokedAt) throw attendanceFail(404, "Guest event not found.");
+  if (expired(invitation, DEFAULT_INVITATION_TTL_HOURS)) throw attendanceFail(410, "This invitation link has expired.");
+  const expected = Buffer.from(invitation.tokenHash, "hex");
+  const actual = Buffer.from(digest(token), "hex");
+  if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) throw attendanceFail(404, "Guest event not found.");
+  const eventDoc = await events.doc(eventId).get();
+  if (!eventDoc.exists) throw attendanceFail(404, "Guest event not found.");
+  const state = attendanceState(eventDoc.data());
+  if (state.reason === "cancelled") throw attendanceFail(410, "This event is no longer accepting attendance.");
+  return { eventId, event: eventDoc.data(), invitation, state };
+}
+
+// Public event card for the attendance page: no allocation or balances.
+async function attendanceEventView(eventId, event, state = attendanceState(event)) {
+  const [siteDoc, requestDoc] = await Promise.all([
+    event.plantingSiteId ? sites.doc(event.plantingSiteId).get() : Promise.resolve({ exists: false }),
+    event.sourceRequestId ? requests.doc(event.sourceRequestId).get() : Promise.resolve({ exists: false }),
+  ]);
+  const site = siteDoc.exists ? siteDoc.data() : {};
+  const request = requestDoc.exists ? requestDoc.data() : {};
+  return {
+    id: eventId, name: event.name || "Tree Planting Event", date: event.date || "", startTime: event.startTime || "",
+    endTime: event.endTime || "", status: event.status || "",
+    barangay: event.barangay || request.eventProposal?.barangay || site.barangay || "",
+    plantingSiteNumber: site.siteId || event.plantingSiteNumber || "",
+    plantingSiteName: event.plantingSiteName || site.siteName || "",
+    attendanceOpen: state.open, attendanceOpensAt: state.opensAt || null,
+  };
+}
+
+function cleanText(value, { label, min, max, field }) {
+  const text = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  if (typeof value === "string" && CONTROL_CHARACTERS.test(value.replace(/[\r\n\t]/g, " "))) {
+    throw attendanceFail(400, `${label} contains unsupported characters.`, { [field]: "Remove unsupported characters." });
+  }
+  if (text.length < min || text.length > max) {
+    throw attendanceFail(400, `${label} is required (${min}–${max} characters).`, { [field]: `Enter ${min}–${max} characters.` });
+  }
+  return text;
+}
+
+async function registerAttendance(token, details = {}) {
+  const allowed = new Set(["fullName", "contactNumber", "address"]);
+  if (!details || typeof details !== "object" || Object.keys(details).some((key) => !allowed.has(key))) {
+    throw attendanceFail(400, "Only Full Name, Contact Number and Address are accepted.");
+  }
+  const { eventId, event, invitation, state } = await validateAttendanceInvitation(token);
+  if (!state.open) {
+    throw attendanceFail(409, state.reason === "not-started"
+      ? "Attendance opens when the planting event starts." : "This event is not accepting attendance.");
+  }
+  const fullName = cleanText(details.fullName, { label: "Full name", min: 2, max: 120, field: "fullName" });
+  let contactNumber;
+  try { contactNumber = normalizeContact(details.contactNumber); } catch {
+    throw attendanceFail(400, "A valid Philippine mobile number is required.", { contactNumber: "Enter a valid mobile number, e.g. 09123456789." });
+  }
+  const address = cleanText(details.address, { label: "Address", min: 5, max: MAX_ADDRESS_LENGTH, field: "address" });
+  // One record per event and contact number; the ID never contains the number itself.
+  const ref = attendance.doc(digest(`attendance:${eventId}:${contactNumber}`));
+  const registeredAt = Timestamp.now();
+  await db.runTransaction(async (transaction) => {
+    const existing = await transaction.get(ref);
+    if (existing.exists) throw attendanceFail(409, "This contact number is already registered for this event.", { contactNumber: "Already registered for this event." });
+    transaction.create(ref, {
+      eventId, requestId: invitation.requestId || event.sourceRequestId || "",
+      fullName, contactNumber, address, source: "guest-invitation", registeredAt, createdAt: registeredAt,
+    });
+  });
+  return { eventId, fullName, registeredAt };
+}
+
+// Only the event's requester, MENRO Staff and Admin may read attendance.
+async function listEventAttendance(eventId, user = {}) {
+  if (typeof eventId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(eventId)) throw attendanceFail(404, "Event not found.");
+  const role = String(user.role || "").toLowerCase();
+  if (!user.uid || !["staff", "admin", "participant"].includes(role)) throw attendanceFail(403, "Attendance access is not authorized.");
+  const eventDoc = await events.doc(eventId).get();
+  if (!eventDoc.exists) throw attendanceFail(404, "Event not found.");
+  if (role === "participant") {
+    const requestId = eventDoc.data().sourceRequestId;
+    const requestDoc = requestId ? await requests.doc(requestId).get() : null;
+    if (!requestDoc?.exists || requestDoc.data().participantId !== user.uid) throw attendanceFail(403, "Attendance access is not authorized.");
+  }
+  const snapshot = await attendance.where("eventId", "==", eventId).get();
+  return snapshot.docs.map((doc) => {
+    const row = doc.data();
+    return { id: doc.id, eventId, fullName: row.fullName || "", contactNumber: row.contactNumber || "", address: row.address || "", registeredAt: row.registeredAt || null };
+  }).sort((a, b) => String(a.registeredAt?.toMillis?.() ?? a.registeredAt ?? "").localeCompare(String(b.registeredAt?.toMillis?.() ?? b.registeredAt ?? "")) || a.fullName.localeCompare(b.fullName));
+}
+
 module.exports = {
+  attendanceState,
+  validateAttendanceInvitation,
+  attendanceEventView,
+  registerAttendance,
+  listEventAttendance,
   isGuestInvitationConfigured,
   createInvitationInTransaction,
   getInvitationForRequester,

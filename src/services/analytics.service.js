@@ -172,7 +172,8 @@ async function getDashboard(rawFilters = {}) {
     const context = reportContext(report);
     const contributions = contributionsByReport.get(report.id) || [];
     if (contributions.length) {
-      for (const contribution of contributions.filter((entry) => entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid")) plantingActivities.push({
+      for (const contribution of contributions.filter((entry) => entry.staffReviewStatus !== "Rejected" && entry.verificationStatus !== "Invalid" &&
+        !entry.reservationReleasedAt && entry.reservationStatus !== "Released")) plantingActivities.push({
         reportId: report.id, quantity: number(contribution.quantity),
         date: contribution.recordedAt || contribution.plantingDate || report.plantingDate || report.eventDate,
         ...context, species: contribution.species || context.species,

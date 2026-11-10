@@ -25,12 +25,11 @@ const {
 const guestService = require("../services/guestEvent.service");
 const contributionService = require("../services/plantingContribution.service");
 const { sendSuccess, sendError } = require("../utils/response.util");
-const { attachEvidence } = require("../services/plantingEvidence.service");
-const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
-const { uploadLimiter } = require("../middleware/rateLimiter.middleware");
-const {
-  evidenceUploadMaintenanceGate,
-} = require("../middleware/evidenceUploadMaintenance.middleware");
+
+// Logged-in attendee planting/photo contributions are retired (decision C6);
+// historical contributions stay readable.
+const retiredContribution = (_req, res) => sendError(res, 410,
+  "Attendee planting and photo contributions have been retired. Submit the event's final planting report instead.");
 
 router.post("/:id/join", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -60,43 +59,45 @@ router.get("/:id/contributions/my", verifyToken, authorizeRoles("participant"), 
   return sendSuccess(res, 200, "Contributions retrieved", data);
 });
 
-router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), async (req, res) => {
+router.post("/:id/contributions", verifyToken, authorizeRoles("participant"), retiredContribution);
+router.post("/:id/contributions/:contributionId/evidence", verifyToken, authorizeRoles("participant"), retiredContribution);
+
+// Event attendance: the event's requester, MENRO Staff and Admin only (checked in the service).
+router.get("/:id/attendance", verifyToken, authorizeRoles("participant", "staff", "admin"), async (req, res) => {
   try {
-    const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);
-    const data = await contributionService.recordContribution(
-      req.params.id, participantId, req.body?.inventoryId, req.body?.quantity
-    );
-    return sendSuccess(res, 201, "Contribution recorded", data);
+    const data = await guestService.listEventAttendance(req.params.id, req.user);
+    res.set("Cache-Control", "private, no-store");
+    return sendSuccess(res, 200, "Event attendance retrieved", data);
   } catch (error) {
-    if (error.message.startsWith("Only ") || error.message.includes("remaining reportable quantity") ||
-      error.message.includes("required") ||
-        error.message.includes("not allocated") || error.message.includes("not been released") ||
-        error.message === "Event participation not found.") {
-        return sendError(res, 400, error.message);
-      } else if (error.message.includes("not authorized") || error.message.includes("available planting quantity")) {
-        return sendError(res, 400, error.message);
-    }
+    if ([403, 404].includes(error.status)) return sendError(res, error.status, error.message);
     console.error(error);
-    return sendError(res, 500, "Failed to record contribution.");
+    return sendError(res, 500, "Failed to retrieve event attendance.");
   }
 });
 
-router.post("/:id/contributions/:contributionId/evidence", verifyToken,
-  authorizeRoles("participant"), evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard,
-  uploadContributionEvidence, async (req, res) => {
-    try {
-      const participantId = guestService.registeredParticipantId(req.params.id, req.user.uid);
-      const data = await attachEvidence(req.params.id, participantId,
-        req.params.contributionId, req.files);
-      return sendSuccess(res, 200, "Planting evidence recorded", data);
-    } catch (error) {
-      const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Bulan|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
-          .test(error.message);
-      if (!expected) console.error(error);
-      return sendError(res, expected ? 400 : 500,
-        expected ? error.message : "Failed to record planting evidence.");
+// Legacy seedling reservations (decision C3): Staff/Admin review and release.
+router.get("/:id/reservations", verifyToken, authorizeRoles("staff", "admin"), async (req, res) => {
+  try {
+    return sendSuccess(res, 200, "Legacy reservations retrieved", await contributionService.listLegacyReservations(req.params.id));
+  } catch (error) {
+    if (error.status === 404) return sendError(res, 404, error.message);
+    console.error(error);
+    return sendError(res, 500, "Failed to retrieve reservations.");
+  }
+});
+
+router.post("/:id/reservations/:contributionId/release", verifyToken, authorizeRoles("staff", "admin"), async (req, res) => {
+  try {
+    const data = await contributionService.releaseLegacyReservation(req.params.id, req.params.contributionId, req.user, req.body?.reason);
+    return sendSuccess(res, 200, "Reservation released", data);
+  } catch (error) {
+    if ([400, 401, 403, 404, 409].includes(error.status)) {
+      return res.status(error.status).json({ success: false, message: error.message, ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}) });
     }
-  });
+    console.error(error);
+    return sendError(res, 500, "Failed to release the reservation.");
+  }
+});
 
 // GET ALL ACTIVE EVENTS
 // Participant, staff, and admin may view events.

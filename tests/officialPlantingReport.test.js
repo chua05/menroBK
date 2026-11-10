@@ -19,7 +19,17 @@ function seed(suffix, requestType = "individual", released = 8) {
   return { requestId, eventId, reportId };
 }
 function payload(requestId, quantityPlanted = 6, leftoverQuantity = 2) {
-  return { requestId, confirmationBasis: "menro-field-report", items: [{ inventoryId: "narra", quantityPlanted, leftoverQuantity }], remarks: "Official fixture report", clientSubmissionId: randomUUID(), expectedVersion: 0 };
+  return { requestId, confirmationBasis: "menro-field-report", items: [{ inventoryId: "narra", quantityPlanted, leftoverQuantity, ...(leftoverQuantity > 0 ? { leftoverReason: "Seedlings damaged in transport" } : {}) }], remarks: "Official fixture report", clientSubmissionId: randomUUID(), expectedVersion: 0 };
+}
+// Field-specific Admin return: the submitted fields that need correction, each with a comment.
+const fieldReturn = (...paths) => ({ fields: paths.map(path => ({ path, comment: `Please correct ${path}` })) });
+// Historical-compatibility tests exercise the legacy per-type path.
+async function legacyReporting(run) {
+  const previous = process.env.PLANTING_FINAL_REPORT_ENFORCED;
+  process.env.PLANTING_FINAL_REPORT_ENFORCED = "false";
+  try { return await run(); } finally {
+    if (previous === undefined) delete process.env.PLANTING_FINAL_REPORT_ENFORCED; else process.env.PLANTING_FINAL_REPORT_ENFORCED = previous;
+  }
 }
 // Trusted linkage fixture only: these unit tests do not claim real photo verification.
 function verifiedEvidence(id) {
@@ -60,7 +70,7 @@ test("organization cannot use release-based confirmation", async () => {
 });
 test("planted quantity is derived from the available balance minus leftovers", async () => {
   const fixture = seed("derived");
-  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity: 3 }] });
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity: 3, leftoverReason: "Seedlings damaged in transport" }] });
   const event = memory.records("events").get(fixture.eventId);
   assert.equal(event.recordedSeedlingQuantity, 5); assert.equal(event.leftoverSeedlingQuantity, 3);
   assert.equal(report.quantityPlanted, 5); assert.equal(report.declaredLeftoverQuantity, 3);
@@ -71,7 +81,7 @@ test("leftover defaults mean all available seedlings were planted", async () => 
   assert.equal(memory.records("events").get(fixture.eventId).recordedSeedlingQuantity, 8);
 });
 test("leftovers cannot be negative or exceed the available balance", async () => {
-  const fixture = seed("leftover-limits"); const send = leftoverQuantity => service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity }] });
+  const fixture = seed("leftover-limits"); const send = leftoverQuantity => service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", leftoverQuantity, ...(Number(leftoverQuantity) > 0 ? { leftoverReason: "Seedlings damaged in transport" } : {}) }] });
   await assert.rejects(send(-1), error => error.status === 400);
   await assert.rejects(send(9), error => error.status === 409 && /exceed/.test(error.message));
 });
@@ -85,9 +95,9 @@ test("per-species planted plus leftovers are reserved atomically and retries con
   const results = await Promise.allSettled([service.submitOfficialReport(staff, input), service.submitOfficialReport(staff, input)]);
   assert.equal(results.filter(row => row.status === "fulfilled").length, 2);
   const event = memory.records("events").get(fixture.eventId); assert.equal(event.recordedSeedlingQuantity, 6); assert.equal(event.leftoverSeedlingQuantity, 2);
-  await assert.rejects(service.submitOfficialReport(staff, { ...input, items: [{ inventoryId: "narra", quantityPlanted: 1, leftoverQuantity: 1 }] }), error => error.status === 409);
+  await assert.rejects(service.submitOfficialReport(staff, { ...input, items: [{ inventoryId: "narra", quantityPlanted: 1, leftoverQuantity: 1, leftoverReason: "Seedlings damaged in transport" }] }), error => error.status === 409);
   await assert.rejects(service.submitOfficialReport(staff, payload(fixture.requestId, 1, 0)), /balance changed/);
-  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId, 3, 0), expectedVersion: 1 }), /exceed/);
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId, 3, 0), expectedVersion: 1 }), /exceed|already pending/);
 });
 test("concurrent different submissions cannot over-consume one release", async () => {
   const fixture = seed("race");
@@ -99,7 +109,7 @@ test("Admin return releases only this submission's quantities and correction pre
   const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 8, 2)); const id = report.submissions[0].id;
   await assert.rejects(service.reviewOfficialSubmission(staff, id, true), error => error.status === 403);
   await assert.rejects(service.reviewOfficialSubmission(admin, id, false, "  "), error => error.status === 400);
-  const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity");
+  const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity", fieldReturn("items.narra.leftoverQuantity"));
   assert.equal(returned.remainingAvailableQuantity, 10); assert.equal(returned.submissions[0].staffReviewStatus, "Rejected");
   const corrected = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 7, 3), correctionOf: id, expectedVersion: 2 });
   assert.equal(corrected.submissions.length, 2); const row = corrected.submissions.find(row => row.correctionOf === id); assert.equal(row.revision, 1);
@@ -128,7 +138,7 @@ test("Staff reports go directly to Admin; Admin rejection is final while a retur
 
   const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 8, 2), expectedVersion: 2 });
   const secondId = second.submissions.find(entry => entry.workflowStatus === "Pending Admin Approval").id;
-  const returned = await service.reviewOfficialSubmission(admin, secondId, "return", "Attach the attendance sheet");
+  const returned = await service.reviewOfficialSubmission(admin, secondId, "return", "Attach the attendance sheet", fieldReturn("remarks"));
   const returnedRow = returned.submissions.find(entry => entry.id === secondId);
   assert.equal(returnedRow.workflowStatus, "Returned for Correction"); assert.equal(returnedRow.correctionAllowed, true);
   assert.equal(returnedRow.returnReason, "Attach the attendance sheet");
@@ -137,7 +147,7 @@ test("Staff reports go directly to Admin; Admin rejection is final while a retur
 test("legacy official Staff rejections remain correctable as returns", async () => {
   const fixture = seed("legacy-return", "individual", 10);
   const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 8, 2)); const id = report.submissions[0].id;
-  const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity");
+  const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity", fieldReturn("items.narra.leftoverQuantity"));
   delete memory.records("plantingContributions").get(id).workflowStatus; // a record written before the workflow field existed
   assert.equal(summarizeSubmissions([memory.records("plantingContributions").get(id)], 10).submissions[0].workflowStatus, "Returned for Correction");
   const corrected = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 7, 3), correctionOf: id, expectedVersion: returned.officialReportingVersion ?? 2 });
@@ -233,7 +243,7 @@ test("one Staff report records every released seedling type with per-type plante
   const fixture = seedTwoSpecies("two-species");
   const [option] = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options;
   assert.deepEqual(option.items.map(row => [row.inventoryId, row.quantityReleased, row.availableQuantity]), [["narra", 10, 10], ["molave", 6, 6]]);
-  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2 }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] });
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2, leftoverReason: "Seedlings damaged in transport" }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] });
   assert.equal(report.officialSubmissionIds.length, 2);
   assert.deepEqual(report.submissions.map(row => [row.inventoryId, row.species, row.quantity, row.leftoverQuantity]), [["narra", "Narra", 8, 2], ["molave", "Molave", 6, 0]]);
   assert.equal(report.species, "Narra, Molave", "a multi-type report is never summarized as one species");
@@ -242,21 +252,192 @@ test("one Staff report records every released seedling type with per-type plante
   assert.deepEqual(report.allocationSummary.map(row => [row.species, row.allocated, row.recorded, row.leftoverQuantity, row.remaining]), [["Narra", 10, 8, 2, 0], ["Molave", 6, 6, 0, 0]]);
   const event = memory.records("events").get(fixture.eventId);
   assert.deepEqual(event.recordedSeedlingsByInventory, { narra: 8, molave: 6 }); assert.deepEqual(event.leftoverSeedlingsByInventory, { narra: 2, molave: 0 });
+  assert.deepEqual(report.submissions.map(row => row.leftoverReason), ["Seedlings damaged in transport", ""]);
   const [narra, molave] = report.officialSubmissionIds; verifiedEvidence(narra);
-  assert.equal((await service.reviewOfficialSubmission(admin, narra, true)).reportingProgress, "Fully Reported — Awaiting Review");
-  const approved = await service.reviewOfficialSubmission(admin, molave, true);
-  assert.equal(approved.acceptedQuantity, 14); assert.equal(approved.reportingProgress, "Completed");
+  const rows = report.officialSubmissionIds.map(id => memory.records("plantingContributions").get(id));
+  assert.ok(rows.every(row => row.submissionWorkflowVersion === 4 && row.finalReportGroupId === rows[0].finalReportGroupId && row.finalReportId === `FPR-${fixture.eventId}`));
+  // One Admin decision approves the whole final report, leftovers included.
+  const approved = await service.reviewOfficialSubmission(admin, narra, true);
+  assert.equal(approved.acceptedQuantity, 14); assert.equal(approved.acceptedLeftoverQuantity, 2); assert.equal(approved.reportingProgress, "Completed");
   assert.deepEqual(approved.acceptedSeedlingsByInventory, { narra: 8, molave: 6 });
+  assert.deepEqual(approved.submissions.map(row => row.workflowStatus), ["Completed", "Completed"]);
+  await assert.rejects(service.reviewOfficialSubmission(admin, molave, true), error => error.status === 409, "the group was already decided");
 });
-test("partial multi-type reporting records only reported types and keeps the rest available", async () => {
+test("legacy partial multi-type reporting records only reported types and keeps the rest available", () => legacyReporting(async () => {
   const fixture = seedTwoSpecies("two-species-partial");
   const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }] });
   assert.deepEqual(report.submissions.map(row => row.inventoryId), ["narra"]);
   assert.equal(report.reportingProgress, "Partial"); assert.equal(report.remainingAvailableQuantity, 6);
   const [option] = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options;
   assert.deepEqual(option.items.map(row => [row.inventoryId, row.availableQuantity]), [["narra", 0], ["molave", 6]]);
-  const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 1, items: [{ inventoryId: "narra", quantityPlanted: 0, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 5, leftoverQuantity: 1 }] });
+  const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 1, items: [{ inventoryId: "narra", quantityPlanted: 0, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 5, leftoverQuantity: 1, leftoverReason: "Seedlings damaged in transport" }] });
   assert.equal(second.officialSubmissionIds.length, 1, "a type with nothing left to report creates no empty submission");
   assert.equal(second.quantityPlanted, 15); assert.equal(second.declaredLeftoverQuantity, 1); assert.equal(second.remainingAvailableQuantity, 0);
   await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 2, items: [{ inventoryId: "molave", quantityPlanted: 1, leftoverQuantity: 0 }] }), error => error.status === 409);
+}));
+
+test("a final Staff report must include every released type with a balance and give a reason for leftovers", async () => {
+  const fixture = seedTwoSpecies("final-rules");
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }] }),
+    error => error.status === 409 && /every released seedling type/.test(error.message));
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2 }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] }),
+    error => error.status === 400 && Boolean(error.fieldErrors?.["leftoverReason-0"]));
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2, leftoverReason: "x".repeat(501) }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] }),
+    error => error.status === 400);
+  assert.equal(memory.records("events").get(fixture.eventId).recordedSeedlingQuantity || 0, 0, "refused reports change no balance");
+});
+
+test("a pending or approved final report blocks a second independent report; a rejection allows a new revision", async () => {
+  const fixture = seedTwoSpecies("final-duplicate");
+  const items = [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 5, leftoverQuantity: 1, leftoverReason: "Seedlings damaged in transport" }];
+  const first = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items });
+  // Even with a balance somehow available, a second report for the same event is refused while the first is pending.
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 1, items }), error => error.status === 409);
+  await service.reviewOfficialSubmission(admin, first.officialSubmissionIds[1], "reject", "Wrong event recorded");
+  const rejected = first.officialSubmissionIds.map(id => memory.records("plantingContributions").get(id));
+  assert.deepEqual(rejected.map(row => row.workflowStatus), ["Rejected", "Rejected"], "rejection applies to the whole report");
+  assert.deepEqual(memory.records("events").get(fixture.eventId).recordedSeedlingsByInventory, { narra: 0, molave: 0 }, "rejection releases every type");
+  const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 2, items });
+  const revision = memory.records("plantingContributions").get(second.officialSubmissionIds[0]);
+  assert.equal(revision.finalReportId, rejected[0].finalReportId, "same logical report");
+  assert.equal(revision.finalReportRevision, 1);
+  assert.deepEqual(second.submissions.filter(row => row.workflowStatus === "Rejected").length, 2, "rejection history is preserved");
+});
+
+test("Admin return sends the whole final report back; the Staff correction resubmits every type as the next revision", async () => {
+  const fixture = seedTwoSpecies("final-return");
+  const first = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] });
+  await service.reviewOfficialSubmission(admin, first.officialSubmissionIds[0], "return", "Molave quantity needs the field sheet", fieldReturn("items.molave.leftoverQuantity"));
+  assert.deepEqual(first.officialSubmissionIds.map(id => memory.records("plantingContributions").get(id).workflowStatus), ["Returned for Correction", "Returned for Correction"]);
+  await assert.rejects(service.submitOfficialReport({ ...staff, uid: "staff-other" }, { ...payload(fixture.requestId), expectedVersion: 2, correctionOf: first.officialSubmissionIds[0],
+    items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] }), error => error.status === 409, "only the original Staff submitter corrects it");
+  const corrected = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 2, correctionOf: first.officialSubmissionIds[0],
+    items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 5, leftoverQuantity: 1, leftoverReason: "Seedlings damaged in transport" }] });
+  const old = first.officialSubmissionIds.map(id => memory.records("plantingContributions").get(id));
+  const next = corrected.officialSubmissionIds.map(id => memory.records("plantingContributions").get(id));
+  assert.ok(old.every(row => row.correctedBySubmission === corrected.officialSubmissionIds[0]));
+  assert.deepEqual(next.map(row => [row.inventoryId, row.correctionOf, row.workflowStatus]),
+    [["narra", first.officialSubmissionIds[0], "Pending Admin Approval"], ["molave", first.officialSubmissionIds[1], "Pending Admin Approval"]]);
+  assert.equal(next[0].finalReportId, old[0].finalReportId); assert.equal(next[0].finalReportRevision, 1);
+});
+
+// --------------------------------------------------------------------------
+// Phase 3: field-specific Admin Return for Correction on Staff final reports
+// --------------------------------------------------------------------------
+const REASON_TEXT = "Seedlings damaged in transport";
+async function submittedFinal(suffix, { evidence = true } = {}) {
+  const fixture = seedTwoSpecies(suffix);
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), remarks: "Planted with the barangay council",
+    items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2, leftoverReason: REASON_TEXT }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] });
+  const [lead, second] = report.officialSubmissionIds;
+  if (evidence) verifiedEvidence(lead);
+  return { fixture, lead, second, ids: report.officialSubmissionIds };
+}
+const rowOf = (id) => memory.records("plantingContributions").get(id);
+const correctionInput = (fixture, correctionOf, overrides = {}) => ({ ...payload(fixture.requestId), expectedVersion: 2, correctionOf,
+  remarks: "Planted with the barangay council",
+  items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2, leftoverReason: REASON_TEXT }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }],
+  ...overrides });
+
+test("Admin selects actual submitted fields with required comments; selection is validated server-side", async () => {
+  const { lead } = await submittedFinal("p3-select");
+  const ret = (fields) => service.reviewOfficialSubmission(admin, lead, "return", "Some values need correction", { fields });
+  await assert.rejects(ret(undefined), (error) => error.status === 400 && /at least one/.test(error.message));
+  await assert.rejects(ret([]), (error) => error.status === 400);
+  for (const path of ["plantingDate", "siteId", "eventId", "items.narra.quantity", "items.unknown.leftoverQuantity", "items.molave.leftoverReason", "evidence.attendance"]) {
+    await assert.rejects(ret([{ path, comment: "x" }]), (error) => error.status === 400, `${path} is not a submitted, correctable field`);
+  }
+  await assert.rejects(ret([{ path: "remarks", comment: "x" }, { path: "remarks", comment: "y" }]), (error) => error.status === 400, "each field once");
+  await assert.rejects(ret([{ path: "remarks", comment: "   " }]), (error) => error.status === 400 && /comment/.test(error.message));
+  await assert.rejects(ret([{ path: "remarks", comment: "x".repeat(1001) }]), (error) => error.status === 400);
+  await assert.rejects(service.reviewOfficialSubmission(admin, lead, "reject", "No", { fields: [{ path: "remarks", comment: "x" }] }), (error) => error.status === 400);
+  assert.equal(rowOf(lead).workflowStatus, "Pending Admin Approval", "refused selections change nothing");
+
+  const returned = await ret([
+    { path: "items.narra.leftoverQuantity", comment: "The field sheet shows 3 leftovers" },
+    { path: "evidence.photos", comment: "Photos are from the wrong corner of the site" },
+  ]);
+  for (const row of returned.submissions) {
+    assert.equal(row.workflowStatus, "Returned for Correction");
+    assert.deepEqual(row.correctionRequest.fields.map((field) => [field.path, field.label, field.comment, field.previousValue]), [
+      ["items.narra.leftoverQuantity", "Narra — Final Leftovers", "The field sheet shows 3 leftovers", 2],
+      ["evidence.photos", "Planting Evidence Photos", "Photos are from the wrong corner of the site", { submissionId: lead, revision: 0 }],
+    ]);
+    assert.equal(row.correctionRequest.requestedBy, admin.uid); assert.equal(row.correctionRequest.revision, 0);
+  }
+  const log = [...memory.records("verificationLogs").values()].find((entry) => entry.action === "Admin Return for Correction" && entry.submissionId === lead);
+  assert.deepEqual(log.correctionFields.map((field) => field.path), ["items.narra.leftoverQuantity", "evidence.photos"]);
+  assert.match(memory.records("notifications").get(`official_planting_${lead}_correction`).message, /Fields to correct: Narra — Final Leftovers, Planting Evidence Photos/);
+});
+
+test("the Staff resubmission may change only the returned fields (and a returned leftover's reason)", async () => {
+  const { fixture, lead, ids } = await submittedFinal("p3-enforce");
+  await service.reviewOfficialSubmission(admin, lead, "return", "Recount Narra", { fields: [{ path: "items.narra.leftoverQuantity", comment: "Recount" }] });
+  const before = { ...memory.records("events").get(fixture.eventId) };
+  const blocked = [
+    ["items.molave.leftoverQuantity", correctionInput(fixture, lead, { items: [{ inventoryId: "narra", leftoverQuantity: 3, leftoverReason: REASON_TEXT }, { inventoryId: "molave", leftoverQuantity: 1, leftoverReason: "x" }] })],
+    ["remarks", correctionInput(fixture, lead, { remarks: "Changed remarks" })],
+    ["confirmationBasis", correctionInput(fixture, lead, { confirmationBasis: "release-based" })],
+  ];
+  for (const [path, input] of blocked) {
+    await assert.rejects(service.submitOfficialReport(staff, input), (error) => error.status === 409 && Boolean(error.fieldErrors?.[`field-${path}`]), `${path} was not returned`);
+  }
+  await assert.rejects(service.submitOfficialReport({ ...staff, uid: "staff-other" }, correctionInput(fixture, lead, { items: [{ inventoryId: "narra", leftoverQuantity: 3, leftoverReason: REASON_TEXT }, { inventoryId: "molave", leftoverQuantity: 0 }] })),
+    (error) => error.status === 409, "only the original Staff submitter");
+  assert.deepEqual(memory.records("events").get(fixture.eventId).recordedSeedlingsByInventory, before.recordedSeedlingsByInventory, "refused corrections change no balance");
+  // The selected leftover changes; its dependent reason may change with it. Planted is recomputed.
+  const corrected = await service.submitOfficialReport(staff, correctionInput(fixture, lead, {
+    items: [{ inventoryId: "narra", leftoverQuantity: 3, leftoverReason: "Three seedlings were damaged" }, { inventoryId: "molave", leftoverQuantity: 0 }] }));
+  const next = corrected.officialSubmissionIds.map(rowOf);
+  assert.deepEqual(next.map((row) => [row.inventoryId, row.quantity, row.leftoverQuantity, row.leftoverReason]), [["narra", 7, 3, "Three seedlings were damaged"], ["molave", 6, 0, ""]]);
+  assert.ok(next.every((row) => row.finalReportId === rowOf(lead).finalReportId && row.finalReportRevision === 1 && row.revision === 1));
+  assert.deepEqual(next.map((row) => row.correctionOf), ids, "each type links to the returned revision");
+  assert.ok(ids.every((id) => rowOf(id).correctionRequest && rowOf(id).correctedBySubmission === corrected.officialSubmissionIds[0]), "returned revision keeps its request and values");
+  assert.equal(rowOf(ids[0]).leftoverQuantity, 2, "previous values are preserved");
+});
+
+test("unchanged verified evidence is carried forward; Admin can approve the correction without new photos", async () => {
+  const { fixture, lead, ids } = await submittedFinal("p3-carry");
+  await service.reviewOfficialSubmission(admin, lead, "return", "Remarks incomplete", { fields: [{ path: "remarks", comment: "Name the barangay council members" }] });
+  const corrected = await service.submitOfficialReport(staff, correctionInput(fixture, lead, { remarks: "Planted with Kagawad Reyes and Kagawad Cruz" }));
+  const [nextLead] = corrected.officialSubmissionIds;
+  const row = rowOf(nextLead);
+  assert.equal(row.hasVerifiedPlantingEvidence, true); assert.equal(row.evidenceCarriedFromSubmissionId, lead);
+  assert.deepEqual(row.photos, [], "evidence is referenced, never copied");
+  assert.equal(rowOf(lead).evidenceCarriedForwardTo, nextLead);
+  const op = memory.records("officialPlantingOperations").get(row.officialOperationId);
+  assert.deepEqual(op.evidenceCarriedFrom, { operationId: rowOf(lead).officialOperationId, submissionId: lead, revision: 0 });
+  assert.equal(op.evidenceVerified, true); assert.equal(op.evidenceRevision, 1);
+  const approved = await service.reviewOfficialSubmission(admin, nextLead, true);
+  assert.equal(approved.reportingProgress, "Completed"); assert.equal(approved.acceptedQuantity, 14);
+  assert.deepEqual(approved.submissions.filter((entry) => !ids.includes(entry.id)).map((entry) => entry.workflowStatus), ["Completed", "Completed"]);
+  // Tampered carry-forward references are refused.
+  const other = await submittedFinal("p3-carry-tamper");
+  await service.reviewOfficialSubmission(admin, other.lead, "return", "Remarks", { fields: [{ path: "remarks", comment: "x" }] });
+  const second = await service.submitOfficialReport(staff, correctionInput(other.fixture, other.lead, { remarks: "Updated" }));
+  const tamperedOp = memory.records("officialPlantingOperations").get(rowOf(second.officialSubmissionIds[0]).officialOperationId);
+  tamperedOp.evidenceCarriedFrom = { ...tamperedOp.evidenceCarriedFrom, operationId: "someone-else" };
+  await assert.rejects(service.reviewOfficialSubmission(admin, second.officialSubmissionIds[0], true), (error) => error.status === 409 && /Verified private planting photos/.test(error.message));
+});
+
+test("an evidence-related correction requires new verified evidence before approval", async () => {
+  const { fixture, lead } = await submittedFinal("p3-reverify");
+  await service.reviewOfficialSubmission(admin, lead, "return", "Retake photos", { fields: [{ path: "evidence.photos", comment: "Photos do not show the seedlings" }] });
+  const corrected = await service.submitOfficialReport(staff, correctionInput(fixture, lead));
+  const [nextLead] = corrected.officialSubmissionIds;
+  assert.equal(rowOf(nextLead).hasVerifiedPlantingEvidence, undefined);
+  await assert.rejects(service.reviewOfficialSubmission(admin, nextLead, true), (error) => error.status === 409 && /Verified private planting photos/.test(error.message));
+  verifiedEvidence(nextLead);
+  assert.equal((await service.reviewOfficialSubmission(admin, nextLead, true)).reportingProgress, "Completed");
+});
+
+test("final reports returned before field selection existed are still corrected as a whole", async () => {
+  const { fixture, lead } = await submittedFinal("p3-legacy-return");
+  // A Phase 2 return: no correctionRequest stored.
+  for (const id of [lead, `${lead.slice(0, -2)}_1`]) Object.assign(rowOf(id), { staffReviewStatus: "Rejected", workflowStatus: "Returned for Correction", returnReason: "Old return" });
+  const event = memory.records("events").get(fixture.eventId);
+  Object.assign(event, { recordedSeedlingsByInventory: { narra: 0, molave: 0 }, leftoverSeedlingsByInventory: { narra: 0, molave: 0 }, officialReportingVersion: 2 });
+  Object.assign(memory.records("plantingReports").get(fixture.reportId), { activeSubmittedQuantity: 0, pendingReviewQuantity: 0, declaredLeftoverQuantity: 0, pendingReviewLeftoverQuantity: 0 });
+  const corrected = await service.submitOfficialReport(staff, correctionInput(fixture, lead, { remarks: "Anything may change", items: [{ inventoryId: "narra", leftoverQuantity: 0 }, { inventoryId: "molave", leftoverQuantity: 1, leftoverReason: "One wilted" }] }));
+  assert.deepEqual(corrected.officialSubmissionIds.map(rowOf).map((row) => [row.inventoryId, row.quantity, row.leftoverQuantity]), [["narra", 10, 0], ["molave", 5, 1]]);
 });

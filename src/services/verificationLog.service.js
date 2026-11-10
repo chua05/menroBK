@@ -19,6 +19,13 @@ const createVerificationLogInTransaction = (
     performedByName,
     remarks,
     createdAt,
+    // Final planting reports: every row decided together, and the stable
+    // logical report it belongs to.
+    finalReportId,
+    finalReportGroupId,
+    submissionIds,
+    // Field-specific Return for Correction: [{ path, label, comment }].
+    correctionFields,
   }
 ) => {
   const logRef =
@@ -28,6 +35,14 @@ const createVerificationLogInTransaction = (
     plantingReportId,
 
     ...(submissionId ? { submissionId } : {}),
+
+    ...(finalReportId ? { finalReportId } : {}),
+
+    ...(finalReportGroupId ? { finalReportGroupId } : {}),
+
+    ...(Array.isArray(submissionIds) && submissionIds.length ? { submissionIds } : {}),
+
+    ...(Array.isArray(correctionFields) && correctionFields.length ? { correctionFields } : {}),
 
     ...(performedByName ? { performedByName } : {}),
 
