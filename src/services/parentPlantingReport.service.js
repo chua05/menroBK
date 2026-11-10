@@ -164,6 +164,9 @@ async function reportDetails(id, data) {
     contributions.find((entry) => entry.photos?.length) || latestContribution;
   const primaryPhoto = primaryContribution?.photos?.[0] || null;
   const suspiciousFlags = [...new Set(evidence.flatMap((photo) => photo.suspiciousFlags || []))];
+  // A release with several seedling types is one report; never summarize it as its first species.
+  const reportedSpecies = [...new Set(species.map((item) => String(item.species || "").trim()).filter(Boolean))];
+  const multipleSpecies = species.length > 1;
   return {
     id, ...data,
     verificationStatus: summary.reportingProgress,
@@ -175,10 +178,10 @@ async function reportDetails(id, data) {
     participantBarangay: primaryContribution?.participantBarangay || data.participantBarangay || data.barangay || "",
     organizationAffiliation: primaryContribution?.organizationAffiliation || data.organizationAffiliation || "",
     participantContactNumber: primaryContribution?.participantContactNumber || data.participantContactNumber || "",
-    species: primaryContribution?.species || data.species || "",
+    species: multipleSpecies && reportedSpecies.length ? reportedSpecies.join(", ") : primaryContribution?.species || data.species || "",
     plantingDate: primaryContribution?.plantingDate || data.plantingDate || data.eventDate || "",
-    requestedQuantity: primaryContribution?.requestedQuantity ?? data.requestedQuantity ?? null,
-    releasedItemQuantity: primaryContribution?.releasedQuantity ?? null,
+    requestedQuantity: multipleSpecies ? data.requestedQuantity ?? null : primaryContribution?.requestedQuantity ?? data.requestedQuantity ?? null,
+    releasedItemQuantity: multipleSpecies ? null : primaryContribution?.releasedQuantity ?? null,
     locationSource: primaryContribution?.locationSource || primaryPhoto?.locationSource || data.locationSource || "",
     gpsAccuracyMeters: primaryContribution?.gpsAccuracyMeters ?? primaryPhoto?.locationAccuracyMeters ?? null,
     locationCapturedAt: primaryContribution?.locationCapturedAt ?? primaryPhoto?.locationCapturedAt ?? null,
