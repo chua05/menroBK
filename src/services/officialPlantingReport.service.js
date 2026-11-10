@@ -6,7 +6,8 @@ const { reportDetails, normalizeSubmission } = require("./parentPlantingReport.s
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { WORKFLOW_STATUS, deriveWorkflowStatus, requiredReason, optionalRemarks } = require("../utils/plantingReviewWorkflow.util");
 const { FINAL_REPORT_VERSION, MAX_LEFTOVER_REASON_LENGTH, finalReportIdFor, isFinalReportRow, assertNoActiveFinalReport,
-  nextFinalRevision, sortGroupRows } = require("../utils/finalPlantingReport.util");
+  nextFinalRevision, sortGroupRows, EVIDENCE_FIELD_PATHS, staffCorrectableFields, parseCorrectionFields,
+  editableCorrectionPaths, correctionChanges } = require("../utils/finalPlantingReport.util");
 const DECISIONS = { approve: "approve", reject: "reject", return: "return" };
 // Same switch as the Participant path (plantingReport.service): one final report per event.
 const finalReportEnforced = () => String(process.env.PLANTING_FINAL_REPORT_ENFORCED ?? "true").trim().toLowerCase() !== "false";
@@ -137,6 +138,32 @@ async function submitOfficialReport(user, input) {
       if (!correctedRows.length || correctedRows.some(row => !correctable(row)) ||
           !enforced && (input.items.length !== 1 || input.items[0].inventoryId !== correction.inventoryId)) throw fail(409, "This submission cannot be corrected.");
     }
+    // Field-specific return (Phase 3): only the fields Admin selected (and a
+    // selected leftover's reason) may change. Reports returned before field
+    // selection existed are corrected as a whole, as before.
+    const correctionRequest = correctedRows.length && isFinalReportRow(correctedRows[0]) ? correctedRows[0].correctionRequest || null : null;
+    let carriedEvidence = null, carriedAttendanceFrom = "";
+    if (correctionRequest) {
+      const previous = sortGroupRows(correctedRows);
+      const selectedPaths = (correctionRequest.fields || []).map(field => field.path);
+      const editable = editableCorrectionPaths(selectedPaths);
+      const blocked = correctionChanges(previous, { items: input.items, confirmationBasis: input.confirmationBasis, remarks: input.remarks })
+        .filter(path => !editable.has(path));
+      if (blocked.length) {
+        throw fail(409, "Only the fields MENRO Admin returned for correction can be changed.",
+          Object.fromEntries(blocked.map(path => [`field-${path}`, "This field was not returned for correction."])));
+      }
+      const priorOperationDoc = await transaction.get(db.collection("officialPlantingOperations").doc(previous[0].officialOperationId));
+      const priorOperation = priorOperationDoc.exists ? priorOperationDoc.data() : {};
+      // Unchanged, verified evidence stays bound to the revision that verified
+      // it and is referenced, never copied; an evidence-related correction
+      // requires new verification.
+      if (!selectedPaths.some(path => EVIDENCE_FIELD_PATHS.includes(path)) && priorOperation.evidenceVerified === true && safeId(priorOperation.evidenceSubmissionId)) {
+        carriedEvidence = { operationId: previous[0].officialOperationId, submissionId: priorOperation.evidenceSubmissionId,
+          revision: Number(priorOperation.evidenceRevision || 0) };
+      }
+      if (!selectedPaths.includes("evidence.attendance") && priorOperation.attendance) carriedAttendanceFrom = previous[0].id;
+    }
     if (enforced) assertNoActiveFinalReport(existingRows);
     const adminRecipients = await require("./notification.service").getRoleRecipientsInTransaction(transaction, ["admin"]);
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) }, leftovers = { ...(event.leftoverSeedlingsByInventory || {}) };
@@ -172,6 +199,10 @@ async function submitOfficialReport(user, input) {
     const progress = progressFor({ released: parent.quantityReleased, active, accepted: Number(parent.acceptedQuantity || 0), pending, leftovers: declaredLeftovers, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers });
     const finalFields = enforced ? { finalReportId: finalReportIdFor(eventDoc.id), finalReportGroupId: operationId, finalReportRevision: nextFinalRevision(existingRows),
       confirmationMode: "final", ...(correctedRows.length ? { finalReportCorrectionOfGroup: correctedRows[0].finalReportGroupId || correctedRows[0].id } : {}) } : {};
+    const carriedFields = {
+      ...(carriedEvidence ? { hasVerifiedPlantingEvidence: true, officialEvidenceSubmissionId: carriedEvidence.submissionId, evidenceCarriedFromSubmissionId: carriedEvidence.submissionId } : {}),
+      ...(carriedAttendanceFrom ? { attendanceCarriedFromSubmissionId: carriedAttendanceFrom } : {}),
+    };
     for (const [groupIndex, row] of rows.entries()) {
       const { id, ...values } = row;
       const prior = correctedRows.find(entry => entry.inventoryId === row.inventoryId) || null;
@@ -181,10 +212,11 @@ async function submitOfficialReport(user, input) {
         confirmationBasis: input.confirmationBasis, participantId: request.participantId, contributorId: user.uid,
         contributorName: user.fullName || user.name || "MENRO Staff", authenticatedSubmitterUid: user.uid, submittedByName: user.fullName || user.name || "MENRO Staff", submittedByType: "MENRO Staff",
         requesterName: option.requesterName, participantSector: option.participantSector, siteId: event.plantingSiteId,
-        plantingDate: event.date, verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", workflowStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, photos: [], remarks: input.remarks.trim(),
+        plantingDate: event.date, verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", workflowStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, photos: [], remarks: input.remarks.trim(), ...carriedFields,
         ...(prior ? { correctionOf: prior.id, revision: Number(prior.revision || 0) + 1 } : { revision: correction ? Number(correction.revision || 0) + 1 : 0 }), createdAt: now, updatedAt: now });
     }
-    for (const row of correctedRows) transaction.update(db.collection("plantingContributions").doc(row.id), { correctedBySubmission: rows[0].id });
+    for (const row of correctedRows) transaction.update(db.collection("plantingContributions").doc(row.id), { correctedBySubmission: rows[0].id,
+      ...(carriedEvidence && row.id === carriedEvidence.submissionId ? { evidenceCarriedForwardTo: rows[0].id } : {}) });
     transaction.update(eventRef, { recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftovers,
       recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + planted, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) + leftover,
       remainingSeedlingQuantity: Math.max(0, event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) - planted - leftover),
@@ -192,12 +224,15 @@ async function submitOfficialReport(user, input) {
     transaction.update(parentRef, { officialPlantingWorkflow: true, quantityPlanted: active, activeSubmittedQuantity: active, pendingReviewQuantity: pending, declaredLeftoverQuantity: declaredLeftovers,
       pendingReviewLeftoverQuantity: pendingLeftovers, remainingAvailableQuantity: Math.max(0, Number(parent.quantityReleased) - active - declaredLeftovers), reportingProgress: progress, verificationStatus: progress, submittedAt: now, updatedAt: now,
       ...(!parent.earlyMonitoringOriginalSubmittedAt && activationState().enabled ? { earlyMonitoringOriginalSubmittedAt: now } : {}) });
-    transaction.create(operationRef, { staffId: user.uid, requestId: requestDoc.id, eventId: eventDoc.id, reportId: parentId, fingerprint, submissionIds: rows.map(row => row.id), createdAt: now });
+    transaction.create(operationRef, { staffId: user.uid, requestId: requestDoc.id, eventId: eventDoc.id, reportId: parentId, fingerprint, submissionIds: rows.map(row => row.id), createdAt: now,
+      // Carried evidence keeps its original verification and is accepted for this revision.
+      ...(carriedEvidence ? { evidenceVerified: true, evidenceSubmissionId: carriedEvidence.submissionId,
+        evidenceRevision: Number(correctedRows[0].revision || 0) + 1, evidenceCarriedFrom: carriedEvidence } : {}) });
     const staffName = user.fullName || user.name || "MENRO Staff";
     require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: rows[0].id,
       action: correction ? "Staff Resubmission" : "Staff Submission", previousStatus: correction ? WORKFLOW_STATUS.RETURNED : "",
       newStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, performedBy: user.uid, performedByRole: "staff", performedByName: staffName,
-      remarks: correction ? `Corrected submission ${correctionRef.id}.` : "", createdAt: now });
+      remarks: correction ? `Corrected submission ${correctionRef.id}.${correctionRequest ? ` Corrected fields: ${correctionRequest.fields.map(field => field.label).join(", ")}.${carriedEvidence ? " Verified evidence carried forward." : ""}` : ""}` : "", createdAt: now });
     adminRecipients.forEach(recipient => require("./notification.service").createNotificationInTransaction(transaction, {
       notificationId: `official_planting_submitted_${operationId}_${recipient.id}`, recipientUserId: recipient.id,
       type: correction ? "planting_report_resubmitted" : "planting_report_submitted_admin",
@@ -211,7 +246,7 @@ async function submitOfficialReport(user, input) {
 // Admin decides each official Staff submission: approve (Completed), reject
 // (Rejected, final) or return for correction to the original Staff submitter.
 // Legacy boolean callers keep their meaning: true = approve, false = return.
-async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "") {
+async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "", options = {}) {
   if (!user?.uid || String(user.role).toLowerCase() !== "admin") throw fail(user?.uid ? 403 : 401, "Only MENRO Admin may verify an official Staff planting report.");
   const decision = decisionInput === true ? DECISIONS.approve : decisionInput === false ? DECISIONS.return : DECISIONS[decisionInput];
   if (!decision) throw fail(400, "Select approve, reject or return for correction.");
@@ -231,13 +266,25 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     if (!rows.some(row => row.id === requested.id)) throw fail(409, "The final planting report changed. Refresh and try again.");
     const current = rows[0], decidedIds = rows.map(row => row.id);
     if (rows.some(row => row.staffReviewStatus !== "Pending Review" || deriveWorkflowStatus(row) !== WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL)) throw fail(409, "Only pending official submissions can be decided.");
+    // A returned final report names the actual submitted fields to correct, each with a comment.
+    let correctionFields = null;
+    if (decision === DECISIONS.return && isFinalReportRow(current)) {
+      const operationDoc = await transaction.get(db.collection("officialPlantingOperations").doc(current.officialOperationId));
+      correctionFields = parseCorrectionFields(options.fields, staffCorrectableFields(rows, operationDoc.exists ? operationDoc.data() : {}));
+    } else if (Array.isArray(options.fields) && options.fields.length) {
+      throw fail(400, "Field-specific correction applies only when returning a final Staff planting report.", { fields: "Field selection is not available for this decision." });
+    }
     if (approve && current.confirmationBasis === "menro-field-report") {
       const operation = await transaction.get(db.collection("officialPlantingOperations").doc(current.officialOperationId));
       const evidenceId = operation.data()?.evidenceSubmissionId;
       const evidence = evidenceId ? await transaction.get(db.collection("plantingContributions").doc(evidenceId)) : null;
       const photos = evidence?.data()?.photos;
+      // Evidence carried forward from an earlier revision stays bound to the operation that verified it.
+      const carried = operation.data()?.evidenceCarriedFrom;
+      const evidenceOperationId = carried ? carried.operationId : current.officialOperationId;
       if (!operation.exists || operation.data().evidenceVerified !== true || Number(operation.data().evidenceRevision) !== Number(current.revision || 0) ||
-          !evidence?.exists || evidence.data().officialOperationId !== current.officialOperationId || evidence.data().authenticatedSubmitterUid !== current.authenticatedSubmitterUid ||
+          carried && (carried.submissionId !== evidenceId || Number(evidence?.data()?.revision || 0) !== Number(carried.revision)) ||
+          !evidence?.exists || evidence.data().officialOperationId !== evidenceOperationId || evidence.data().authenticatedSubmitterUid !== current.authenticatedSubmitterUid ||
           !photos?.length || photos.some(photo => !photo.privateEvidence || !photo.gpsValid || !photo.siteGpsValid || !photo.timestampValid)) {
         throw fail(409, "Verified private planting photos are required before approving a MENRO Field Report.");
       }
@@ -291,16 +338,18 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     for (const row of rows) transaction.update(db.collection("plantingContributions").doc(row.id), { staffReviewStatus: approve ? "Accepted" : "Rejected", workflowStatus: nextStage, reviewedBy: user.uid, reviewedByName: adminName, reviewedAt: now,
       adminDecisionBy: user.uid, adminDecisionByName: adminName, adminDecisionAt: now, reviewRemarks: reason,
       ...(decision === DECISIONS.reject ? { rejectionReason: reason } : {}),
-      ...(decision === DECISIONS.return ? { returnReason: reason, returnedBy: user.uid, returnedByName: adminName, returnedByRole: "admin", returnedAt: now } : {}), updatedAt: now });
+      ...(decision === DECISIONS.return ? { returnReason: reason, returnedBy: user.uid, returnedByName: adminName, returnedByRole: "admin", returnedAt: now } : {}),
+      ...(correctionFields ? { correctionRequest: { fields: correctionFields, reason, requestedBy: user.uid, requestedByName: adminName, requestedAt: now, revision: Number(current.revision || 0) } } : {}), updatedAt: now });
     const key = current.id;
     require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: key,
       ...(isFinalReportRow(current) ? { finalReportId: current.finalReportId || "", finalReportGroupId: current.finalReportGroupId, submissionIds: decidedIds } : {}),
+      ...(correctionFields ? { correctionFields: correctionFields.map(({ path, label, comment }) => ({ path, label, comment })) } : {}),
       action: approve ? "Admin Approval" : decision === DECISIONS.reject ? "Admin Rejection" : "Admin Return for Correction",
       previousStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, newStatus: nextStage, performedBy: user.uid, performedByRole: "admin", performedByName: adminName, remarks: reason, createdAt: now });
     const notice = {
       approve: { key: "accepted", type: "planting_report_accepted", title: "Official Planting Report Approved", message: "MENRO Admin approved your official planting report. The planted quantity is now confirmed." },
       reject: { key: "rejected", type: "planting_report_rejected", title: "Official Planting Report Rejected", message: `MENRO Admin rejected your official planting report. This decision is final. Reason: ${reason}` },
-      return: { key: "correction", type: "planting_report_returned", title: "Official Planting Report Returned for Correction", message: `MENRO Admin returned your official planting report for correction. Reason: ${reason}` },
+      return: { key: "correction", type: "planting_report_returned", title: "Official Planting Report Returned for Correction", message: `MENRO Admin returned your official planting report for correction. Reason: ${reason}${correctionFields ? ` Fields to correct: ${correctionFields.map(field => field.label).join(", ")}.` : ""}` },
     }[decision];
     require("./notification.service").createNotificationInTransaction(transaction, { notificationId: `official_planting_${key}_${notice.key}`, recipientUserId: current.authenticatedSubmitterUid,
       type: notice.type, title: notice.title, message: notice.message,

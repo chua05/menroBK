@@ -24,6 +24,8 @@ const createVerificationLogInTransaction = (
     finalReportId,
     finalReportGroupId,
     submissionIds,
+    // Field-specific Return for Correction: [{ path, label, comment }].
+    correctionFields,
   }
 ) => {
   const logRef =
@@ -39,6 +41,8 @@ const createVerificationLogInTransaction = (
     ...(finalReportGroupId ? { finalReportGroupId } : {}),
 
     ...(Array.isArray(submissionIds) && submissionIds.length ? { submissionIds } : {}),
+
+    ...(Array.isArray(correctionFields) && correctionFields.length ? { correctionFields } : {}),
 
     ...(performedByName ? { performedByName } : {}),
 

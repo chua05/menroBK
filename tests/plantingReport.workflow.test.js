@@ -635,3 +635,25 @@ test("Participant approval on a mixed report refuses drifted per-species totals 
   assert.equal(table("plantingContributions").get("drift-participant").workflowStatus, "Reviewed", "nothing was written");
   assert.equal(table("plantingReports").get(reportId).acceptedQuantity, 55);
 });
+
+test("field-specific correction is for Staff reports only; the controller passes the Admin's field selection", async () => {
+  table("plantingContributions").set("participant-fields", { id: "participant-fields", reportId: "event_x", eventId: "x", inventoryId: "narra", quantity: 1,
+    participantId: "participant-1", staffReviewStatus: "Pending Review", workflowStatus: "Pending Review", photos: [{ photoPath: "p.jpg" }] });
+  await assert.rejects(service.returnPlantingReport("participant-fields", STAFF.uid, "Fix it", STAFF.name, STAFF.role, { fields: [{ path: "remarks", comment: "x" }] }),
+    (error) => error.status === 400 && /Staff-submitted/.test(error.message));
+  assert.equal(table("plantingContributions").get("participant-fields").workflowStatus, "Pending Review", "nothing changed");
+  // The controller forwards { fields } to the decision service.
+  const official = require("../src/services/officialPlantingReport.service");
+  const original = official.reviewOfficialSubmission;
+  let received;
+  official.reviewOfficialSubmission = async (...args) => { received = args; return { id: "event_x" }; };
+  table("plantingContributions").set("official-fields", { officialStaffReport: true });
+  try {
+    let status;
+    await controller.returnReport({ params: { id: "official-fields" }, user: { uid: "admin-1", role: "admin", fullName: "Admin" },
+      body: { remarks: "Fix", fields: [{ path: "remarks", comment: "Add names" }] } },
+    { status(code) { status = code; return this; }, json() { return this; } });
+    assert.equal(status, 200);
+    assert.deepEqual(received.slice(2), ["return", "Fix", { fields: [{ path: "remarks", comment: "Add names" }] }]);
+  } finally { official.reviewOfficialSubmission = original; }
+});

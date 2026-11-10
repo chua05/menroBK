@@ -32,19 +32,26 @@ const FORM_REQUEST_ID = `${PREFIX}-form-request`;
 const FORM_EVENT_ID = `${PREFIX}-form-event`;
 const FORM_REPORT_ID = `event_${FORM_EVENT_ID}`;
 const FORM_SITE_ID = `${PREFIX}-form-site`;
+// A third release (individual requester) with a Staff final report for the
+// field-specific Return for Correction flow.
+const STAFF_REQUEST_ID = `${PREFIX}-staff-request`;
+const STAFF_EVENT_ID = `${PREFIX}-staff-event`;
+const STAFF_REPORT_ID = `event_${STAFF_EVENT_ID}`;
+const STAFF_SITE_ID = `${PREFIX}-staff-site`;
 
 async function cleanup() {
   const deletions = [];
   for (const [collection, field] of [["plantingContributions", "reportId"], ["plantingEvidenceHashes", "reportId"],
-    ["notifications", "relatedRecordId"], ["verificationLogs", "plantingReportId"]]) {
-    for (const reportId of [REPORT_ID, FORM_REPORT_ID]) {
+    ["notifications", "relatedRecordId"], ["verificationLogs", "plantingReportId"], ["officialPlantingOperations", "reportId"]]) {
+    for (const reportId of [REPORT_ID, FORM_REPORT_ID, STAFF_REPORT_ID]) {
       const snapshot = await db.collection(collection).where(field, "==", reportId).get();
       snapshot.docs.forEach((doc) => deletions.push(doc.ref.delete()));
     }
   }
   for (const [collection, id] of [["plantingReports", REPORT_ID], ["events", EVENT_ID],
     ["distributions", REQUEST_ID], ["seedlingRequests", REQUEST_ID], ["sites", SITE_ID],
-    ["plantingReports", FORM_REPORT_ID], ["events", FORM_EVENT_ID], ["sites", FORM_SITE_ID], ["distributions", FORM_REQUEST_ID], ["seedlingRequests", FORM_REQUEST_ID]]) {
+    ["plantingReports", FORM_REPORT_ID], ["events", FORM_EVENT_ID], ["sites", FORM_SITE_ID],
+    ["plantingReports", STAFF_REPORT_ID], ["events", STAFF_EVENT_ID], ["sites", STAFF_SITE_ID], ["distributions", STAFF_REQUEST_ID], ["seedlingRequests", STAFF_REQUEST_ID], ["distributions", FORM_REQUEST_ID], ["seedlingRequests", FORM_REQUEST_ID]]) {
     deletions.push(db.collection(collection).doc(id).delete());
   }
   for (const [uid] of USERS) {
@@ -110,6 +117,37 @@ async function seed() {
     seedlingItems: formItems.map(({ inventoryId, species, quantity }) => ({ inventoryId, species, quantity })), seedlingTotalQuantity: 12 };
   await db.collection("events").doc(FORM_EVENT_ID).set(formEvent);
   await db.runTransaction((transaction) => parentForEventInTransaction(transaction, FORM_EVENT_ID, formEvent, Timestamp.now()));
+
+  // Staff final report (release-based, individual requester): Narra 10 (1 leftover) + Molave 5.
+  await db.collection("sites").doc(STAFF_SITE_ID).set({ siteId: STAFF_SITE_ID, siteName: "View Report Staff Site",
+    barangay: "Bical", municipality: "Bulan", province: "Sorsogon", latitude: 12.673, longitude: 123.877,
+    coverageRadiusMeters: 100, status: "active", archived: false, testFixture: true });
+  const staffItems = [
+    { inventoryId: `${PREFIX}-staff-narra`, species: "Narra", requestedQuantity: 10, releasedQuantity: 10, quantity: 10 },
+    { inventoryId: `${PREFIX}-staff-molave`, species: "Molave", requestedQuantity: 5, releasedQuantity: 5, quantity: 5 },
+  ];
+  await db.collection("seedlingRequests").doc(STAFF_REQUEST_ID).set({ status: "Released", eventId: STAFF_EVENT_ID, requestType: "individual",
+    participantId: USERS[0][0], participantName: "Browser Planter", requestNumber: "REQ-VIEW-STAFF", items: staffItems, testFixture: true });
+  await db.collection("distributions").doc(STAFF_REQUEST_ID).set({ status: "Released", requestId: STAFF_REQUEST_ID,
+    eventId: STAFF_EVENT_ID, participantId: USERS[0][0], participantName: "Browser Planter",
+    plantingSiteId: STAFF_SITE_ID, items: staffItems, totalQuantityReleased: 15, testFixture: true });
+  const staffEvent = { ...event, name: "View Report staff planting", sourceRequestId: STAFF_REQUEST_ID,
+    plantingSiteId: STAFF_SITE_ID, plantingSiteName: "View Report Staff Site",
+    seedlingItems: staffItems.map(({ inventoryId, species, quantity }) => ({ inventoryId, species, quantity })), seedlingTotalQuantity: 15 };
+  await db.collection("events").doc(STAFF_EVENT_ID).set(staffEvent);
+  await db.runTransaction((transaction) => parentForEventInTransaction(transaction, STAFF_EVENT_ID, staffEvent, Timestamp.now()));
+  const staffToken = await signIn(USERS[1][1]);
+  const official = await fetch(`${API}/planting-reports/official`, {
+    method: "POST", headers: { authorization: `Bearer ${staffToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ requestId: STAFF_REQUEST_ID, confirmationBasis: "release-based", remarks: "Planted with the requester",
+      expectedVersion: 0, clientSubmissionId: require("node:crypto").randomUUID(), items: [
+        { inventoryId: `${PREFIX}-staff-narra`, leftoverQuantity: 1, leftoverReason: "One seedling wilted" },
+        { inventoryId: `${PREFIX}-staff-molave`, leftoverQuantity: 0 }] }),
+  });
+  const officialPayload = await official.json();
+  if (official.status !== 201 || officialPayload.success !== true) {
+    throw new Error(`Staff final report failed: ${official.status} ${JSON.stringify(officialPayload)}`);
+  }
 
   const token = await signIn(USERS[0][1]);
   const form = new FormData();

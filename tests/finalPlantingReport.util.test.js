@@ -54,3 +54,36 @@ test("only pending or approved final reports block a new one; revisions continue
   assert.equal(nextFinalRevision([row({ finalReportRevision: 0 }), row({ finalReportRevision: 2 }), { revision: 9 }]), 3);
   assert.equal(finalReportIdFor("EVT-1"), "FPR-EVT-1");
 });
+
+const { staffCorrectableFields, parseCorrectionFields, editableCorrectionPaths, correctionChanges } = require("../src/utils/finalPlantingReport.util");
+
+test("correctable fields come from what was actually submitted; authoritative data is never selectable", () => {
+  const rows = [
+    { inventoryId: "narra", species: "Narra", leftoverQuantity: 2, leftoverReason: "Wilted", confirmationBasis: "menro-field-report", remarks: "R" },
+    { inventoryId: "molave", species: "Molave", leftoverQuantity: 0, confirmationBasis: "menro-field-report", remarks: "R" },
+  ];
+  const paths = (operation) => staffCorrectableFields(rows, operation).map((field) => field.path);
+  assert.deepEqual(paths({}), ["items.narra.leftoverQuantity", "items.narra.leftoverReason", "items.molave.leftoverQuantity", "confirmationBasis", "remarks"]);
+  assert.deepEqual(paths({ evidenceVerified: true, evidenceSubmissionId: "e1", attendance: { sha256: "a" } }).slice(-2), ["evidence.photos", "evidence.attendance"]);
+  const releaseBased = staffCorrectableFields(rows.map((row) => ({ ...row, confirmationBasis: "release-based" })), { evidenceVerified: true });
+  assert.equal(releaseBased.some((field) => field.path === "evidence.photos"), false, "no photo evidence on release-based reports");
+  assert.ok(staffCorrectableFields(rows, {}).every((field) => !/plantingDate|siteId|eventId|requestId|quantityPlanted|\.quantity$/.test(field.path)));
+
+  const allowed = staffCorrectableFields(rows, {});
+  assert.deepEqual(parseCorrectionFields([{ path: "remarks", comment: " Add names " }], allowed), [{ path: "remarks", label: "Remarks", comment: "Add names", previousValue: "R" }]);
+  assert.throws(() => parseCorrectionFields([{ path: "items.molave.leftoverReason", comment: "x" }], allowed), (error) => error.status === 400, "no reason was submitted for molave");
+});
+
+test("only selected fields (and a selected leftover's reason) may differ in the resubmission", () => {
+  const previous = [
+    { inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Wilted", confirmationBasis: "menro-field-report", remarks: "R" },
+    { inventoryId: "molave", leftoverQuantity: 0 },
+  ];
+  const same = { items: [{ inventoryId: "narra", leftoverQuantity: 2, leftoverReason: " Wilted " }, { inventoryId: "molave", leftoverQuantity: 0, leftoverReason: "ignored" }], confirmationBasis: "menro-field-report", remarks: "R " };
+  assert.deepEqual(correctionChanges(previous, same), [], "whitespace and reasons on zero leftovers are not changes");
+  assert.deepEqual(correctionChanges(previous, { ...same, items: [{ inventoryId: "narra", leftoverQuantity: 3, leftoverReason: "Broken" }, same.items[1]], remarks: "New" }),
+    ["items.narra.leftoverQuantity", "items.narra.leftoverReason", "remarks"]);
+  assert.deepEqual(correctionChanges(previous, { ...same, items: [same.items[0]] }), ["items.molave.leftoverQuantity"], "a type cannot be dropped");
+  assert.deepEqual([...editableCorrectionPaths(["items.narra.leftoverQuantity", "remarks"])].sort(),
+    ["items.narra.leftoverQuantity", "items.narra.leftoverReason", "remarks"]);
+});

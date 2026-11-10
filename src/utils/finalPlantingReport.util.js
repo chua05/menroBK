@@ -112,8 +112,105 @@ function sortGroupRows(rows) {
     String(a.id).localeCompare(String(b.id)));
 }
 
+// --------------------------------------------------------------------------
+// Field-specific Admin Return for Correction (Staff-submitted final reports)
+// --------------------------------------------------------------------------
+// Admin selects actual submitted fields, each with a required comment. Only
+// those fields (plus a selected leftover's dependent reason) may change in the
+// Staff resubmission. Event, site, date, request and planted quantities are
+// authoritative or derived and are never selectable.
+const MAX_CORRECTION_COMMENT_LENGTH = 1000;
+const EVIDENCE_FIELD_PATHS = Object.freeze(["confirmationBasis", "evidence.photos", "evidence.attendance"]);
+
+const leftoverPath = (inventoryId) => `items.${inventoryId}.leftoverQuantity`;
+const reasonPath = (inventoryId) => `items.${inventoryId}.leftoverReason`;
+
+// The fields Admin may return, built from what was actually submitted.
+// `rows`: the final report's per-type rows (sorted); `operation`: its official
+// operation (evidence and attendance state).
+function staffCorrectableFields(rows = [], operation = {}) {
+  const fields = [];
+  for (const row of rows) {
+    const species = row.species || "Seedling";
+    fields.push({ path: leftoverPath(row.inventoryId), label: `${species} — Final Leftovers`, previousValue: Number(row.leftoverQuantity || 0) });
+    if (Number(row.leftoverQuantity || 0) > 0) {
+      fields.push({ path: reasonPath(row.inventoryId), label: `${species} — Leftover Reason`, previousValue: String(row.leftoverReason || "") });
+    }
+  }
+  const lead = rows[0] || {};
+  fields.push({ path: "confirmationBasis", label: "Confirmation Basis", previousValue: String(lead.confirmationBasis || ""), evidence: true });
+  fields.push({ path: "remarks", label: "Remarks", previousValue: String(lead.remarks || "") });
+  if (lead.confirmationBasis === "menro-field-report" && operation.evidenceVerified === true) {
+    fields.push({ path: "evidence.photos", label: "Planting Evidence Photos", previousValue: { submissionId: operation.evidenceSubmissionId || "", revision: Number(operation.evidenceRevision || 0) }, evidence: true });
+  }
+  if (operation.attendance) {
+    fields.push({ path: "evidence.attendance", label: "Attendance Documentation", previousValue: { sha256: operation.attendance.sha256 || "" }, evidence: true });
+  }
+  return fields;
+}
+
+// Validates Admin's selection against the allowed fields: at least one, each
+// once, each with a comment. Returns [{ path, label, comment, previousValue, evidence }].
+function parseCorrectionFields(input, allowed) {
+  if (!Array.isArray(input) || input.length === 0) {
+    throw fail(400, "Select at least one submitted field that needs correction.", { fields: "Select at least one field that needs correction." });
+  }
+  const byPath = new Map(allowed.map((field) => [field.path, field]));
+  const seen = new Set();
+  return input.map((entry, index) => {
+    const path = typeof entry?.path === "string" ? entry.path : "";
+    const field = byPath.get(path);
+    if (!field || seen.has(path)) {
+      throw fail(400, "Select only fields that were submitted in this report, each once.", { fields: "Select only submitted fields." });
+    }
+    seen.add(path);
+    if (entry.comment !== undefined && typeof entry.comment !== "string") throw fail(400, "Correction comments must be text.", { [`fieldComment-${index}`]: "Enter the comment as text." });
+    const comment = String(entry.comment || "").trim();
+    if (!comment) throw fail(400, `Enter a comment for ${field.label}.`, { [`fieldComment-${path}`]: "Enter what needs to be corrected." });
+    if (comment.length > MAX_CORRECTION_COMMENT_LENGTH) throw fail(400, `Comments must be at most ${MAX_CORRECTION_COMMENT_LENGTH} characters.`, { [`fieldComment-${path}`]: `Use at most ${MAX_CORRECTION_COMMENT_LENGTH} characters.` });
+    return { path, label: field.label, comment, previousValue: field.previousValue ?? null, ...(field.evidence ? { evidence: true } : {}) };
+  });
+}
+
+// Selected fields plus their dependents: a leftover quantity correction may
+// also change (or newly require) that type's reason.
+function editableCorrectionPaths(selectedPaths = []) {
+  const editable = new Set(selectedPaths);
+  for (const path of selectedPaths) {
+    const match = /^items\.([A-Za-z0-9_-]{1,128})\.leftoverQuantity$/.exec(path);
+    if (match) editable.add(reasonPath(match[1]));
+  }
+  return editable;
+}
+
+// Paths whose values differ between the returned revision and the resubmission.
+// `previous`: returned rows; `next`: { items: [{ inventoryId, leftoverQuantity, leftoverReason }], confirmationBasis, remarks }.
+function correctionChanges(previous = [], next = {}) {
+  const changed = [];
+  const lead = previous[0] || {};
+  for (const row of previous) {
+    const item = (next.items || []).find((entry) => entry.inventoryId === row.inventoryId);
+    if (!item) { changed.push(leftoverPath(row.inventoryId)); continue; }
+    if (Number(item.leftoverQuantity || 0) !== Number(row.leftoverQuantity || 0)) changed.push(leftoverPath(row.inventoryId));
+    const nextReason = Number(item.leftoverQuantity || 0) > 0 ? String(item.leftoverReason || "").trim() : "";
+    if (nextReason !== String(row.leftoverReason || "").trim()) changed.push(reasonPath(row.inventoryId));
+  }
+  for (const item of next.items || []) {
+    if (!previous.some((row) => row.inventoryId === item.inventoryId)) changed.push(leftoverPath(item.inventoryId));
+  }
+  if (String(next.confirmationBasis || "") !== String(lead.confirmationBasis || "")) changed.push("confirmationBasis");
+  if (String(next.remarks || "").trim() !== String(lead.remarks || "").trim()) changed.push("remarks");
+  return changed;
+}
+
 module.exports = {
   FINAL_REPORT_VERSION,
+  MAX_CORRECTION_COMMENT_LENGTH,
+  EVIDENCE_FIELD_PATHS,
+  staffCorrectableFields,
+  parseCorrectionFields,
+  editableCorrectionPaths,
+  correctionChanges,
   MAX_LEFTOVER_REASON_LENGTH,
   finalReportIdFor,
   isFinalReportRow,

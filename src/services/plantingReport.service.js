@@ -2479,15 +2479,19 @@ const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, re
 // RETURN FOR CORRECTION
 // Staff returns participant reports; Admin returns official Staff reports.
 // --------------------------------
-const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, reviewerRole) => {
+const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, reviewerRole, options = {}) => {
   const actor = reviewActor(returnedBy, returnedByName, reviewerRole);
   const reason = requiredReason(remarks, "return");
   const contributionRef = contributionCollection.doc(id);
   const contributionDoc = await contributionRef.get();
   if (contributionDoc.exists && contributionDoc.data().officialStaffReport === true) {
-    return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "return", reason);
+    return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "return", reason, options);
   }
   assertActorRole(actor, "staff", STAFF_REVIEW_ONLY);
+  // Participant returns keep their single-reason workflow.
+  if (Array.isArray(options.fields) && options.fields.length) {
+    throw workflowFail(400, "Field-specific correction applies only to Staff-submitted planting reports.");
+  }
   if (contributionDoc.exists) {
     let parentId = "";
     await db.runTransaction(async (transaction) => {
