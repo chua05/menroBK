@@ -198,10 +198,28 @@ test("actual planting report API validates geotag evidence and creates recipient
   assert.equal((await notices("other", "planting_report_submitted", report.id)).length, 0);
   const submissionId = report.submissions?.[0]?.id;
   assert.ok(submissionId, "The request-backed report did not expose its contribution ID.");
-  await api("staff", "PATCH", `/planting-reports/${submissionId}/approve`, {
+  // Staff cannot make the final decision; only a Staff-reviewed report reaches Admin.
+  const status = async (role, route, body) => (await fetch(`${baseUrl}/api${route}`, {
+    method: "PATCH", headers: { authorization: `Bearer ${tokens[role]}`, "content-type": "application/json" }, body: JSON.stringify(body),
+  })).status;
+  assert.equal(await status("staff", `/planting-reports/${submissionId}/approve`, { remarks: "Staff must not approve" }), 403);
+  assert.equal(await status("admin", `/planting-reports/${submissionId}/approve`, { remarks: "Not yet reviewed" }), 409);
+  assert.equal(await status("participant", `/planting-reports/${submissionId}/forward`, {}), 403);
+  const forwarded = await api("staff", "PATCH", `/planting-reports/${submissionId}/forward`, {
+    remarks: "Authenticated Staff review",
+  });
+  assert.equal(forwarded.submissions.find((item) => item.id === submissionId).workflowStatus, "Reviewed");
+  assert.notEqual(forwarded.reportingProgress, "Completed");
+  assert.ok((await notices("admin", "planting_report_forwarded", report.id)).length > 0);
+  assert.ok((await notices("participant", "planting_report_reviewed", report.id)).length > 0);
+  const approvedReport = await api("admin", "PATCH", `/planting-reports/${submissionId}/approve`, {
     remarks: "Authenticated contribution acceptance",
   });
+  assert.equal(approvedReport.submissions.find((item) => item.id === submissionId).workflowStatus, "Completed");
   assert.ok((await notices("participant", "planting_report_accepted", report.id)).length > 0);
+  const history = await api("staff", "GET", `/planting-reports/${report.id}/verification-logs`);
+  assert.deepEqual(history.filter((log) => log.submissionId === submissionId).map((log) => log.action),
+    ["Staff Review — Forwarded to Admin", "Admin Approval"]);
 
   const secondForm = new FormData();
   const secondFields = { ...fields, quantityPlanted: "5", submittedByName: "Other participant" };
@@ -216,8 +234,11 @@ test("actual planting report API validates geotag evidence and creates recipient
   const staffSubmissionNotices = await notices("staff", "planting_report_submitted_staff", report.id);
   assert.ok(staffSubmissionNotices.length >= 2);
   assert.equal(new Set(staffSubmissionNotices.map((item) => item.id)).size, staffSubmissionNotices.length);
-  await api("staff", "PATCH", `/planting-reports/${secondSubmissionId}/reject`, {
-    remarks: "Authenticated second-contributor rejection branch",
+  assert.equal(await status("staff", `/planting-reports/${secondSubmissionId}/return`, { remarks: "  " }), 400);
+  const returnedReport = await api("staff", "PATCH", `/planting-reports/${secondSubmissionId}/return`, {
+    remarks: "Authenticated second-contributor return branch",
   });
-  assert.ok((await notices("other", "planting_report_rejected", report.id)).length > 0);
+  assert.equal(returnedReport.submissions.find((item) => item.id === secondSubmissionId).workflowStatus, "Returned for Correction");
+  assert.ok((await notices("other", "planting_report_returned", report.id)).length > 0);
+  assert.equal((await notices("participant", "planting_report_returned", report.id)).length, 0);
 });

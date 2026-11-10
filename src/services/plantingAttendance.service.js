@@ -32,7 +32,8 @@ async function participantContext(user, id, write) {
     const [latest, op] = await Promise.all([tx.get(ref), tx.get(operationRef)]);
     if (!latest.exists || latest.data().authenticatedSubmitterUid !== user.uid) throw fail(404, "Attendance file not found.");
     if (!op.exists) {
-      if (latest.data().staffReviewStatus !== "Pending Review") throw fail(409, "Attendance cannot be added after Staff review.");
+      if (latest.data().staffReviewStatus !== "Pending Review" ||
+          require("../utils/plantingReviewWorkflow.util").deriveWorkflowStatus(latest.data()) !== "Pending Review") throw fail(409, "Attendance cannot be added after Staff review.");
       tx.create(operationRef, { ownerId: user.uid, ownerRole: "participant", requestId: data.requestId, eventId: data.eventId, reportId: data.reportId, submissionIds: [id], createdAt: Timestamp.now() });
     }
   });

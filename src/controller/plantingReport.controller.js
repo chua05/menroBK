@@ -7,6 +7,8 @@ const {
   participantCanAccessReport,
   approvePlantingReport,
   rejectPlantingReport,
+  forwardPlantingReport,
+  returnPlantingReport,
   getPlantingReportVerificationLogs,
 } = require(
   "../services/plantingReport.service"
@@ -242,6 +244,9 @@ const submitPlantingReport = async (
 
           evidenceManifest:
             req.body?.evidenceManifest || "",
+
+          // Optional link to the participant's own submission returned for correction.
+          ...(req.body?.correctionOf ? { correctionOf: req.body.correctionOf } : {}),
         },
         photos
       );
@@ -457,126 +462,64 @@ const finalizeReport = async (req, res) => {
 };
 
 
-// STAFF APPROVE REPORT
-const approveReport = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
+// REVIEW DECISIONS
+// Staff: forward to Admin or return participant reports for correction.
+// Admin: approve or reject Staff-reviewed reports; approve, reject or return
+// official Staff reports. Services enforce the role and stage of each record.
+const LEGACY_DECISION_STATUS = new Map([
+  ["Planting report not found.", 404],
+  ["Planting report submission not found.", 404],
+  ["Invalid planting report ID.", 400],
+]);
 
-    const approvedBy =
-      req.user.uid;
-
-    const {
-      remarks = "",
-    } = req.body || {};
-
-    if (typeof remarks !== "string") {
-      return res.status(400).json({ success: false, message: "Approval remarks must be text." });
-    }
-
-    const report =
-      await approvePlantingReport(
-        id,
-        approvedBy,
-        remarks,
-        req.user.fullName,
-        req.user.role
-      );
-
-    return res.status(200).json({
-      success: true,
-      message:
-        "Planting report approved successfully.",
-      data: report,
-    });
-  } catch (error) {
-    const statusCode = error.status || (error.message === "Planting report not found."
-      ? 404
-      : error.message === "Invalid planting report ID."
-        ? 400
-        : ["Only pending review planting reports can be approved.",
-            "Only submissions pending Staff review can be accepted."].includes(error.message)
-          ? 409
-          : ["New planting report submissions may only be accepted by MENRO Staff.",
-              "New planting reports may only be approved by MENRO Staff."].includes(error.message)
-            ? 403
-          : 500);
-    if (statusCode === 500) console.error(error);
-
-    return res.status(
-      statusCode
-    ).json({
-      success: false,
-      message: statusCode === 500 ? "Failed to approve planting report." : error.message,
-    });
-  }
-};
-
-
-// STAFF REJECT REPORT
-const rejectReport = async (
-  req,
-  res
-) => {
-  try {
-    const { id } = req.params;
-
-    const rejectedBy =
-      req.user.uid;
-
-    const {
-      remarks = "",
-    } = req.body || {};
-
-    if (typeof remarks !== "string" || !remarks.trim()) {
-      return res.status(400).json({
+function decisionHandler(action, { success, failure, requiresReason, reasonPrompt }) {
+  return async (req, res) => {
+    try {
+      const { remarks = "" } = req.body || {};
+      if (typeof remarks !== "string") {
+        return res.status(400).json({ success: false, message: "Remarks must be text.", fieldErrors: { remarks: "Remarks must be text." } });
+      }
+      if (requiresReason && !remarks.trim()) {
+        return res.status(400).json({ success: false, message: reasonPrompt, fieldErrors: { remarks: reasonPrompt } });
+      }
+      const report = await action(req.params.id, req.user.uid, remarks, req.user.fullName, req.user.role);
+      return res.status(200).json({ success: true, message: success, data: report });
+    } catch (error) {
+      const known = [400, 401, 403, 404, 409].includes(error.status) ? error.status : LEGACY_DECISION_STATUS.get(error.message);
+      const statusCode = known || 500;
+      if (statusCode === 500) console.error(error);
+      return res.status(statusCode).json({
         success: false,
-        message:
-          "Please enter a reason for rejecting the planting report.",
+        message: statusCode === 500 ? failure : error.message,
+        ...(statusCode < 500 && error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
       });
     }
+  };
+}
 
-    const report =
-      await rejectPlantingReport(
-        id,
-        rejectedBy,
-        remarks,
-        req.user.fullName,
-        req.user.role
-      );
+const forwardReport = decisionHandler(forwardPlantingReport, {
+  success: "Planting report reviewed and forwarded to the MENRO Admin for approval.",
+  failure: "Failed to forward the planting report.",
+});
 
-    return res.status(200).json({
-      success: true,
-      message:
-        "Planting report rejected successfully.",
-      data: report,
-    });
-  } catch (error) {
-    const statusCode = error.status || (error.message === "Planting report not found."
-      ? 404
-      : error.message === "Invalid planting report ID."
-        ? 400
-        : ["Only pending review planting reports can be rejected.",
-            "Only submissions pending Staff review can be rejected."].includes(error.message)
-          ? 409
-          : ["New planting report submissions may only be rejected by MENRO Staff.",
-              "New planting reports may only be rejected by MENRO Staff."].includes(error.message)
-            ? 403
-          : error.message === "Rejection reason is required."
-            ? 400
-            : 500);
-    if (statusCode === 500) console.error(error);
+const returnReport = decisionHandler(returnPlantingReport, {
+  success: "Planting report returned for correction.",
+  failure: "Failed to return the planting report.",
+  requiresReason: true,
+  reasonPrompt: "Enter the reason for returning this planting report.",
+});
 
-    return res.status(
-      statusCode
-    ).json({
-      success: false,
-      message: statusCode === 500 ? "Failed to reject planting report." : error.message,
-    });
-  }
-};
+const approveReport = decisionHandler(approvePlantingReport, {
+  success: "Planting report approved. Planted quantities are confirmed.",
+  failure: "Failed to approve planting report.",
+});
+
+const rejectReport = decisionHandler(rejectPlantingReport, {
+  success: "Planting report rejected.",
+  failure: "Failed to reject planting report.",
+  requiresReason: true,
+  reasonPrompt: "Please enter a reason for rejecting the planting report.",
+});
 
 
 // GET VERIFICATION LOGS
@@ -622,5 +565,7 @@ module.exports = {
   finalizeReport,
   approveReport,
   rejectReport,
+  forwardReport,
+  returnReport,
   getVerificationLogs,
 };

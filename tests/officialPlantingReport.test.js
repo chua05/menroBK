@@ -107,6 +107,42 @@ test("Admin return releases only this submission's quantities and correction pre
   const approved = await service.reviewOfficialSubmission(admin, row.id, true);
   assert.equal(approved.acceptedQuantity, 7); assert.equal(approved.acceptedLeftoverQuantity, 3); assert.equal(approved.reportingProgress, "Completed");
 });
+test("Staff reports go directly to Admin; Admin rejection is final while a return stays correctable", async () => {
+  memory.records("users").set("admin-notify", { role: "admin", status: "active" });
+  const fixture = seed("finality", "individual", 10);
+  const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 8, 2)); const id = report.submissions[0].id;
+  assert.equal(report.submissions[0].workflowStatus, "Pending Admin Approval");
+  const submittedNotice = [...memory.records("notifications").values()].find(row => row.recipientUserId === "admin-notify" && row.relatedSubrecordId === id);
+  assert.equal(submittedNotice?.type, "planting_report_submitted_admin");
+  await assert.rejects(service.reviewOfficialSubmission(admin, id, "reject", "  "), error => error.status === 400);
+  await assert.rejects(service.reviewOfficialSubmission(admin, id, "unknown", "Reason"), error => error.status === 400);
+  const rejected = await service.reviewOfficialSubmission(admin, id, "reject", "Field count could not be verified");
+  const row = rejected.submissions.find(entry => entry.id === id);
+  assert.equal(row.workflowStatus, "Rejected"); assert.equal(row.correctionAllowed, false);
+  assert.equal(row.rejectionReason, "Field count could not be verified");
+  assert.equal(rejected.remainingAvailableQuantity, 10, "an Admin rejection releases the balance");
+  assert.equal(memory.records("notifications").get(`official_planting_${id}_rejected`).type, "planting_report_rejected");
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId, 7, 3), correctionOf: id, expectedVersion: 2 }), /cannot be corrected/);
+  const logs = [...memory.records("verificationLogs").values()].filter(log => log.submissionId === id).map(log => log.action);
+  assert.deepEqual(logs, ["Staff Submission", "Admin Rejection"]);
+
+  const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 8, 2), expectedVersion: 2 });
+  const secondId = second.submissions.find(entry => entry.workflowStatus === "Pending Admin Approval").id;
+  const returned = await service.reviewOfficialSubmission(admin, secondId, "return", "Attach the attendance sheet");
+  const returnedRow = returned.submissions.find(entry => entry.id === secondId);
+  assert.equal(returnedRow.workflowStatus, "Returned for Correction"); assert.equal(returnedRow.correctionAllowed, true);
+  assert.equal(returnedRow.returnReason, "Attach the attendance sheet");
+  assert.equal(memory.records("notifications").get(`official_planting_${secondId}_correction`).type, "planting_report_returned");
+});
+test("legacy official Staff rejections remain correctable as returns", async () => {
+  const fixture = seed("legacy-return", "individual", 10);
+  const report = await service.submitOfficialReport(staff, payload(fixture.requestId, 8, 2)); const id = report.submissions[0].id;
+  const returned = await service.reviewOfficialSubmission(admin, id, false, "Correct the counted quantity");
+  delete memory.records("plantingContributions").get(id).workflowStatus; // a record written before the workflow field existed
+  assert.equal(summarizeSubmissions([memory.records("plantingContributions").get(id)], 10).submissions[0].workflowStatus, "Returned for Correction");
+  const corrected = await service.submitOfficialReport(staff, { ...payload(fixture.requestId, 7, 3), correctionOf: id, expectedVersion: returned.officialReportingVersion ?? 2 });
+  assert.equal(corrected.submissions.find(row => row.correctionOf === id).revision, 1);
+});
 test("invalid species, negative/fractional numbers and mixed request/event ownership fail closed", async () => {
   const fixture = seed("invalid");
   for (const value of [-1, 1.5, "1e3", "", Infinity]) await assert.rejects(service.submitOfficialReport(staff, payload(fixture.requestId, value, 0)), error => error.status === 400);

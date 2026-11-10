@@ -3,6 +3,7 @@ const { Timestamp } = require("firebase-admin/firestore");
 const { activationState } = require("../utils/earlyMonitoring.util");
 const { nextRecordNumber } = require("../utils/recordNumber.util");
 const { progressFor } = require("../utils/plantingBalance.util");
+const { WORKFLOW_STATUS, deriveWorkflowStatus } = require("../utils/plantingReviewWorkflow.util");
 
 const reports = db.collection("plantingReports");
 const submissions = db.collection("plantingContributions");
@@ -23,7 +24,9 @@ function normalizeSubmission(entry = {}) {
     : rawReview === "Rejected" ? "Rejected"
       : ["Approved", "Accepted"].includes(rawReview) ? "Accepted"
         : verificationStatus === "Verified" ? "Not Required" : "Pending Review";
-  return { ...entry, verificationStatus, staffReviewStatus };
+  const workflowStatus = deriveWorkflowStatus({ ...entry, staffReviewStatus });
+  return { ...entry, verificationStatus, staffReviewStatus, workflowStatus,
+    correctionAllowed: workflowStatus === WORKFLOW_STATUS.RETURNED && !entry.correctedBySubmission };
 }
 
 function summarizeSubmissions(entries, releasedQuantity) {
@@ -36,18 +39,23 @@ function summarizeSubmissions(entries, releasedQuantity) {
   const accepted = active.filter((entry) => entry.staffReviewStatus === "Accepted" ||
     (entry.staffApprovalRequired !== true && entry.verificationStatus === "Verified" &&
       entry.staffReviewStatus === "Not Required"));
-  const rejected = submissions.filter((entry) => entry.staffReviewStatus === "Rejected");
+  // Returned and rejected submissions both release their quantities; only the
+  // reported split differs so corrections are not counted as final rejections.
+  const released = submissions.filter((entry) => entry.staffReviewStatus === "Rejected");
+  const returned = released.filter((entry) => entry.workflowStatus === WORKFLOW_STATUS.RETURNED);
+  const rejected = released.filter((entry) => entry.workflowStatus !== WORKFLOW_STATUS.RETURNED);
   const activeSubmittedQuantity = quantity(active);
   const acceptedQuantity = quantity(accepted);
   const pendingReviewQuantity = quantity(pending);
   const rejectedQuantity = quantity(rejected);
+  const returnedQuantity = quantity(returned);
   const leftover = items => items.reduce((total, entry) => total + Number(entry.leftoverQuantity || 0), 0);
   const declaredLeftoverQuantity = leftover(active), acceptedLeftoverQuantity = leftover(accepted), pendingReviewLeftoverQuantity = leftover(pending);
   const remainingAvailableQuantity = Math.max(0, Number(releasedQuantity || 0) - activeSubmittedQuantity - declaredLeftoverQuantity);
   const reportingProgress = progressFor({ released: Number(releasedQuantity || 0), active: activeSubmittedQuantity, accepted: acceptedQuantity, pending: pendingReviewQuantity,
     leftovers: declaredLeftoverQuantity, acceptedLeftovers: acceptedLeftoverQuantity, pendingLeftovers: pendingReviewLeftoverQuantity });
   return { submissions, activeSubmittedQuantity, acceptedQuantity, pendingReviewQuantity,
-    rejectedQuantity, remainingAvailableQuantity, reportingProgress, declaredLeftoverQuantity, acceptedLeftoverQuantity, pendingReviewLeftoverQuantity };
+    rejectedQuantity, returnedQuantity, remainingAvailableQuantity, reportingProgress, declaredLeftoverQuantity, acceptedLeftoverQuantity, pendingReviewLeftoverQuantity };
 }
 
 function parentRef(eventId) {

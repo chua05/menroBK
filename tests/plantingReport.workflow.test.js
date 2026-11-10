@@ -98,12 +98,27 @@ async function authorize(handler, role) {
   return { allowed, result };
 }
 
-test("only Staff and Admin can reach final decision routes; the intermediate route is gone", async () => {
+const STAFF = { uid: "staff-1", name: "Staff Name", role: "staff" };
+const ADMIN = { uid: "admin-1", name: "Admin Name", role: "admin" };
+const forward = (id, remarks = "Evidence reviewed") => service.forwardPlantingReport(id, STAFF.uid, remarks, STAFF.name, STAFF.role);
+const staffReturn = (id, reason) => service.returnPlantingReport(id, STAFF.uid, reason, STAFF.name, STAFF.role);
+const adminApprove = (id, remarks = "") => service.approvePlantingReport(id, ADMIN.uid, remarks, ADMIN.name, ADMIN.role);
+const adminReject = (id, reason) => service.rejectPlantingReport(id, ADMIN.uid, reason, ADMIN.name, ADMIN.role);
+
+test("Staff forwards or returns; only Admin reaches final decision routes; the intermediate route is gone", async () => {
   assert.equal(routes.stack.some((layer) => layer.route?.path === "/:id/review"), false);
+  const forwardRoute = roleHandler("/:id/forward");
+  assert.equal((await authorize(forwardRoute, "staff")).allowed, true);
+  assert.equal((await authorize(forwardRoute, "admin")).result.code, 403);
+  assert.equal((await authorize(forwardRoute, "participant")).result.code, 403);
+  const returnRoute = roleHandler("/:id/return");
+  assert.equal((await authorize(returnRoute, "staff")).allowed, true);
+  assert.equal((await authorize(returnRoute, "admin")).allowed, true);
+  assert.equal((await authorize(returnRoute, "participant")).result.code, 403);
   for (const path of ["/:id/approve", "/:id/reject"]) {
     const handler = roleHandler(path);
-    assert.equal((await authorize(handler, "staff")).allowed, true);
     assert.equal((await authorize(handler, "admin")).allowed, true);
+    assert.equal((await authorize(handler, "staff")).result.code, 403);
     assert.equal((await authorize(handler, "participant")).result.code, 403);
   }
 });
@@ -196,15 +211,31 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     return reportId;
   }
 
-  test("accepting a contribution completes progress without changing verification", async () => {
+  test("Staff review forwards without completing; Admin approval completes progress without changing verification", async () => {
     process.env.VERIFIED_PLANTING_COHORT_ENABLED = "true";
     seedContributionDecision("submission-accept", "event-accept");
-    const report = await service.approvePlantingReport("submission-accept", "staff-1", "Reviewed", "Staff Name");
+    await assert.rejects(service.approvePlantingReport("submission-accept", STAFF.uid, "Reviewed", STAFF.name, STAFF.role), (error) => error.status === 403);
+    await assert.rejects(adminApprove("submission-accept"), /must review and forward/);
+    const reviewed = await forward("submission-accept", "Photos match the site");
+    const forwarded = table("plantingContributions").get("submission-accept");
+    assert.equal(forwarded.workflowStatus, "Reviewed");
+    assert.equal(forwarded.staffReviewStatus, "Pending Review", "Staff review keeps the quantity pending");
+    assert.equal(forwarded.staffReviewedBy, "staff-1");
+    assert.equal(forwarded.staffReviewRemarks, "Photos match the site");
+    assert.equal(reviewed.reportingProgress, "Fully Reported — Awaiting Review");
+    assert.equal(reviewed.acceptedQuantity, 100);
+    assert.equal([...table("verifiedPlantingCohorts").values()].length, 0, "Staff review never activates monitoring");
+    assert.ok(table("notifications").get("planting_report_reviewed_event_event-accept_submission-accept_participant-1"));
+    await assert.rejects(forward("submission-accept"), /pending Staff review/);
+    const report = await adminApprove("submission-accept", "Reviewed");
     const submission = table("plantingContributions").get("submission-accept");
     assert.equal(submission.verificationStatus, "Needs Review");
     assert.equal(submission.staffReviewStatus, "Accepted");
-    assert.equal(submission.reviewedBy, "staff-1");
-    assert.equal(submission.reviewedByName, "Staff Name");
+    assert.equal(submission.workflowStatus, "Completed");
+    assert.equal(submission.reviewedBy, "admin-1");
+    assert.equal(submission.reviewedByName, "Admin Name");
+    assert.equal(submission.staffReviewedBy, "staff-1");
+    assert.ok(table("notifications").get("planting_report_admin_approved_staff_event_event-accept_submission-accept_staff-1"));
     assert.ok(submission.reviewedAt);
     assert.equal(report.reportingProgress, "Completed");
     assert.equal(report.acceptedQuantity, 150);
@@ -245,8 +276,10 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
       seedlingItems: [{ inventoryId: "narra", quantity: 200, species: "Narra" }],
     });
 
-    await service.approvePlantingReport("submission-a", "staff-1", "", "Staff Name");
-    await service.approvePlantingReport("submission-b", "staff-1", "", "Staff Name");
+    await forward("submission-a");
+    await forward("submission-b");
+    await adminApprove("submission-a");
+    await adminApprove("submission-b");
 
     const firstId = "planting_report_accepted_event_event-shared_submission-a_participant-1";
     const secondId = "planting_report_accepted_event_event-shared_submission-b_participant-3";
@@ -254,21 +287,25 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(table("notifications").get(secondId).recipientUserId, "participant-3");
     assert.notEqual(firstId, secondId);
     await assert.rejects(
-      service.approvePlantingReport("submission-a", "staff-1", "", "Staff Name"),
-      /Only submissions pending Staff review/,
+      adminApprove("submission-a"),
+      /Only planting reports reviewed by MENRO Staff/,
     );
     assert.equal([...table("notifications")].filter(([id]) => id === firstId).length, 1);
   });
 
-  test("rejecting a contribution records reason and reopens quantity", async () => {
+  test("Admin rejecting a reviewed contribution records reason, is final and reopens quantity", async () => {
     const reportId = seedContributionDecision("submission-reject", "event-reject");
-    const report = await service.rejectPlantingReport("submission-reject", "staff-1", "Evidence does not show this site", "Staff Name");
+    await assert.rejects(service.rejectPlantingReport("submission-reject", STAFF.uid, "Reason", STAFF.name, STAFF.role), (error) => error.status === 403);
+    await forward("submission-reject");
+    const report = await adminReject("submission-reject", "Evidence does not show this site");
     const submission = table("plantingContributions").get("submission-reject");
     assert.equal(submission.verificationStatus, "Needs Review");
     assert.equal(submission.staffReviewStatus, "Rejected");
+    assert.equal(submission.workflowStatus, "Rejected");
     assert.equal(submission.rejectionReason, "Evidence does not show this site");
-    assert.equal(submission.reviewedBy, "staff-1");
-    assert.equal(submission.reviewedByName, "Staff Name");
+    assert.equal(submission.reviewedBy, "admin-1");
+    assert.equal(submission.reviewedByName, "Admin Name");
+    assert.equal(report.submissions.find((entry) => entry.id === "submission-reject").correctionAllowed, false);
     assert.equal(report.reportingProgress, "Partial");
     assert.equal(report.activeSubmittedQuantity, 100);
     assert.equal(report.remainingAvailableQuantity, 50);
@@ -282,38 +319,64 @@ test("only Staff and Admin can reach final decision routes; the intermediate rou
     assert.equal(notification.relatedSubrecordId, "submission-reject");
   });
 
-test("Staff approval is final and preserves automated findings", async () => {
+test("Admin approval after Staff review is final and preserves automated findings", async () => {
   seed("approve-1");
-  const report = await service.approvePlantingReport("approve-1", "staff-1", "", "Staff Name");
+  await assert.rejects(service.approvePlantingReport("approve-1", STAFF.uid, "", STAFF.name, STAFF.role), (error) => error.status === 403);
+  await assert.rejects(adminApprove("approve-1"), /must review and forward/);
+  const reviewed = await forward("approve-1");
+  assert.equal(reviewed.workflowStatus, "Reviewed");
+  assert.equal(table("plantingReports").get("approve-1").verificationStatus, "Pending Review");
+  const report = await adminApprove("approve-1");
   assert.equal(report.verificationStatus, "Needs Review");
   assert.equal(report.staffReviewStatus, "Accepted");
-  assert.equal(report.reviewedBy, "staff-1");
-  assert.equal(report.reviewedByName, "Staff Name");
+  assert.equal(report.workflowStatus, "Completed");
+  assert.equal(report.reviewedBy, "admin-1");
+  assert.equal(report.reviewedByName, "Admin Name");
+  assert.equal(report.staffReviewedBy, "staff-1");
   assert.ok(report.reviewedAt?.toDate?.());
   assert.equal(report.automatedVerificationStatus, "Flagged");
   assert.deepEqual(report.suspiciousFlags, ["GPS_MISMATCH"]);
-  await assert.rejects(service.rejectPlantingReport("approve-1", "staff-2", "Reason"), /Only pending review/);
-  await assert.rejects(service.approvePlantingReport("approve-1", "staff-2", ""), /Only pending review/);
+  await assert.rejects(adminReject("approve-1", "Reason"), /Only planting reports reviewed by MENRO Staff/);
+  await assert.rejects(adminApprove("approve-1"), /Only planting reports reviewed by MENRO Staff/);
+  await assert.rejects(forward("approve-1"), /pending Staff review/);
 });
 
-test("Staff cannot decide an available but unsubmitted Pending report", async () => {
+test("an available but unsubmitted Pending report cannot be reviewed or decided", async () => {
   seed("unsubmitted", "Pending");
-  await assert.rejects(service.approvePlantingReport("unsubmitted", "staff-1", ""), /Only pending review/);
-  await assert.rejects(service.rejectPlantingReport("unsubmitted", "staff-1", "Evidence missing"), /Only pending review/);
+  await assert.rejects(forward("unsubmitted"), /pending Staff review/);
+  await assert.rejects(staffReturn("unsubmitted", "Evidence missing"), /pending Staff review/);
+  await assert.rejects(adminApprove("unsubmitted"), /Only planting reports reviewed by MENRO Staff/);
+  await assert.rejects(adminReject("unsubmitted", "Evidence missing"), /Only planting reports reviewed by MENRO Staff/);
   assert.equal(table("plantingReports").get("unsubmitted").verificationStatus, "Pending");
 });
 
-test("rejection requires a reason and persists the authenticated reviewer", async () => {
+test("Admin rejection requires a reason, persists the reviewer and is final", async () => {
   seed("reject-1");
-  await assert.rejects(service.rejectPlantingReport("reject-1", "staff-1", "  "), /Rejection reason is required/);
+  await forward("reject-1");
+  await assert.rejects(adminReject("reject-1", "  "), /rejection reason is required/i);
   assert.equal(table("plantingReports").get("reject-1").verificationStatus, "Pending Review");
-  const report = await service.rejectPlantingReport("reject-1", "staff-1", "  Evidence mismatch  ", "Staff Name");
+  const report = await adminReject("reject-1", "  Evidence mismatch  ");
   assert.equal(report.verificationStatus, "Needs Review");
   assert.equal(report.staffReviewStatus, "Rejected");
+  assert.equal(report.workflowStatus, "Rejected");
+  assert.equal(report.correctionAllowed, false);
   assert.equal(report.rejectionRemarks, "Evidence mismatch");
-  assert.equal(report.reviewedBy, "staff-1");
+  assert.equal(report.reviewedBy, "admin-1");
   assert.ok(report.reviewedAt?.toDate?.());
-  await assert.rejects(service.approvePlantingReport("reject-1", "staff-2", ""), /Only pending review/);
+  await assert.rejects(adminApprove("reject-1"), /Only planting reports reviewed by MENRO Staff/);
+});
+
+test("Staff returns a standalone report for correction with a required reason", async () => {
+  seed("return-1");
+  await assert.rejects(staffReturn("return-1", "  "), (error) => error.status === 400);
+  await assert.rejects(service.returnPlantingReport("return-1", ADMIN.uid, "Fix photos", ADMIN.name, ADMIN.role), (error) => error.status === 403);
+  const report = await staffReturn("return-1", " Retake the photos at the site ");
+  assert.equal(report.workflowStatus, "Returned for Correction");
+  assert.equal(report.correctionAllowed, true);
+  assert.equal(report.returnReason, "Retake the photos at the site");
+  assert.equal(table("notifications").get("planting_report_returned_return-1_participant-1").type, "planting_report_returned");
+  await assert.rejects(forward("return-1"), /pending Staff review/);
+  await assert.rejects(adminApprove("return-1"), /Only planting reports reviewed by MENRO Staff/);
 });
 
 test("legacy Flagged records read as Needs Review without mutating historical data", async () => {
@@ -325,11 +388,13 @@ test("legacy Flagged records read as Needs Review without mutating historical da
   assert.equal(table("plantingReports").get("legacy-1").verificationStatus, "Flagged");
 });
 
-test("legacy Reviewed reports can receive the final Staff decision", async () => {
+test("legacy Reviewed reports follow Staff review then Admin approval", async () => {
   seed("legacy-reviewed", "Reviewed");
   const pending = await service.getPlantingReportById("legacy-reviewed");
   assert.equal(pending.verificationStatus, "Needs Review");
-  const approved = await service.approvePlantingReport("legacy-reviewed", "staff-1", "", "Staff Name");
+  assert.equal(pending.workflowStatus, "Pending Review", "legacy pending records enter the new Staff stage");
+  await forward("legacy-reviewed");
+  const approved = await adminApprove("legacy-reviewed");
   assert.equal(approved.verificationStatus, "Needs Review");
   assert.equal(approved.staffReviewStatus, "Accepted");
   assert.equal(approved.automatedVerificationStatus, "Flagged");
@@ -352,7 +417,9 @@ test("early monitoring assignment goes to Staff/Admin while planting approval re
     table("users").set("assignment-test-admin", { role: "admin", status: "active" });
     table("users").set("participant-1", { role: "participant", status: "active" });
 
-    const approved = await service.approvePlantingReport(reportId, "staff-1", "Verified", "Staff Name");
+    await forward(reportId);
+    assert.equal(table("plantingReports").get(reportId).earlyMonitoring, undefined, "Staff review does not schedule monitoring");
+    const approved = await adminApprove(reportId, "Verified");
     assert.equal(approved.earlyMonitoring.officialOpeningDate, shiftCalendarDate(today, 14));
     assert.equal(approved.earlyMonitoring.applicable, true);
     assert.equal(table("notifications").get(`planting_report_approved_${reportId}_participant-1`).recipientUserId,
@@ -404,4 +471,19 @@ test("Staff and Admin can read event participants; guests have no decision route
 test("events do not expose a cancellation endpoint", () => {
   assert.equal(eventRoutes.stack.some((layer) =>
     layer.route?.path === "/:id/cancel"), false);
+});
+
+test("decision controllers refuse a missing Return or Reject reason before calling the service", async () => {
+  for (const [handler, message] of [[controller.returnReport, /returning/], [controller.rejectReport, /rejecting/]]) {
+    let status, body;
+    const res = { status(code) { status = code; return this; }, json(value) { body = value; return this; } };
+    await handler({ params: { id: "missing-reason" }, body: { remarks: "   " }, user: { uid: "admin-1", role: "admin", fullName: "Admin" } }, res);
+    assert.equal(status, 400);
+    assert.match(body.message, message);
+    assert.ok(body.fieldErrors.remarks);
+  }
+  let status;
+  const res = { status(code) { status = code; return this; }, json() { return this; } };
+  await controller.forwardReport({ params: { id: "missing-report" }, body: {}, user: { uid: "admin-1", role: "admin" } }, res);
+  assert.equal(status, 403, "Admin cannot perform the Staff review step");
 });

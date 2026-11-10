@@ -11,6 +11,8 @@ const {
   finalizeReport,
   approveReport,
   rejectReport,
+  forwardReport,
+  returnReport,
   getVerificationLogs,
 } = require(
   "../controller/plantingReport.controller"
@@ -185,22 +187,29 @@ router.get(
   getPlantingReport
 );
 
-// STAFF FINAL APPROVAL
+// PARTICIPANT SUBMITS AN UNSUBMITTED PARENT REPORT FOR REVIEW
 router.patch("/:id/finalize", verifyToken, authorizeRoles("participant"), finalizeReport);
 
-// STAFF / ADMIN FINAL APPROVAL
+// STAFF REVIEW: FORWARD A PARTICIPANT REPORT TO ADMIN
+router.patch("/:id/forward", verifyToken, authorizeRoles("staff"), forwardReport);
+
+// RETURN FOR CORRECTION
+// Staff returns participant reports; Admin returns official Staff reports.
+router.patch("/:id/return", verifyToken, authorizeRoles("staff", "admin"), returnReport);
+
+// ADMIN FINAL APPROVAL (Completed)
 router.patch(
   "/:id/approve",
   verifyToken,
-  authorizeRoles("staff", "admin"),
+  authorizeRoles("admin"),
   approveReport
 );
 
-// STAFF / ADMIN FINAL REJECTION
+// ADMIN FINAL REJECTION (Rejected)
 router.patch(
   "/:id/reject",
   verifyToken,
-  authorizeRoles("staff", "admin"),
+  authorizeRoles("admin"),
   rejectReport
 );
 

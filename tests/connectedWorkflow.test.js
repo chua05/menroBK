@@ -622,10 +622,67 @@ test("participant planted plus leftover balances reserve once and become accepte
     assert.equal(table("events").get(eventId).leftoverSeedlingQuantity, 4);
     assert.equal(table("events").get(eventId).remainingSeedlingQuantity, 0);
     assert.equal(report.submissions[0].staffReviewStatus, "Pending Review");
-    const approved = await service.approvePlantingReport(report.submissions[0].id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+    const approved = await (await service.forwardPlantingReport(report.submissions[0].id, "planting-staff", "Evidence reviewed", "MENRO Staff", "staff"), await service.approvePlantingReport(report.submissions[0].id, "planting-admin", "Confirmed quantities", "MENRO Admin", "admin"));
     assert.equal(approved.acceptedQuantity, 6); assert.equal(approved.acceptedLeftoverQuantity, 4);
     assert.equal(approved.pendingReviewLeftoverQuantity, 0); assert.equal(approved.remainingAvailableQuantity, 0);
   } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
+});
+
+test("participant correction links to the Staff-returned submission and Admin rejection is final", async () => {
+  const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  const requestId = "request-participant-correction", eventId = "event-participant-correction";
+  seedApproved(requestId, eventId);
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", { items: [{ inventoryId: "calamansi", releasedQuantity: 10, shortReleaseReason: "Only ten required" }] });
+  Object.assign(table("events").get(eventId), { recordStatus: "scheduled", plantingSiteId: "site-correction", barangay: "Bical" });
+  table("sites").set("site-correction", { status: "active", siteName: "Correction site", barangay: "Bical", latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50 });
+  const photo = async (background, name) => ({ mimetype: "image/jpeg", originalname: name, buffer: await sharp({ create: { width: 9, height: 9, channels: 3, background } }).jpeg().withExif({
+    IFD0: { Make: "Fixture camera" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1", GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1" },
+  }).toBuffer() });
+  const payload = { distributionId: requestId, inventoryId: "calamansi", siteId: "site-correction", participantId: "participant-1", participantName: "Participant One", participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical", quantityPlanted: 6, leftoverQuantity: 0, plantingDate: "2026-09-17", plantingLocation: "Correction site", eventId };
+  const reports = [];
+  try {
+    const first = await service.createPlantingReport(payload, [await photo("navy", "first.jpg")]);
+    reports.push(first);
+    const original = first.submissions[0];
+    assert.equal(original.workflowStatus, "Pending Review");
+    await assert.rejects(service.returnPlantingReport(original.id, "planting-staff", "", "MENRO Staff", "staff"), (error) => error.status === 400);
+    const returned = await service.returnPlantingReport(original.id, "planting-staff", "Retake the photo inside the site", "MENRO Staff", "staff");
+    const returnedRow = returned.submissions.find((entry) => entry.id === original.id);
+    assert.equal(returnedRow.workflowStatus, "Returned for Correction");
+    assert.equal(returnedRow.correctionAllowed, true);
+    assert.equal(returnedRow.returnReason, "Retake the photo inside the site");
+    assert.equal(returned.remainingAvailableQuantity, 10, "a returned submission releases its quantity");
+    assert.equal(returned.returnedQuantity, 6);
+    assert.equal(returned.rejectedQuantity, 0, "returns are not counted as rejections");
+    assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 0);
+
+    await assert.rejects(service.createPlantingReport({ ...payload, participantId: "participant-2", correctionOf: original.id }, [await photo("olive", "other.jpg")]), (error) => error.status === 409);
+    const corrected = await service.createPlantingReport({ ...payload, correctionOf: original.id }, [await photo("maroon", "corrected.jpg")]);
+    reports.push(corrected);
+    const resubmitted = corrected.submissions.find((entry) => entry.correctionOf === original.id);
+    assert.ok(resubmitted, "the corrected submission links to the returned one");
+    assert.equal(resubmitted.revision, 1);
+    assert.equal(resubmitted.workflowStatus, "Pending Review");
+    assert.equal(table("plantingContributions").get(original.id).correctedBySubmission, resubmitted.id);
+    assert.equal(corrected.submissions.find((entry) => entry.id === original.id).correctionAllowed, false);
+    // Within the remaining balance, a second correction of the same return is still refused.
+    await assert.rejects(service.createPlantingReport({ ...payload, quantityPlanted: 4, correctionOf: original.id }, [await photo("teal", "again.jpg")]), (error) => error.status === 409);
+    const logs = [...table("verificationLogs").values()].filter((log) => log.plantingReportId === corrected.id);
+    assert.deepEqual(logs.map((log) => log.action), ["Staff Return for Correction", "Participant Resubmission"]);
+    assert.equal(logs[0].submissionId, original.id);
+
+    await service.forwardPlantingReport(resubmitted.id, "planting-staff", "", "MENRO Staff", "staff");
+    const rejected = await service.rejectPlantingReport(resubmitted.id, "planting-admin", "Seedlings were planted outside the approved site", "MENRO Admin", "admin");
+    const rejectedRow = rejected.submissions.find((entry) => entry.id === resubmitted.id);
+    assert.equal(rejectedRow.workflowStatus, "Rejected");
+    assert.equal(rejectedRow.correctionAllowed, false);
+    assert.equal(rejected.rejectedQuantity, 6);
+    assert.equal(rejected.cohortId, undefined);
+    await assert.rejects(service.createPlantingReport({ ...payload, correctionOf: resubmitted.id }, [await photo("purple", "after-reject.jpg")]), (error) => error.status === 409, "an Admin rejection cannot be corrected");
+  } finally {
+    for (const report of reports) for (const row of report.submissions || []) for (const item of row.photos || []) await deletePlantingPhoto(item.photoPath);
+  }
 });
 
 test("final planting confirmation covers exactly 100 released = 80 planted + 20 final leftovers", async t => {
@@ -663,7 +720,7 @@ test("final planting confirmation covers exactly 100 released = 80 planted + 20 
       for (const method of ["create", "set", "update"]) { const write = transaction[method].bind(transaction); transaction[method] = (...args) => { wrote = true; return write(...args); }; }
       return handler(transaction);
     }));
-    const approved = await service.approvePlantingReport(report.submissions[0].id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+    const approved = await (await service.forwardPlantingReport(report.submissions[0].id, "planting-staff", "Evidence reviewed", "MENRO Staff", "staff"), await service.approvePlantingReport(report.submissions[0].id, "planting-admin", "Confirmed quantities", "MENRO Admin", "admin"));
     assert.equal(approved.acceptedQuantity, 80); assert.equal(approved.acceptedLeftoverQuantity, 20);
     assert.equal(approved.pendingReviewLeftoverQuantity, 0); assert.equal(approved.remainingAvailableQuantity, 0);
   } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
@@ -1118,7 +1175,7 @@ test("one parent groups multiple contributors and separate events get separate p
   Object.assign(table("plantingContributions").get(one.id), {
     verificationStatus: "Needs Review", staffReviewStatus: "Pending Review",
   });
-  const reviewed = await plantingReportService.approvePlantingReport(one.id, "staff-1", "", "MENRO Staff");
+  const reviewed = await (await plantingReportService.forwardPlantingReport(one.id, "staff-1", "", "MENRO Staff", "staff"), await plantingReportService.approvePlantingReport(one.id, "admin-1", "", "MENRO Admin", "admin"));
   assert.equal(reviewed.reportingProgress, "Partial");
   const additional = await contributionService.recordContribution("EVT-2026-004", "guest-4", "calamansi", 1);
   assert.equal(additional.quantity, 1);
@@ -1225,7 +1282,7 @@ test("partial 60 then final 30 plus 10 leftovers preserves a 40 future balance a
       const file = { buffer, mimetype: "image/jpeg", originalname: `partial-final-${index}.jpg` };
       report = await service.createPlantingReport({ ...body, quantityPlanted: quantity, leftoverQuantity: leftover, confirmationMode: mode }, [file]);
       const submission = report.submissions.at(-1);
-      report = await service.approvePlantingReport(submission.id, "planting-staff", "Confirmed quantities", "MENRO Staff", "staff");
+      report = await (await service.forwardPlantingReport(submission.id, "planting-staff", "Evidence reviewed", "MENRO Staff", "staff"), await service.approvePlantingReport(submission.id, "planting-admin", "Confirmed quantities", "MENRO Admin", "admin"));
       if (!index) { assert.equal(report.remainingAvailableQuantity, 40); assert.equal(report.acceptedLeftoverQuantity || 0, 0); }
       else { assert.equal(report.remainingAvailableQuantity, 0); assert.equal(report.acceptedQuantity, 90); assert.equal(report.acceptedLeftoverQuantity, 10); }
       await assert.rejects(service.createPlantingReport({ ...body, quantityPlanted: quantity, leftoverQuantity: leftover, confirmationMode: mode }, [file]));

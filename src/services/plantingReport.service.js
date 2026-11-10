@@ -51,6 +51,14 @@ const {
   "../utils/geo.util"
 );
 const { isPointWithinMunicipality } = require("../config/municipality");
+const {
+  WORKFLOW_STATUS,
+  deriveWorkflowStatus,
+  deriveStandaloneWorkflowStatus,
+  requiredReason,
+  optionalRemarks,
+  fail: workflowFail,
+} = require("../utils/plantingReviewWorkflow.util");
 
 
 const REPORT_COLLECTION =
@@ -169,11 +177,15 @@ const withWorkflowStatus = (doc) => {
     : rawReviewStatus === "Rejected" ? "Rejected"
       : ["Approved", "Accepted"].includes(rawReviewStatus) ? "Accepted"
         : verificationStatus === "Verified" ? "Not Required" : "Pending Review";
+  const workflowStage = data.reportType === "parent" ? undefined
+    : deriveStandaloneWorkflowStatus(data, workflowStatus(rawStatus));
   return {
     id: doc.id,
     ...data,
     verificationStatus,
     staffReviewStatus,
+    ...(workflowStage ? { workflowStatus: workflowStage,
+      correctionAllowed: workflowStage === WORKFLOW_STATUS.RETURNED && !data.correctedByReportId } : {}),
     ...(data.automatedVerificationStatus === undefined && legacyAutomatedStatus
       ? { automatedVerificationStatus: legacyAutomatedStatus }
       : {}),
@@ -362,6 +374,12 @@ async function createPlantingReport(data, files) {
     "submittedByName", "submittedBySector", "submittedByContactNumber"].map(key => [key, payload[key]]));
   if (Number(payload.leftoverQuantity || 0) !== 0) fingerprintPayload.leftoverQuantity = Number(payload.leftoverQuantity);
   if (payload.confirmationMode === "final") fingerprintPayload.confirmationMode = "final";
+  if (payload.correctionOf !== undefined && payload.correctionOf !== "") {
+    if (typeof payload.correctionOf !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(payload.correctionOf)) {
+      throw Object.assign(new Error("Invalid correction reference."), { status: 400 });
+    }
+    fingerprintPayload.correctionOf = payload.correctionOf;
+  }
   if (payload.confirmationMode && !["final", "partial"].includes(payload.confirmationMode)) throw Object.assign(new Error("Select a final or partial planting confirmation."), { status: 400 });
   return runWorkflow({ actor: { uid: data.participantId }, workflow: "planting-report",
     key: idempotencyKey, payload: fingerprintPayload, files },
@@ -514,9 +532,21 @@ const createPlantingReportImpl = async (
     );
 
   if (existingDistributionReport && !distribution.eventId) {
-    throw new Error(
-      "A planting report already exists for this distribution."
-    );
+    // A standalone report returned for correction may be replaced once by its
+    // own corrected resubmission; every other duplicate stays blocked.
+    const existingReports = (await reportCollection.where("distributionId", "==", data.distributionId).get()).docs
+      .map((doc) => ({ id: doc.id, ...doc.data() }));
+    const returned = existingReports.find((report) => report.id === data.correctionOf);
+    const correctable = returned && returned.participantId === data.participantId && !returned.correctedByReportId &&
+      deriveStandaloneWorkflowStatus(returned, workflowStatus(String(returned.verificationStatus || ""))) === WORKFLOW_STATUS.RETURNED &&
+      existingReports.every((report) => report.id === returned.id || report.correctedByReportId);
+    if (!correctable) {
+      throw new Error(
+        "A planting report already exists for this distribution."
+      );
+    }
+  } else if (data.correctionOf && !distribution.eventId) {
+    throw workflowFail(409, "Only your own planting report returned for correction can be resubmitted.");
   }
 
 
@@ -1555,6 +1585,20 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           throw Object.assign(new Error(message), { status: 400, fieldErrors: { quantityPlanted: message } });
         }
         parentId = `event_${submittedEventId}`;
+        // A correction links to the submission MENRO Staff returned. The new
+        // evidence still passed every geotag check above; history stays immutable.
+        let correctionRef = null, correction = null;
+        if (data.correctionOf) {
+          correctionRef = contributionCollection.doc(data.correctionOf);
+          const prior = await transaction.get(correctionRef);
+          correction = prior.exists ? prior.data() : null;
+          if (!correction || correction.officialStaffReport === true || correction.reportId !== parentId ||
+              (correction.contributorId || correction.participantId) !== data.participantId ||
+              correction.inventoryId !== inventoryId || correction.correctedBySubmission ||
+              deriveWorkflowStatus(correction) !== WORKFLOW_STATUS.RETURNED) {
+            throw workflowFail(409, "Only your own submission returned for correction can be resubmitted for the same event and seedling.");
+          }
+        }
         const hashDocs = await Promise.all(uploadedPhotos.map((photo) =>
           transaction.get(evidenceHashCollection.doc(photo.imageHash))));
         if (hashDocs.some((doc) => doc.exists)) {
@@ -1612,7 +1656,19 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
               ? { earlyMonitoringOriginalSubmittedAt: now } : {}),
           });
         }
+        if (correctionRef) {
+          transaction.update(correctionRef, { correctedBySubmission: contributionRef.id, correctedAt: now, updatedAt: now });
+          createVerificationLogInTransaction(transaction, {
+            plantingReportId: parentId, submissionId: contributionRef.id, action: "Participant Resubmission",
+            previousStatus: WORKFLOW_STATUS.RETURNED, newStatus: WORKFLOW_STATUS.PENDING_REVIEW,
+            performedBy: data.participantId, performedByRole: "participant",
+            performedByName: data.submittedByName || data.participantName || "",
+            remarks: `Corrected submission ${correctionRef.id}.`, createdAt: now,
+          });
+        }
         transaction.create(contributionRef, {
+          workflowStatus: WORKFLOW_STATUS.PENDING_REVIEW,
+          ...(correctionRef ? { correctionOf: correctionRef.id, revision: Number(correction.revision || 0) + 1 } : { revision: 0 }),
           reportId: parentId,
           requestId: event.sourceRequestId,
           eventId: submittedEventId,
@@ -1736,6 +1792,12 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       if (hashDocs.some((hashDoc) => hashDoc.exists)) {
         throw new Error("Duplicate planting image detected.");
       }
+      const correctionRef = data.correctionOf ? reportCollection.doc(data.correctionOf) : null;
+      const correctionDoc = correctionRef ? await transaction.get(correctionRef) : null;
+      if (correctionRef && (!correctionDoc.exists || correctionDoc.data().correctedByReportId ||
+          correctionDoc.data().participantId !== data.participantId)) {
+        throw workflowFail(409, "This returned planting report was already corrected.");
+      }
       reportNumber = await nextRecordNumber(transaction, {
         prefix: "RPT",
         counterKey: "plantingReports",
@@ -1744,7 +1806,18 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       });
       if (complete) complete({ collection: "plantingReports", recordId: docRef.id });
       consumeCaptures(docRef.id);
-      transaction.create(docRef, { ...reportData, reportNumber });
+      transaction.create(docRef, { ...reportData, reportNumber, workflowStatus: WORKFLOW_STATUS.PENDING_REVIEW,
+        ...(correctionRef ? { correctionOf: correctionRef.id, revision: Number(correctionDoc.data().revision || 0) + 1 } : { revision: 0 }) });
+      if (correctionRef) {
+        transaction.update(correctionRef, { correctedByReportId: docRef.id, correctedAt: now, updatedAt: now });
+        createVerificationLogInTransaction(transaction, {
+          plantingReportId: docRef.id, action: "Participant Resubmission",
+          previousStatus: WORKFLOW_STATUS.RETURNED, newStatus: WORKFLOW_STATUS.PENDING_REVIEW,
+          performedBy: data.participantId, performedByRole: "participant",
+          performedByName: data.submittedByName || data.participantName || "",
+          remarks: `Corrected planting report ${correctionRef.id}.`, createdAt: now,
+        });
+      }
       hashRefs.forEach((hashRef) => transaction.create(hashRef, {
         reportId: docRef.id,
         createdAt: now,
@@ -1982,8 +2055,279 @@ const getPlantingReportsByParticipantId =
 
 
 // --------------------------------
-// STAFF APPROVE
-// PLANTING REPORT
+// PLANTING REPORT REVIEW DECISIONS
+//
+// Participant submissions: MENRO Staff forwards (Reviewed) or returns them for
+// correction; only MENRO Admin approves (Completed) or rejects (Rejected) a
+// Staff-reviewed submission. Official Staff submissions are decided by Admin
+// in officialPlantingReport.service. Only Admin approval accepts planted
+// quantities, completes progress and activates monitoring eligibility.
+// --------------------------------
+const STAFF_REVIEW_ONLY = "Only MENRO Staff can review participant planting reports.";
+const ADMIN_DECISION_ONLY = "Only MENRO Admin can approve or reject a planting report after Staff review.";
+
+const reviewActor = (uid, fullName, role) => ({
+  uid, fullName: fullName || "", role: String(role || "").toLowerCase(),
+});
+
+function assertActorRole(actor, role, message) {
+  if (!actor.uid) throw workflowFail(401, "Authentication is required.");
+  if (actor.role !== role) throw workflowFail(403, message);
+}
+
+function assertAwaitingStaffReview(stage, ledgerPending) {
+  if (!ledgerPending || stage !== WORKFLOW_STATUS.PENDING_REVIEW) {
+    throw workflowFail(409, "Only planting reports pending Staff review can be forwarded or returned.");
+  }
+}
+
+function assertAwaitingAdminDecision(stage, ledgerPending) {
+  if (ledgerPending && stage === WORKFLOW_STATUS.PENDING_REVIEW) {
+    throw workflowFail(409, "MENRO Staff must review and forward this planting report before Admin approval.");
+  }
+  if (!ledgerPending || stage !== WORKFLOW_STATUS.REVIEWED) {
+    throw workflowFail(409, "Only planting reports reviewed by MENRO Staff can be approved or rejected.");
+  }
+}
+
+const submitterOf = (submission) => submission.contributorId || submission.participantId;
+
+// Releases a pending contribution's planted and leftover quantities back to
+// the event balance (Admin rejection and Staff return share this ledger rule).
+function releaseContributionInTransaction(transaction, {
+  contributionRef, current, parentRef, parent, eventRef, event, now, contributionUpdate, returned,
+}) {
+  const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
+  const inventoryId = current.inventoryId;
+  const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
+  recorded[inventoryId] = Math.max(0, Number(recorded[inventoryId] || 0) - quantity);
+  const nextActive = Math.max(0, Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0) - quantity);
+  const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
+  const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
+  const accepted = Number(parent.acceptedQuantity || 0);
+  const reportingProgress = progressFor({ released, active: nextActive, accepted, pending: nextPending,
+    leftovers: Number(parent.declaredLeftoverQuantity || 0) - leftover, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
+  transaction.update(contributionRef, contributionUpdate);
+  transaction.update(eventRef, {
+    recordedSeedlingsByInventory: recorded,
+    ...(leftover ? { leftoverSeedlingsByInventory: { ...(event.leftoverSeedlingsByInventory || {}), [inventoryId]: Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0) - leftover }, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover } : {}),
+    recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
+    officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
+    remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
+      (event.seedlingItems || []).reduce((sum, item) => sum + availableForReporting(event, item), 0) + quantity + leftover),
+    updatedAt: now,
+  });
+  transaction.update(parentRef, {
+    quantityPlanted: nextActive, activeSubmittedQuantity: nextActive,
+    pendingReviewQuantity: nextPending,
+    ...(leftover ? { declaredLeftoverQuantity: Number(parent.declaredLeftoverQuantity || 0) - leftover, pendingReviewLeftoverQuantity: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover } : {}),
+    ...(returned
+      ? { returnedQuantity: Number(parent.returnedQuantity || 0) + quantity }
+      : { rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity }),
+    remainingAvailableQuantity: Math.max(0, released - nextActive - Number(parent.declaredLeftoverQuantity || 0) + leftover),
+    reportingProgress,
+    verificationStatus: reportingProgress,
+    updatedAt: now,
+  });
+}
+
+async function loadContributionLedgerInTransaction(transaction, current) {
+  const parentRef = reportRefFor(current.reportId);
+  const eventRef = db.collection(EVENT_COLLECTION).doc(current.eventId);
+  const [parentDoc, eventDoc] = await Promise.all([transaction.get(parentRef), transaction.get(eventRef)]);
+  if (!parentDoc.exists || !eventDoc.exists) throw new Error("Planting report not found.");
+  return { parentRef, parent: parentDoc.data(), eventRef, event: eventDoc.data() };
+}
+
+function notifyStaffReviewerInTransaction(transaction, submission, { key, recordId, subrecordId, approved, reason, now }) {
+  const staffId = submission.staffReviewedBy;
+  if (!staffId) return;
+  createNotificationInTransaction(transaction, {
+    notificationId: `planting_report_admin_${approved ? "approved" : "rejected"}_staff_${key}_${staffId}`,
+    recipientUserId: staffId,
+    type: approved ? "planting_report_approved" : "planting_report_rejected",
+    title: approved ? "Reviewed Planting Report Approved" : "Reviewed Planting Report Rejected",
+    message: approved
+      ? "MENRO Admin approved the planting report you forwarded."
+      : `MENRO Admin rejected the planting report you forwarded. Reason: ${reason}`,
+    relatedRecordType: "plantingReport", relatedRecordId: recordId,
+    ...(subrecordId ? { relatedSubrecordId: subrecordId } : {}), createdAt: now,
+  });
+}
+
+// --------------------------------
+// STAFF FORWARD TO ADMIN (Reviewed)
+// --------------------------------
+const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, reviewerRole) => {
+  const actor = reviewActor(reviewedBy, reviewedByName, reviewerRole);
+  assertActorRole(actor, "staff", STAFF_REVIEW_ONLY);
+  const note = optionalRemarks(remarks);
+  const contributionRef = contributionCollection.doc(id);
+  const contributionDoc = await contributionRef.get();
+  if (contributionDoc.exists) {
+    if (contributionDoc.data().officialStaffReport === true) {
+      throw workflowFail(409, "Staff-submitted planting reports go directly to MENRO Admin.");
+    }
+    let parentId = "";
+    await db.runTransaction(async (transaction) => {
+      const currentDoc = await transaction.get(contributionRef);
+      if (!currentDoc.exists) throw new Error("Planting report submission not found.");
+      const current = currentDoc.data();
+      assertAwaitingStaffReview(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+      parentId = current.reportId;
+      const adminRecipients = await getRoleRecipientsInTransaction(transaction, ["admin"]);
+      const now = Timestamp.now();
+      transaction.update(contributionRef, {
+        workflowStatus: WORKFLOW_STATUS.REVIEWED,
+        staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
+        staffReviewRemarks: note, updatedAt: now,
+      });
+      createVerificationLogInTransaction(transaction, {
+        plantingReportId: parentId, submissionId: id, action: "Staff Review — Forwarded to Admin",
+        previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.REVIEWED,
+        performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: note, createdAt: now,
+      });
+      adminRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `planting_report_forwarded_${parentId}_${id}_${recipient.id}`,
+        recipientUserId: recipient.id, type: "planting_report_forwarded",
+        title: "Planting Report Ready for Admin Approval",
+        message: `${actor.fullName || "MENRO Staff"} reviewed a planting report submission and forwarded it for your approval.`,
+        relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now,
+      }));
+      createNotificationInTransaction(transaction, {
+        notificationId: `planting_report_reviewed_${parentId}_${id}_${submitterOf(current)}`,
+        recipientUserId: submitterOf(current), type: "planting_report_reviewed",
+        title: "Planting Report Reviewed",
+        message: "MENRO Staff reviewed your planting report and forwarded it to the MENRO Admin for approval.",
+        relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now,
+      });
+    });
+    return getPlantingReportById(parentId);
+  }
+
+  const reportRef = reportRefFor(id);
+  await db.runTransaction(async (transaction) => {
+    const reportDoc = await transaction.get(reportRef);
+    if (!reportDoc.exists) throw new Error("Planting report not found.");
+    const currentReport = reportDoc.data();
+    if (currentReport.officialPlantingWorkflow === true || currentReport.reportType === "parent") {
+      throw workflowFail(409, "Review each planting report submission individually.");
+    }
+    const ledgerPending = workflowStatus(currentReport.verificationStatus) === "Pending Review";
+    assertAwaitingStaffReview(deriveStandaloneWorkflowStatus(currentReport, ledgerPending ? "Pending Review" : ""), ledgerPending);
+    const adminRecipients = await getRoleRecipientsInTransaction(transaction, ["admin"]);
+    const now = Timestamp.now();
+    transaction.update(reportRef, {
+      workflowStatus: WORKFLOW_STATUS.REVIEWED,
+      staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
+      staffReviewRemarks: note, updatedAt: now,
+    });
+    createVerificationLogInTransaction(transaction, {
+      plantingReportId: id, action: "Staff Review — Forwarded to Admin",
+      previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.REVIEWED,
+      performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: note, createdAt: now,
+    });
+    adminRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+      notificationId: `planting_report_forwarded_${id}_${recipient.id}`,
+      recipientUserId: recipient.id, type: "planting_report_forwarded",
+      title: "Planting Report Ready for Admin Approval",
+      message: `${actor.fullName || "MENRO Staff"} reviewed ${currentReport.reportNumber || "a planting report"} and forwarded it for your approval.`,
+      relatedRecordType: "plantingReport", relatedRecordId: id, createdAt: now,
+    }));
+    createNotificationInTransaction(transaction, {
+      notificationId: `planting_report_reviewed_${id}_${currentReport.participantId}`,
+      recipientUserId: currentReport.participantId, type: "planting_report_reviewed",
+      title: "Planting Report Reviewed",
+      message: "MENRO Staff reviewed your planting report and forwarded it to the MENRO Admin for approval.",
+      relatedRecordType: "plantingReport", relatedRecordId: id, createdAt: now,
+    });
+  });
+  return withWorkflowStatus(await reportRef.get());
+};
+
+// --------------------------------
+// RETURN FOR CORRECTION
+// Staff returns participant reports; Admin returns official Staff reports.
+// --------------------------------
+const returnPlantingReport = async (id, returnedBy, remarks, returnedByName, reviewerRole) => {
+  const actor = reviewActor(returnedBy, returnedByName, reviewerRole);
+  const reason = requiredReason(remarks, "return");
+  const contributionRef = contributionCollection.doc(id);
+  const contributionDoc = await contributionRef.get();
+  if (contributionDoc.exists && contributionDoc.data().officialStaffReport === true) {
+    return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "return", reason);
+  }
+  assertActorRole(actor, "staff", STAFF_REVIEW_ONLY);
+  if (contributionDoc.exists) {
+    let parentId = "";
+    await db.runTransaction(async (transaction) => {
+      const currentDoc = await transaction.get(contributionRef);
+      if (!currentDoc.exists) throw new Error("Planting report submission not found.");
+      const current = currentDoc.data();
+      assertAwaitingStaffReview(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
+      parentId = current.reportId;
+      const ledger = await loadContributionLedgerInTransaction(transaction, current);
+      const now = Timestamp.now();
+      releaseContributionInTransaction(transaction, {
+        ...ledger, contributionRef, current, now, returned: true,
+        contributionUpdate: {
+          staffReviewStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.RETURNED,
+          staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
+          returnedBy: actor.uid, returnedByName: actor.fullName, returnedByRole: "staff", returnedAt: now,
+          returnReason: reason, reviewRemarks: reason, updatedAt: now,
+        },
+      });
+      createVerificationLogInTransaction(transaction, {
+        plantingReportId: parentId, submissionId: id, action: "Staff Return for Correction",
+        previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.RETURNED,
+        performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: reason, createdAt: now,
+      });
+      createNotificationInTransaction(transaction, {
+        notificationId: `planting_report_returned_${parentId}_${id}_${submitterOf(current)}`,
+        recipientUserId: submitterOf(current), type: "planting_report_returned",
+        title: "Planting Report Returned for Correction",
+        message: `MENRO Staff returned your planting report for correction. Reason: ${reason}`,
+        relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now,
+      });
+    });
+    return getPlantingReportById(parentId);
+  }
+
+  const reportRef = reportRefFor(id);
+  await db.runTransaction(async (transaction) => {
+    const reportDoc = await transaction.get(reportRef);
+    if (!reportDoc.exists) throw new Error("Planting report not found.");
+    const currentReport = reportDoc.data();
+    if (currentReport.officialPlantingWorkflow === true || currentReport.reportType === "parent") {
+      throw workflowFail(409, "Review each planting report submission individually.");
+    }
+    const ledgerPending = workflowStatus(currentReport.verificationStatus) === "Pending Review";
+    assertAwaitingStaffReview(deriveStandaloneWorkflowStatus(currentReport, ledgerPending ? "Pending Review" : ""), ledgerPending);
+    const now = Timestamp.now();
+    transaction.update(reportRef, {
+      verificationStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.RETURNED,
+      staffReviewedBy: actor.uid, staffReviewedByName: actor.fullName, staffReviewedAt: now,
+      returnedBy: actor.uid, returnedByName: actor.fullName, returnedByRole: "staff", returnedAt: now,
+      returnReason: reason, updatedAt: now,
+    });
+    createVerificationLogInTransaction(transaction, {
+      plantingReportId: id, action: "Staff Return for Correction",
+      previousStatus: WORKFLOW_STATUS.PENDING_REVIEW, newStatus: WORKFLOW_STATUS.RETURNED,
+      performedBy: actor.uid, performedByRole: "staff", performedByName: actor.fullName, remarks: reason, createdAt: now,
+    });
+    createNotificationInTransaction(transaction, {
+      notificationId: `planting_report_returned_${id}_${currentReport.participantId}`,
+      recipientUserId: currentReport.participantId, type: "planting_report_returned",
+      title: "Planting Report Returned for Correction",
+      message: `MENRO Staff returned your planting report for correction. Reason: ${reason}`,
+      relatedRecordType: "plantingReport", relatedRecordId: id, createdAt: now,
+    });
+  });
+  return withWorkflowStatus(await reportRef.get());
+};
+
+// --------------------------------
+// ADMIN APPROVE (Completed)
 // --------------------------------
 const approvePlantingReport =
   async (
@@ -1993,21 +2337,19 @@ const approvePlantingReport =
     reviewedByName,
     reviewerRole = "staff"
   ) => {
+    const actor = reviewActor(approvedBy, reviewedByName, reviewerRole);
+    const note = optionalRemarks(remarks);
     const contributionRef = contributionCollection.doc(id);
     const contributionDoc = await contributionRef.get();
     if (contributionDoc.exists) {
-      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission({ uid: approvedBy, fullName: reviewedByName, role: reviewerRole }, id, true, remarks);
+      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "approve", note);
+      assertActorRole(actor, "admin", ADMIN_DECISION_ONLY);
       let parentId = "";
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
         const current = currentDoc.data();
-        if (current.staffReviewStatus !== "Pending Review") {
-          throw new Error("Only submissions pending Staff review can be accepted.");
-        }
-        if (current.staffApprovalRequired === true && reviewerRole !== "staff") {
-          throw new Error("New planting report submissions may only be accepted by MENRO Staff.");
-        }
+        assertAwaitingAdminDecision(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
         parentId = current.reportId;
         const parentRef = reportRefFor(parentId);
         const parentDoc = await transaction.get(parentRef);
@@ -2041,9 +2383,10 @@ const approvePlantingReport =
           now,
         });
         transaction.update(contributionRef, {
-          staffReviewStatus: "Accepted", reviewedBy: approvedBy,
-          reviewedByName: reviewedByName || "", reviewedAt: now,
-          reviewRemarks: remarks?.trim() || "", updatedAt: now,
+          staffReviewStatus: "Accepted", workflowStatus: WORKFLOW_STATUS.COMPLETED,
+          reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
+          adminDecisionBy: actor.uid, adminDecisionByName: actor.fullName, adminDecisionAt: now,
+          reviewRemarks: note, updatedAt: now,
         });
         transaction.update(parentRef, {
           acceptedQuantity: accepted, pendingReviewQuantity: pending,
@@ -2063,165 +2406,87 @@ const approvePlantingReport =
           details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
         }));
         createVerificationLogInTransaction(transaction, {
-          plantingReportId: parentId, submissionId: id, action: "Staff Acceptance",
-          previousStatus: "Pending Review", newStatus: "Accepted",
-          performedBy: approvedBy, performedByRole: reviewerRole,
-          remarks: remarks?.trim() || "", createdAt: now,
+          plantingReportId: parentId, submissionId: id, action: "Admin Approval",
+          previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.COMPLETED,
+          performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName,
+          remarks: note, createdAt: now,
         });
         createNotificationInTransaction(transaction, {
-          recipientUserId: current.contributorId || current.participantId,
-          notificationId: `planting_report_accepted_${parentId}_${id}_${current.contributorId || current.participantId}`,
-          type: "planting_report_accepted", title: "Planting report submission accepted",
-          message: "Your planting report submission was accepted.",
+          recipientUserId: submitterOf(current),
+          notificationId: `planting_report_accepted_${parentId}_${id}_${submitterOf(current)}`,
+          type: "planting_report_accepted", title: "Planting Report Approved",
+          message: "MENRO Admin approved your planting report. Your planted quantity is now confirmed.",
           relatedRecordType: "plantingReport", relatedRecordId: parentId,
           relatedSubrecordId: id, createdAt: now,
         });
+        notifyStaffReviewerInTransaction(transaction, current, { key: `${parentId}_${id}`, recordId: parentId, subrecordId: id, approved: true, now });
       });
       return getPlantingReportById(parentId);
     }
-    const reportRef =
-      reportRefFor(id);
 
-    await db.runTransaction(
-      async (transaction) => {
-        const reportDoc =
-          await transaction.get(
-            reportRef
-          );
+    assertActorRole(actor, "admin", ADMIN_DECISION_ONLY);
+    const reportRef = reportRefFor(id);
+    await db.runTransaction(async (transaction) => {
+      const reportDoc = await transaction.get(reportRef);
+      if (!reportDoc.exists) throw new Error("Planting report not found.");
+      const currentReport = reportDoc.data();
+      if (currentReport.officialPlantingWorkflow === true) throw Object.assign(new Error("Review each official Staff submission through its Admin decision."), { status: 409 });
+      const ledgerPending = workflowStatus(currentReport.verificationStatus) === "Pending Review";
+      assertAwaitingAdminDecision(deriveStandaloneWorkflowStatus(currentReport, ledgerPending ? "Pending Review" : ""), ledgerPending);
+      const now = Timestamp.now();
+      const earlyMonitoring = buildEarlyMonitoringPolicy({
+        originalSubmittedAt: currentReport.earlyMonitoringOriginalSubmittedAt || currentReport.createdAt,
+        verifiedAt: now,
+        officialOpeningDate: shiftCalendarDate(String(currentReport.plantingDate || ""), 14),
+      });
+      const monitoringRecipients = earlyMonitoring?.applicable
+        ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
+      await ensureCohortForAuthoritativeReportInTransaction(transaction, {
+        reportId: id,
+        report: { ...currentReport, verificationStatus: "Approved" },
+        now,
+      });
+      transaction.update(reportRef, {
+        verificationStatus: "Approved", workflowStatus: WORKFLOW_STATUS.COMPLETED,
+        reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
+        approvedBy: actor.uid, approvalRemarks: note, approvedAt: now,
+        rejectedBy: "", rejectionRemarks: "", rejectedAt: null,
+        updatedAt: now,
+        ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
+      });
+      createVerificationLogInTransaction(transaction, {
+        plantingReportId: id, action: "Admin Approval",
+        previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.COMPLETED,
+        performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName,
+        remarks: note, createdAt: now,
+      });
+      createNotificationInTransaction(transaction, {
+        recipientUserId: currentReport.participantId,
+        notificationId: `planting_report_approved_${id}_${currentReport.participantId}`,
+        type: "planting_report_approved",
+        title: "Planting Report Approved",
+        message: "MENRO Admin approved your planting report. Your planted quantity is now confirmed.",
+        relatedRecordType: "plantingReport",
+        relatedRecordId: id,
+        createdAt: now,
+      });
+      notifyStaffReviewerInTransaction(transaction, currentReport, { key: id, recordId: id, approved: true, now });
+      if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `early_monitoring_scheduled_${id}_${recipient.id}`,
+        recipientUserId: recipient.id,
+        type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
+        message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
+        relatedRecordType: "monitoring", relatedRecordId: id, createdAt: now,
+        details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
+      }));
+    });
 
-        if (
-          !reportDoc.exists
-        ) {
-          throw new Error(
-            "Planting report not found."
-          );
-        }
-
-        const currentReport =
-          reportDoc.data();
-
-        if (currentReport.officialPlantingWorkflow === true) throw Object.assign(new Error("Review each official Staff submission through its Admin decision."), { status: 409 });
-
-        if (currentReport.staffApprovalRequired === true && reviewerRole !== "staff") {
-          throw new Error("New planting reports may only be approved by MENRO Staff.");
-        }
-
-        if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
-          throw new Error(
-            "Only pending review planting reports can be approved."
-          );
-        }
-
-        const now =
-          Timestamp.now();
-
-        const earlyMonitoring = buildEarlyMonitoringPolicy({
-          originalSubmittedAt: currentReport.earlyMonitoringOriginalSubmittedAt || currentReport.createdAt,
-          verifiedAt: now,
-          officialOpeningDate: shiftCalendarDate(String(currentReport.plantingDate || ""), 14),
-        });
-        const monitoringRecipients = earlyMonitoring?.applicable
-          ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
-
-        transaction.update(
-          reportRef,
-          {
-            verificationStatus:
-              "Approved",
-
-            reviewedBy: approvedBy,
-            reviewedByName: reviewedByName || "",
-            reviewedAt: now,
-
-            approvedBy,
-
-            approvalRemarks:
-              remarks?.trim() ||
-              "",
-
-            approvedAt:
-              now,
-
-            rejectedBy:
-              "",
-
-            rejectionRemarks:
-              "",
-
-            rejectedAt:
-              null,
-
-            updatedAt:
-              now,
-            ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}),
-          }
-        );
-        await ensureCohortForAuthoritativeReportInTransaction(transaction, {
-          reportId: id,
-          report: { ...currentReport, verificationStatus: "Approved" },
-          now,
-        });
-
-        createVerificationLogInTransaction(
-          transaction,
-          {
-            plantingReportId:
-              id,
-
-            action:
-              "Staff Approval",
-
-            previousStatus:
-              currentReport.verificationStatus,
-
-            newStatus:
-              "Approved",
-
-            performedBy:
-              approvedBy,
-
-            performedByRole:
-              "staff",
-
-            remarks:
-              remarks?.trim() ||
-              "",
-
-            createdAt:
-              now,
-          }
-        );
-        createNotificationInTransaction(transaction, {
-          recipientUserId: currentReport.participantId,
-          notificationId: `planting_report_approved_${id}_${currentReport.participantId}`,
-          type: "planting_report_approved",
-          title: "Planting report approved",
-          message: "Your planting report has been approved.",
-          relatedRecordType: "plantingReport",
-          relatedRecordId: id,
-          createdAt: now,
-        });
-        if (earlyMonitoring?.applicable) monitoringRecipients.forEach((recipient) => createNotificationInTransaction(transaction, {
-          notificationId: `early_monitoring_scheduled_${id}_${recipient.id}`,
-          recipientUserId: recipient.id,
-          type: "early_monitoring_scheduled", title: "Early Monitoring Scheduled",
-          message: `Early Survival Monitoring opens on ${earlyMonitoring.openingDate}.`,
-          relatedRecordType: "monitoring", relatedRecordId: id, createdAt: now,
-          details: { openingDate: earlyMonitoring.openingDate, deadlineDate: earlyMonitoring.deadlineDate },
-        }));
-      }
-    );
-
-    const updatedDoc =
-      await reportRef.get();
-
-    return withWorkflowStatus(updatedDoc);
+    return withWorkflowStatus(await reportRef.get());
   };
 
 
 // --------------------------------
-// STAFF REJECT
-// PLANTING REPORT
+// ADMIN REJECT (Rejected, final)
 // --------------------------------
 const rejectPlantingReport =
   async (
@@ -2231,195 +2496,85 @@ const rejectPlantingReport =
     reviewedByName,
     reviewerRole = "staff"
   ) => {
-    if (typeof remarks !== "string" || !remarks.trim()) {
-      throw new Error("Rejection reason is required.");
-    }
+    const actor = reviewActor(rejectedBy, reviewedByName, reviewerRole);
+    const reason = requiredReason(remarks, "rejection");
     const contributionRef = contributionCollection.doc(id);
     const contributionDoc = await contributionRef.get();
     if (contributionDoc.exists) {
-      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission({ uid: rejectedBy, fullName: reviewedByName, role: reviewerRole }, id, false, remarks);
+      if (contributionDoc.data().officialStaffReport === true) return require("./officialPlantingReport.service").reviewOfficialSubmission(actor, id, "reject", reason);
+      assertActorRole(actor, "admin", ADMIN_DECISION_ONLY);
       let parentId = "";
       await db.runTransaction(async (transaction) => {
         const currentDoc = await transaction.get(contributionRef);
         if (!currentDoc.exists) throw new Error("Planting report submission not found.");
         const current = currentDoc.data();
-        if (current.staffReviewStatus !== "Pending Review") {
-          throw new Error("Only submissions pending Staff review can be rejected.");
-        }
-        if (current.staffApprovalRequired === true && reviewerRole !== "staff") {
-          throw new Error("New planting report submissions may only be rejected by MENRO Staff.");
-        }
+        assertAwaitingAdminDecision(deriveWorkflowStatus(current), current.staffReviewStatus === "Pending Review");
         parentId = current.reportId;
-        const parentRef = reportRefFor(parentId);
-        const eventRef = db.collection(EVENT_COLLECTION).doc(current.eventId);
-        const [parentDoc, eventDoc] = await Promise.all([
-          transaction.get(parentRef), transaction.get(eventRef),
-        ]);
-        if (!parentDoc.exists || !eventDoc.exists) throw new Error("Planting report not found.");
-        const parent = parentDoc.data();
-        const event = eventDoc.data();
-        const quantity = Number(current.quantity || 0), leftover = Number(current.leftoverQuantity || 0);
-        const inventoryId = current.inventoryId;
-        const recorded = { ...(event.recordedSeedlingsByInventory || {}) };
-        recorded[inventoryId] = Math.max(0, Number(recorded[inventoryId] || 0) - quantity);
-        const nextActive = Math.max(0, Number(parent.activeSubmittedQuantity ?? parent.quantityPlanted ?? 0) - quantity);
-        const nextPending = Math.max(0, Number(parent.pendingReviewQuantity || 0) - quantity);
-        const released = Number(parent.quantityReleased || event.seedlingTotalQuantity || 0);
-        const accepted = Number(parent.acceptedQuantity || 0);
-        const reportingProgress = progressFor({ released, active: nextActive, accepted, pending: nextPending,
-          leftovers: Number(parent.declaredLeftoverQuantity || 0) - leftover, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover });
+        const ledger = await loadContributionLedgerInTransaction(transaction, current);
         const now = Timestamp.now();
-        transaction.update(contributionRef, {
-          staffReviewStatus: "Rejected", reviewedBy: rejectedBy,
-          reviewedByName: reviewedByName || "", reviewedAt: now,
-          rejectionReason: remarks.trim(), updatedAt: now,
-        });
-        transaction.update(eventRef, {
-          recordedSeedlingsByInventory: recorded,
-          ...(leftover ? { leftoverSeedlingsByInventory: { ...(event.leftoverSeedlingsByInventory || {}), [inventoryId]: Number(event.leftoverSeedlingsByInventory?.[inventoryId] || 0) - leftover }, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover } : {}),
-          recordedSeedlingQuantity: Math.max(0, Number(event.recordedSeedlingQuantity || 0) - quantity),
-          officialReportingVersion: Number(event.officialReportingVersion || 0) + 1,
-          remainingSeedlingQuantity: Math.min(Number(event.seedlingTotalQuantity || 0),
-            (event.seedlingItems || []).reduce((sum, item) => sum + availableForReporting(event, item), 0) + quantity + leftover),
-          updatedAt: now,
-        });
-        transaction.update(parentRef, {
-          quantityPlanted: nextActive, activeSubmittedQuantity: nextActive,
-          pendingReviewQuantity: nextPending,
-          ...(leftover ? { declaredLeftoverQuantity: Number(parent.declaredLeftoverQuantity || 0) - leftover, pendingReviewLeftoverQuantity: Number(parent.pendingReviewLeftoverQuantity || 0) - leftover } : {}),
-          rejectedQuantity: Number(parent.rejectedQuantity || 0) + quantity,
-          remainingAvailableQuantity: Math.max(0, released - nextActive - Number(parent.declaredLeftoverQuantity || 0) + leftover),
-          reportingProgress,
-          verificationStatus: reportingProgress,
-          updatedAt: now,
+        releaseContributionInTransaction(transaction, {
+          ...ledger, contributionRef, current, now, returned: false,
+          contributionUpdate: {
+            staffReviewStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.REJECTED,
+            reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
+            adminDecisionBy: actor.uid, adminDecisionByName: actor.fullName, adminDecisionAt: now,
+            rejectionReason: reason, updatedAt: now,
+          },
         });
         createVerificationLogInTransaction(transaction, {
-          plantingReportId: parentId, submissionId: id, action: "Staff Rejection",
-          previousStatus: "Pending Review", newStatus: "Rejected",
-          performedBy: rejectedBy, performedByRole: reviewerRole, remarks: remarks.trim(), createdAt: now,
+          plantingReportId: parentId, submissionId: id, action: "Admin Rejection",
+          previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.REJECTED,
+          performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName, remarks: reason, createdAt: now,
         });
         createNotificationInTransaction(transaction, {
-          recipientUserId: current.contributorId || current.participantId,
-          notificationId: `planting_report_rejected_${parentId}_${id}_${current.contributorId || current.participantId}`,
-          type: "planting_report_rejected", title: "Planting report submission rejected",
-          message: `Your planting report submission was rejected. Reason: ${remarks.trim()}`,
+          recipientUserId: submitterOf(current),
+          notificationId: `planting_report_rejected_${parentId}_${id}_${submitterOf(current)}`,
+          type: "planting_report_rejected", title: "Planting Report Rejected",
+          message: `MENRO Admin rejected your planting report. Reason: ${reason}`,
           relatedRecordType: "plantingReport", relatedRecordId: parentId,
           relatedSubrecordId: id, createdAt: now,
         });
+        notifyStaffReviewerInTransaction(transaction, current, { key: `${parentId}_${id}`, recordId: parentId, subrecordId: id, approved: false, reason, now });
       });
       return getPlantingReportById(parentId);
     }
-    const reportRef =
-      reportRefFor(id);
 
-    await db.runTransaction(
-      async (transaction) => {
-        const reportDoc =
-          await transaction.get(
-            reportRef
-          );
+    assertActorRole(actor, "admin", ADMIN_DECISION_ONLY);
+    const reportRef = reportRefFor(id);
+    await db.runTransaction(async (transaction) => {
+      const reportDoc = await transaction.get(reportRef);
+      if (!reportDoc.exists) throw new Error("Planting report not found.");
+      const currentReport = reportDoc.data();
+      if (currentReport.officialPlantingWorkflow === true) throw Object.assign(new Error("Review each official Staff submission through its Admin decision."), { status: 409 });
+      const ledgerPending = workflowStatus(currentReport.verificationStatus) === "Pending Review";
+      assertAwaitingAdminDecision(deriveStandaloneWorkflowStatus(currentReport, ledgerPending ? "Pending Review" : ""), ledgerPending);
+      const now = Timestamp.now();
+      transaction.update(reportRef, {
+        verificationStatus: "Rejected", workflowStatus: WORKFLOW_STATUS.REJECTED,
+        reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
+        rejectedBy: actor.uid, rejectionRemarks: reason, rejectedAt: now,
+        approvedBy: "", approvalRemarks: "", approvedAt: null,
+        updatedAt: now,
+      });
+      createVerificationLogInTransaction(transaction, {
+        plantingReportId: id, action: "Admin Rejection",
+        previousStatus: WORKFLOW_STATUS.REVIEWED, newStatus: WORKFLOW_STATUS.REJECTED,
+        performedBy: actor.uid, performedByRole: "admin", performedByName: actor.fullName, remarks: reason, createdAt: now,
+      });
+      createNotificationInTransaction(transaction, {
+        recipientUserId: currentReport.participantId,
+        notificationId: `planting_report_rejected_${id}_${currentReport.participantId}`,
+        type: "planting_report_rejected",
+        title: "Planting Report Rejected",
+        message: `MENRO Admin rejected your planting report. Reason: ${reason}`,
+        relatedRecordType: "plantingReport",
+        relatedRecordId: id,
+        createdAt: now,
+      });
+      notifyStaffReviewerInTransaction(transaction, currentReport, { key: id, recordId: id, approved: false, reason, now });
+    });
 
-        if (
-          !reportDoc.exists
-        ) {
-          throw new Error(
-            "Planting report not found."
-          );
-        }
-
-        const currentReport =
-          reportDoc.data();
-
-        if (currentReport.staffApprovalRequired === true && reviewerRole !== "staff") {
-          throw new Error("New planting reports may only be rejected by MENRO Staff.");
-        }
-
-        if (workflowStatus(currentReport.verificationStatus) !== "Pending Review") {
-          throw new Error(
-            "Only pending review planting reports can be rejected."
-          );
-        }
-
-        const now =
-          Timestamp.now();
-
-        transaction.update(
-          reportRef,
-          {
-            verificationStatus:
-              "Rejected",
-
-            reviewedBy: rejectedBy,
-            reviewedByName: reviewedByName || "",
-            reviewedAt: now,
-
-            rejectedBy,
-
-            rejectionRemarks:
-              remarks.trim(),
-
-            rejectedAt:
-              now,
-
-            approvedBy:
-              "",
-
-            approvalRemarks:
-              "",
-
-            approvedAt:
-              null,
-
-            updatedAt:
-              now,
-          }
-        );
-
-        createVerificationLogInTransaction(
-          transaction,
-          {
-            plantingReportId:
-              id,
-
-            action:
-              "Staff Rejection",
-
-            previousStatus:
-              currentReport.verificationStatus,
-
-            newStatus:
-              "Rejected",
-
-            performedBy:
-              rejectedBy,
-
-            performedByRole:
-              "staff",
-
-            remarks:
-              remarks.trim(),
-
-            createdAt:
-              now,
-          }
-        );
-        createNotificationInTransaction(transaction, {
-          recipientUserId: currentReport.participantId,
-          notificationId: `planting_report_rejected_${id}_${currentReport.participantId}`,
-          type: "planting_report_rejected",
-          title: "Planting report rejected",
-          message: `Your planting report was rejected. Reason: ${remarks.trim()}`,
-          relatedRecordType: "plantingReport",
-          relatedRecordId: id,
-          createdAt: now,
-        });
-      }
-    );
-
-    const updatedDoc =
-      await reportRef.get();
-
-    return withWorkflowStatus(updatedDoc);
+    return withWorkflowStatus(await reportRef.get());
   };
 
 
@@ -2455,6 +2610,8 @@ module.exports = {
   participantCanAccessReport,
   approvePlantingReport,
   rejectPlantingReport,
+  forwardPlantingReport,
+  returnPlantingReport,
   getPlantingReportVerificationLogs,
   assertReportableEvent,
   eventStartDate,

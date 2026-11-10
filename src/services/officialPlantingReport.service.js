@@ -4,6 +4,8 @@ const { db } = require("../config/firebase");
 const { availableForReporting, progressFor, wholeQuantity } = require("../utils/plantingBalance.util");
 const { reportDetails, normalizeSubmission } = require("./parentPlantingReport.service");
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
+const { WORKFLOW_STATUS, deriveWorkflowStatus, requiredReason, optionalRemarks } = require("../utils/plantingReviewWorkflow.util");
+const DECISIONS = { approve: "approve", reject: "reject", return: "return" };
 const fail = (status, message, fieldErrors) => Object.assign(new Error(message), { status, ...(fieldErrors ? { fieldErrors } : {}) });
 const safeId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -109,8 +111,10 @@ async function submitOfficialReport(user, input) {
       if (!safeId(input.correctionOf)) throw fail(400, "Invalid correction reference.");
       correctionRef = db.collection("plantingContributions").doc(input.correctionOf);
       const prior = await transaction.get(correctionRef); correction = prior.data();
-      if (!prior.exists || correction.reportId !== parentId || correction.authenticatedSubmitterUid !== user.uid || correction.staffReviewStatus !== "Rejected" || correction.correctedBySubmission || input.items.length !== 1 || input.items[0].inventoryId !== correction.inventoryId) throw fail(409, "This submission cannot be corrected.");
+      // Only a submission Admin returned for correction may be corrected; an Admin rejection is final.
+      if (!prior.exists || correction.reportId !== parentId || correction.authenticatedSubmitterUid !== user.uid || correction.staffReviewStatus !== "Rejected" || deriveWorkflowStatus(correction) !== WORKFLOW_STATUS.RETURNED || correction.correctedBySubmission || input.items.length !== 1 || input.items[0].inventoryId !== correction.inventoryId) throw fail(409, "This submission cannot be corrected.");
     }
+    const adminRecipients = await require("./notification.service").getRoleRecipientsInTransaction(transaction, ["admin"]);
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) }, leftovers = { ...(event.leftoverSeedlingsByInventory || {}) };
     const rows = input.items.map((row, index) => {
       const item = option.items.find(item => item.inventoryId === row.inventoryId);
@@ -139,7 +143,7 @@ async function submitOfficialReport(user, input) {
         confirmationBasis: input.confirmationBasis, participantId: request.participantId, contributorId: user.uid,
         contributorName: user.fullName || user.name || "MENRO Staff", authenticatedSubmitterUid: user.uid, submittedByName: user.fullName || user.name || "MENRO Staff", submittedByType: "MENRO Staff",
         requesterName: option.requesterName, participantSector: option.participantSector, siteId: event.plantingSiteId,
-        plantingDate: event.date, verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", photos: [], remarks: input.remarks.trim(),
+        plantingDate: event.date, verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", workflowStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, photos: [], remarks: input.remarks.trim(),
         ...(correction ? { correctionOf: correctionRef.id, revision: Number(correction.revision || 0) + 1 } : { revision: 0 }), createdAt: now, updatedAt: now });
     }
     if (correctionRef) transaction.update(correctionRef, { correctedBySubmission: rows[0].id });
@@ -151,20 +155,37 @@ async function submitOfficialReport(user, input) {
       pendingReviewLeftoverQuantity: pendingLeftovers, remainingAvailableQuantity: Math.max(0, Number(parent.quantityReleased) - active - declaredLeftovers), reportingProgress: progress, verificationStatus: progress, submittedAt: now, updatedAt: now,
       ...(!parent.earlyMonitoringOriginalSubmittedAt && activationState().enabled ? { earlyMonitoringOriginalSubmittedAt: now } : {}) });
     transaction.create(operationRef, { staffId: user.uid, requestId: requestDoc.id, eventId: eventDoc.id, reportId: parentId, fingerprint, submissionIds: rows.map(row => row.id), createdAt: now });
+    const staffName = user.fullName || user.name || "MENRO Staff";
+    require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: rows[0].id,
+      action: correction ? "Staff Resubmission" : "Staff Submission", previousStatus: correction ? WORKFLOW_STATUS.RETURNED : "",
+      newStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, performedBy: user.uid, performedByRole: "staff", performedByName: staffName,
+      remarks: correction ? `Corrected submission ${correctionRef.id}.` : "", createdAt: now });
+    adminRecipients.forEach(recipient => require("./notification.service").createNotificationInTransaction(transaction, {
+      notificationId: `official_planting_submitted_${operationId}_${recipient.id}`, recipientUserId: recipient.id,
+      type: correction ? "planting_report_resubmitted" : "planting_report_submitted_admin",
+      title: correction ? "Corrected Planting Report Awaiting Approval" : "Planting Report Awaiting Admin Approval",
+      message: `${staffName} ${correction ? "resubmitted a corrected" : "submitted a"} planting report for ${option.requesterName || option.eventName || "a released request"}.`,
+      relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: rows[0].id, createdAt: now }));
   });
   const parent = await db.collection("plantingReports").doc(parentId).get();
   return { ...await reportDetails(parentId, parent.data()), officialSubmissionIds: submissionIds };
 }
-async function reviewOfficialSubmission(user, id, approve, reason = "") {
+// Admin decides each official Staff submission: approve (Completed), reject
+// (Rejected, final) or return for correction to the original Staff submitter.
+// Legacy boolean callers keep their meaning: true = approve, false = return.
+async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "") {
   if (!user?.uid || String(user.role).toLowerCase() !== "admin") throw fail(user?.uid ? 403 : 401, "Only MENRO Admin may verify an official Staff planting report.");
-  if (!approve && !String(reason).trim()) throw fail(400, "A correction reason is required.");
+  const decision = decisionInput === true ? DECISIONS.approve : decisionInput === false ? DECISIONS.return : DECISIONS[decisionInput];
+  if (!decision) throw fail(400, "Select approve, reject or return for correction.");
+  const approve = decision === DECISIONS.approve;
+  const reason = approve ? optionalRemarks(reasonInput) : requiredReason(reasonInput, decision === DECISIONS.reject ? "rejection" : "return");
   const ref = db.collection("plantingContributions").doc(id);
   let parentId;
   await db.runTransaction(async transaction => {
     const doc = await transaction.get(ref);
     if (!doc.exists || doc.data().officialStaffReport !== true) throw fail(404, "Official submission not found.");
     const current = doc.data(); parentId = current.reportId;
-    if (current.staffReviewStatus !== "Pending Review") throw fail(409, "Only pending official submissions can be decided.");
+    if (current.staffReviewStatus !== "Pending Review" || deriveWorkflowStatus(current) !== WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL) throw fail(409, "Only pending official submissions can be decided.");
     if (approve && current.confirmationBasis === "menro-field-report") {
       const operation = await transaction.get(db.collection("officialPlantingOperations").doc(current.officialOperationId));
       const evidenceId = operation.data()?.evidenceSubmissionId;
@@ -215,13 +236,22 @@ async function reviewOfficialSubmission(user, id, approve, reason = "") {
         officialReportingVersion: Number(event.officialReportingVersion || 0) + 1, updatedAt: now });
     }
     transaction.update(parentRef, nextParent);
-    transaction.update(ref, { staffReviewStatus: approve ? "Accepted" : "Rejected", reviewedBy: user.uid, reviewedByName: user.fullName || user.name || "MENRO Admin", reviewedAt: now,
-      reviewRemarks: String(reason).trim(), ...(approve ? {} : { rejectionReason: String(reason).trim() }), updatedAt: now });
-    require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: id, action: approve ? "Admin Official Planting Verification" : "Admin Official Planting Correction Required",
-      previousStatus: "Pending Review", newStatus: approve ? "Accepted" : "Rejected", performedBy: user.uid, performedByRole: "admin", remarks: String(reason).trim(), createdAt: now });
-    require("./notification.service").createNotificationInTransaction(transaction, { notificationId: `official_planting_${id}_${approve ? "accepted" : "correction"}`, recipientUserId: current.authenticatedSubmitterUid,
-      type: approve ? "planting_report_accepted" : "planting_report_rejected", title: approve ? "Official Planting Report Verified" : "Official Planting Report Needs Correction",
-      message: approve ? "MENRO Admin verified the official planting submission." : "MENRO Admin returned the official planting submission for correction. Review the decision reason.",
+    const adminName = user.fullName || user.name || "MENRO Admin";
+    const nextStage = approve ? WORKFLOW_STATUS.COMPLETED : decision === DECISIONS.reject ? WORKFLOW_STATUS.REJECTED : WORKFLOW_STATUS.RETURNED;
+    transaction.update(ref, { staffReviewStatus: approve ? "Accepted" : "Rejected", workflowStatus: nextStage, reviewedBy: user.uid, reviewedByName: adminName, reviewedAt: now,
+      adminDecisionBy: user.uid, adminDecisionByName: adminName, adminDecisionAt: now, reviewRemarks: reason,
+      ...(decision === DECISIONS.reject ? { rejectionReason: reason } : {}),
+      ...(decision === DECISIONS.return ? { returnReason: reason, returnedBy: user.uid, returnedByName: adminName, returnedByRole: "admin", returnedAt: now } : {}), updatedAt: now });
+    require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: id,
+      action: approve ? "Admin Approval" : decision === DECISIONS.reject ? "Admin Rejection" : "Admin Return for Correction",
+      previousStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, newStatus: nextStage, performedBy: user.uid, performedByRole: "admin", performedByName: adminName, remarks: reason, createdAt: now });
+    const notice = {
+      approve: { key: "accepted", type: "planting_report_accepted", title: "Official Planting Report Approved", message: "MENRO Admin approved your official planting report. The planted quantity is now confirmed." },
+      reject: { key: "rejected", type: "planting_report_rejected", title: "Official Planting Report Rejected", message: `MENRO Admin rejected your official planting report. This decision is final. Reason: ${reason}` },
+      return: { key: "correction", type: "planting_report_returned", title: "Official Planting Report Returned for Correction", message: `MENRO Admin returned your official planting report for correction. Reason: ${reason}` },
+    }[decision];
+    require("./notification.service").createNotificationInTransaction(transaction, { notificationId: `official_planting_${id}_${notice.key}`, recipientUserId: current.authenticatedSubmitterUid,
+      type: notice.type, title: notice.title, message: notice.message,
       relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now });
   });
   const parent = await db.collection("plantingReports").doc(parentId).get();

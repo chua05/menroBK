@@ -368,11 +368,12 @@ async function getDashboard(rawFilters = {}) {
   const totalReleased = sum(filteredDistributions, (item) => item.quantity);
   const totalPlanted = sum(filteredPlanting, (item) => item.quantity);
   const totalRecordedPlanted = sum(filteredRecordedPlanting, (item) => item.quantity);
+  // Corrections returned to the submitter are not final rejections (stored field only, so history is unchanged).
   const rejectedReports = reviewableContributions.filter((contribution) =>
-    contribution.staffReviewStatus === "Rejected").length +
+    contribution.staffReviewStatus === "Rejected" && contribution.workflowStatus !== "Returned for Correction").length +
     records.plantingReports.filter((report) => report.archived !== true &&
       (report.reportType !== "parent" || !(contributionsByReport.get(report.id) || []).length) &&
-    report.verificationStatus === "Rejected" &&
+    report.verificationStatus === "Rejected" && report.workflowStatus !== "Returned for Correction" &&
     matches({ ...reportContext(report), date: report.rejectedAt || report.reviewedAt || report.updatedAt }, filters)).length;
   const reviewedContributions = reviewableContributions.filter((contribution) =>
     contribution.staffReviewStatus === "Accepted");

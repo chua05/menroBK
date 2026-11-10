@@ -10,11 +10,13 @@ const createVerificationLogInTransaction = (
   transaction,
   {
     plantingReportId,
+    submissionId,
     action,
     previousStatus,
     newStatus,
     performedBy,
     performedByRole,
+    performedByName,
     remarks,
     createdAt,
   }
@@ -24,6 +26,10 @@ const createVerificationLogInTransaction = (
 
   const logData = {
     plantingReportId,
+
+    ...(submissionId ? { submissionId } : {}),
+
+    ...(performedByName ? { performedByName } : {}),
 
     action,
 
@@ -80,7 +86,11 @@ const getVerificationLogsByPlantingReportId =
         b.createdAt?.seconds ??
         0;
 
-      return aSeconds - bSeconds;
+      // Decisions often land within the same second; nanoseconds keep history order.
+      const aNanos = a.createdAt?._nanoseconds ?? a.createdAt?.nanoseconds ?? 0;
+      const bNanos = b.createdAt?._nanoseconds ?? b.createdAt?.nanoseconds ?? 0;
+
+      return aSeconds - bSeconds || aNanos - bNanos;
     });
 
     return logs;
