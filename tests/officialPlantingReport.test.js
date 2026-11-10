@@ -222,3 +222,41 @@ test("release options map authoritative requester, site, schedule and references
   memory.records("sites").get("site-fixture").latitude = null;
   assert.equal((await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0].latitude, null);
 });
+
+function seedTwoSpecies(suffix, narra = 10, molave = 6) {
+  const fixture = seed(suffix, "individual", narra + molave);
+  memory.records("distributions").get(fixture.requestId).items = [{ inventoryId: "narra", species: "Narra", releasedQuantity: narra }, { inventoryId: "molave", species: "Molave", releasedQuantity: molave }];
+  Object.assign(memory.records("events").get(fixture.eventId), { seedlingItems: [{ inventoryId: "narra", species: "Narra", quantity: narra }, { inventoryId: "molave", species: "Molave", quantity: molave }], seedlingTotalQuantity: narra + molave });
+  return fixture;
+}
+test("one Staff report records every released seedling type with per-type planted and leftover quantities", async () => {
+  const fixture = seedTwoSpecies("two-species");
+  const [option] = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options;
+  assert.deepEqual(option.items.map(row => [row.inventoryId, row.quantityReleased, row.availableQuantity]), [["narra", 10, 10], ["molave", 6, 6]]);
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 8, leftoverQuantity: 2 }, { inventoryId: "molave", quantityPlanted: 6, leftoverQuantity: 0 }] });
+  assert.equal(report.officialSubmissionIds.length, 2);
+  assert.deepEqual(report.submissions.map(row => [row.inventoryId, row.species, row.quantity, row.leftoverQuantity]), [["narra", "Narra", 8, 2], ["molave", "Molave", 6, 0]]);
+  assert.equal(report.species, "Narra, Molave", "a multi-type report is never summarized as one species");
+  assert.equal(report.releasedItemQuantity, null); assert.equal(report.quantityReleased, 16);
+  assert.equal(report.quantityPlanted, 14); assert.equal(report.declaredLeftoverQuantity, 2); assert.equal(report.reportingProgress, "Fully Reported — Awaiting Review");
+  assert.deepEqual(report.allocationSummary.map(row => [row.species, row.allocated, row.recorded, row.leftoverQuantity, row.remaining]), [["Narra", 10, 8, 2, 0], ["Molave", 6, 6, 0, 0]]);
+  const event = memory.records("events").get(fixture.eventId);
+  assert.deepEqual(event.recordedSeedlingsByInventory, { narra: 8, molave: 6 }); assert.deepEqual(event.leftoverSeedlingsByInventory, { narra: 2, molave: 0 });
+  const [narra, molave] = report.officialSubmissionIds; verifiedEvidence(narra);
+  assert.equal((await service.reviewOfficialSubmission(admin, narra, true)).reportingProgress, "Fully Reported — Awaiting Review");
+  const approved = await service.reviewOfficialSubmission(admin, molave, true);
+  assert.equal(approved.acceptedQuantity, 14); assert.equal(approved.reportingProgress, "Completed");
+  assert.deepEqual(approved.acceptedSeedlingsByInventory, { narra: 8, molave: 6 });
+});
+test("partial multi-type reporting records only reported types and keeps the rest available", async () => {
+  const fixture = seedTwoSpecies("two-species-partial");
+  const report = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), items: [{ inventoryId: "narra", quantityPlanted: 10, leftoverQuantity: 0 }] });
+  assert.deepEqual(report.submissions.map(row => row.inventoryId), ["narra"]);
+  assert.equal(report.reportingProgress, "Partial"); assert.equal(report.remainingAvailableQuantity, 6);
+  const [option] = (await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options;
+  assert.deepEqual(option.items.map(row => [row.inventoryId, row.availableQuantity]), [["narra", 0], ["molave", 6]]);
+  const second = await service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 1, items: [{ inventoryId: "narra", quantityPlanted: 0, leftoverQuantity: 0 }, { inventoryId: "molave", quantityPlanted: 5, leftoverQuantity: 1 }] });
+  assert.equal(second.officialSubmissionIds.length, 1, "a type with nothing left to report creates no empty submission");
+  assert.equal(second.quantityPlanted, 15); assert.equal(second.declaredLeftoverQuantity, 1); assert.equal(second.remainingAvailableQuantity, 0);
+  await assert.rejects(service.submitOfficialReport(staff, { ...payload(fixture.requestId), expectedVersion: 2, items: [{ inventoryId: "molave", quantityPlanted: 1, leftoverQuantity: 0 }] }), error => error.status === 409);
+});
