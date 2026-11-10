@@ -2,6 +2,13 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 process.env.GUEST_INVITATION_SECRET = "test-only-guest-invitation-secret-with-sufficient-length";
+// Historical-compatibility tests: the legacy per-type Participant path still
+// exists behind PLANTING_FINAL_REPORT_ENFORCED=false (rollback / old records).
+function legacyMode(t) {
+  const previous = process.env.PLANTING_FINAL_REPORT_ENFORCED;
+  process.env.PLANTING_FINAL_REPORT_ENFORCED = "false";
+  t.after(() => { if (previous === undefined) delete process.env.PLANTING_FINAL_REPORT_ENFORCED; else process.env.PLANTING_FINAL_REPORT_ENFORCED = previous; });
+}
 
 const records = new Map();
 let generated = 0;
@@ -487,7 +494,8 @@ test("planting-report event eligibility allows ongoing and completed events but 
   }, now), /archived/);
 });
 
-test("any authenticated participant can submit planting evidence for an eligible activity", async () => {
+test("legacy per-type path: any authenticated participant can submit planting evidence for an eligible activity", async (t) => {
+  legacyMode(t);
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -598,7 +606,8 @@ test("any authenticated participant can submit planting evidence for an eligible
   }
 });
 
-test("participant planted plus leftover balances reserve once and become accepted only after MENRO review", async () => {
+test("legacy per-type path: participant planted plus leftover balances reserve once and become accepted only after MENRO review", async (t) => {
+  legacyMode(t);
   const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const requestId = "request-participant-leftovers", eventId = "event-participant-leftovers";
@@ -628,7 +637,8 @@ test("participant planted plus leftover balances reserve once and become accepte
   } finally { for (const row of report?.submissions || []) for (const photo of row.photos || []) await deletePlantingPhoto(photo.photoPath); }
 });
 
-test("participant correction links to the Staff-returned submission and Admin rejection is final", async () => {
+test("legacy per-type path: participant correction links to the Staff-returned submission and Admin rejection is final", async (t) => {
+  legacyMode(t);
   const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const requestId = "request-participant-correction", eventId = "event-participant-correction";
@@ -685,7 +695,8 @@ test("participant correction links to the Staff-returned submission and Admin re
   }
 });
 
-test("final planting confirmation covers exactly 100 released = 80 planted + 20 final leftovers", async t => {
+test("legacy per-type path: final planting confirmation covers exactly 100 released = 80 planted + 20 final leftovers", async t => {
+  legacyMode(t);
   const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const requestId = "request-final-confirmation", eventId = "event-final-confirmation";
@@ -824,7 +835,8 @@ test("device coordinates cannot replace missing GPS in a Take Photo image", asyn
   assert.equal(table("plantingContributions").size, existingContributionCount);
 });
 
-test("valid EXIF GPS outside the assigned site is preserved, flagged, and submitted", async () => {
+test("legacy per-type path: valid EXIF GPS outside the assigned site is preserved, flagged, and submitted", async (t) => {
+  legacyMode(t);
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
@@ -1264,7 +1276,8 @@ test("global search returns role-safe record links without exposing another part
 });
 
 
-test("partial 60 then final 30 plus 10 leftovers preserves a 40 future balance and confirms only 90 planted", async () => {
+test("legacy per-type path: partial 60 then final 30 plus 10 leftovers preserves a 40 future balance and confirms only 90 planted", async (t) => {
+  legacyMode(t);
   const service = require("../src/services/plantingReport.service"), sharp = require("sharp");
   const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
   const requestId = "request-partial-then-final", eventId = "event-partial-then-final", siteId = "site-partial-then-final";
@@ -1297,4 +1310,165 @@ test("new policy reports never synthesize requester aggregate monitoring assignm
   const rows = await service.getMonitoringRecordsByParticipantId("new-policy-owner");
   assert.equal(rows.some(row => row.plantingReportId === "policy-only-report"), false);
   await assert.rejects(service.createMonitoringRecord({ plantingReportId: "policy-only-report", actorRole: "staff" }), error => error.code === "PURPOSE_POLICY_MONITORING_WORKFLOW");
+});
+
+// --------------------------------------------------------------------------
+// One final Planting Report per event (submissionWorkflowVersion 4)
+// --------------------------------------------------------------------------
+async function finalReportFixture(name, { narra = 40 } = {}) {
+  const sharp = require("sharp");
+  const requestId = `request-${name}`, eventId = `event-${name}`, siteId = `site-${name}`;
+  seedApproved(requestId, eventId);
+  table("seedlingRequests").get(requestId).items.push({ inventoryId: "narra", species: "Narra", quantity: narra });
+  table("seedlingInventory").set("narra", { species: "Narra", availableQuantity: 500, reservedQuantity: 0, distributedQuantity: 0, lowStockThreshold: 5 });
+  await requestService.releaseSeedlingRequest(requestId, "staff-1", { items: [
+    { inventoryId: "calamansi", releasedQuantity: 100 }, { inventoryId: "narra", releasedQuantity: narra }] });
+  Object.assign(table("events").get(eventId), { recordStatus: "scheduled", plantingSiteId: siteId, barangay: "Bical" });
+  table("sites").set(siteId, { status: "active", siteName: "Final report site", barangay: "Bical", latitude: 12.57, longitude: 123.965, coverageRadiusMeters: 50 });
+  // Unique pixels per fixture photo, so the duplicate-image guard never trips across tests.
+  const photo = async (_tone, originalname) => {
+    const seed = require("node:crypto").createHash("sha256").update(`${name}:${originalname}`).digest();
+    const background = { r: seed[0], g: seed[1], b: seed[2] };
+    return { originalname, mimetype: "image/jpeg", buffer: await sharp({ create: { width: 9, height: 9, channels: 3, background } }).jpeg().withExif({
+      IFD0: { Make: "Fixture camera" }, IFD3: { GPSLatitudeRef: "N", GPSLatitude: "12/1 34/1 12/1", GPSLongitudeRef: "E", GPSLongitude: "123/1 57/1 54/1" },
+    }).toBuffer() };
+  };
+  const payload = { distributionId: requestId, siteId, participantId: "participant-1", participantName: "Participant One", participantType: "Volunteer",
+    participantBarangay: "Bical", barangay: "Bical", plantingDate: "2026-09-17", plantingLocation: "Final report site", eventId,
+    submittedByName: "Participant One", submittedBySector: "Volunteer", submittedByContactNumber: "09123456789" };
+  return { requestId, eventId, reportId: `event_${eventId}`, photo, payload };
+}
+
+async function cleanupPhotos(report) {
+  const { deletePlantingPhoto } = require("../src/services/fileStorage.service");
+  for (const row of report?.submissions || []) for (const entry of row.photos || []) await deletePlantingPhoto(entry.photoPath);
+}
+
+test("one final Participant report covers every released type; Staff and Admin decide it once, leftovers included", async t => {
+  const service = require("../src/services/plantingReport.service");
+  const fixture = await finalReportFixture("final-v4");
+  const items = [{ inventoryId: "calamansi", leftoverQuantity: 20, leftoverReason: "Seedlings wilted before planting" }, { inventoryId: "narra", leftoverQuantity: 0 }];
+  let report;
+  try {
+    // Every released type with a balance is required; a single-type submission is refused.
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, inventoryId: "calamansi", quantityPlanted: 80, leftoverQuantity: 20, confirmationMode: "final" },
+      [await fixture.photo("purple", "single.jpg")]), (error) => error.status === 409 && /every released seedling type/.test(error.message));
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, items: [items[0]] }, [await fixture.photo("purple", "missing.jpg")]),
+      (error) => error.status === 409 && /every released seedling type/.test(error.message));
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, items: [{ inventoryId: "calamansi", leftoverQuantity: 20 }, items[1]] },
+      [await fixture.photo("purple", "no-reason.jpg")]), (error) => error.status === 400 && /reason/.test(error.message));
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, items: [items[0], { inventoryId: "narra", leftoverQuantity: 41, leftoverReason: "x" }] },
+      [await fixture.photo("purple", "too-many.jpg")]), (error) => error.status === 409 && /cannot exceed/.test(error.message));
+    assert.equal(table("events").get(fixture.eventId).recordedSeedlingQuantity || 0, 0, "refused reports change no balance");
+
+    // Client planted values are ignored: Planted = Remaining - Leftovers per type.
+    report = await service.createPlantingReport({ ...fixture.payload, items: JSON.stringify(items.map((item) => ({ ...item, quantityPlanted: 999 }))) },
+      [await fixture.photo("purple", "final.jpg")]);
+    const rows = report.submissions;
+    assert.deepEqual(rows.map((row) => [row.inventoryId, row.quantity, row.leftoverQuantity, row.leftoverReason]),
+      [["calamansi", 80, 20, "Seedlings wilted before planting"], ["narra", 40, 0, ""]]);
+    assert.ok(rows.every((row) => row.finalReportId === `FPR-${fixture.eventId}` && row.finalReportGroupId === rows[0].id && row.submissionWorkflowVersion === 4));
+    assert.equal(rows[0].photos.length, 1); assert.equal(rows[1].photos.length, 0, "one evidence set for the whole report");
+    assert.equal(report.photos.length, 1);
+    assert.equal(report.pendingReviewQuantity, 120); assert.equal(report.declaredLeftoverQuantity, 20); assert.equal(report.remainingAvailableQuantity, 0);
+    assert.equal(report.submissionStatus, "Submitted"); assert.equal(report.reviewStatus, "Pending Review");
+    assert.deepEqual(table("events").get(fixture.eventId).recordedSeedlingsByInventory, { calamansi: 80, narra: 40 });
+    assert.deepEqual(table("events").get(fixture.eventId).leftoverSeedlingsByInventory, { calamansi: 20, narra: 0 });
+
+    // A second independent final report for the event is refused.
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, items }, [await fixture.photo("teal", "duplicate.jpg")]), (error) => error.status === 409);
+
+    const priorGate = process.env.VERIFIED_PLANTING_COHORT_ENABLED;
+    process.env.VERIFIED_PLANTING_COHORT_ENABLED = "true";
+    t.after(() => { if (priorGate === undefined) delete process.env.VERIFIED_PLANTING_COHORT_ENABLED; else process.env.VERIFIED_PLANTING_COHORT_ENABLED = priorGate; });
+    const runTransaction = db.runTransaction.bind(db);
+    t.mock.method(db, "runTransaction", (handler) => runTransaction((transaction) => {
+      let wrote = false;
+      const get = transaction.get.bind(transaction);
+      transaction.get = (ref) => { assert.equal(wrote, false, "Firestore requires all reads before writes"); return get(ref); };
+      for (const method of ["create", "set", "update"]) { const write = transaction[method].bind(transaction); transaction[method] = (...args) => { wrote = true; return write(...args); }; }
+      return handler(transaction);
+    }));
+    // Deciding via any row decides the whole report.
+    const reviewed = await service.forwardPlantingReport(rows[1].id, "planting-staff", "Evidence reviewed", "MENRO Staff", "staff");
+    assert.deepEqual(reviewed.submissions.map((row) => row.workflowStatus), ["Reviewed", "Reviewed"]);
+    assert.equal(reviewed.reportingProgress, "Fully Reported — Awaiting Review", "Staff review never completes a report");
+    await assert.rejects(service.approvePlantingReport(rows[0].id, "planting-staff", "", "MENRO Staff", "staff"), (error) => error.status === 403);
+    const approved = await service.approvePlantingReport(rows[0].id, "planting-admin", "Confirmed", "MENRO Admin", "admin");
+    assert.deepEqual(approved.submissions.map((row) => row.workflowStatus), ["Completed", "Completed"]);
+    assert.equal(approved.acceptedQuantity, 120); assert.equal(approved.acceptedLeftoverQuantity, 20);
+    assert.equal(approved.reportingProgress, "Completed", "Admin approval completes the final report even with leftovers");
+    assert.equal(approved.reviewStatus, "Completed");
+    const cohort = table("verifiedPlantingCohorts").get(`VPC-${fixture.reportId}`) ||
+      [...table("verifiedPlantingCohorts").values()].find((entry) => entry.source?.plantingReportId === fixture.reportId);
+    assert.ok(cohort, "monitoring eligibility starts only at Admin approval");
+    assert.equal(cohort.verifiedPlantedQuantity, 120);
+    const logs = [...table("verificationLogs").values()].filter((log) => log.plantingReportId === fixture.reportId && log.action === "Admin Approval");
+    assert.equal(logs.length, 1); assert.deepEqual(logs[0].submissionIds, rows.map((row) => row.id));
+    await assert.rejects(service.approvePlantingReport(rows[1].id, "planting-admin", "", "MENRO Admin", "admin"), (error) => error.status === 409);
+  } finally { await cleanupPhotos(report); }
+});
+
+test("a returned final report is corrected as the next revision of the same logical report; a rejection allows another revision", async () => {
+  const service = require("../src/services/plantingReport.service");
+  const fixture = await finalReportFixture("final-v4-correction", { narra: 10 });
+  const items = [{ inventoryId: "calamansi", leftoverQuantity: 0 }, { inventoryId: "narra", leftoverQuantity: 0 }];
+  const reports = [];
+  try {
+    const first = await service.createPlantingReport({ ...fixture.payload, items }, [await fixture.photo("navy", "first.jpg")]); reports.push(first);
+    const [a, b] = first.submissions.map((row) => row.id);
+    await service.returnPlantingReport(b, "planting-staff", "Narra count does not match the photos", "MENRO Staff", "staff");
+    assert.deepEqual([a, b].map((id) => table("plantingContributions").get(id).workflowStatus), ["Returned for Correction", "Returned for Correction"]);
+    assert.deepEqual(table("events").get(fixture.eventId).recordedSeedlingsByInventory, { calamansi: 0, narra: 0 }, "a return releases every type");
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, participantId: "participant-2", items, correctionOf: a }, [await fixture.photo("olive", "other.jpg")]),
+      (error) => error.status === 409, "only the original submitter corrects it");
+    const corrected = await service.createPlantingReport({ ...fixture.payload, items: [items[0], { inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Two seedlings were damaged" }], correctionOf: a },
+      [await fixture.photo("maroon", "corrected.jpg")]); reports.push(corrected);
+    const latest = corrected.submissions.filter((row) => !row.correctedBySubmission);
+    assert.deepEqual(latest.map((row) => [row.inventoryId, row.quantity, row.correctionOf, row.finalReportRevision]), [["calamansi", 100, a, 1], ["narra", 8, b, 1]]);
+    assert.ok([a, b].every((id) => table("plantingContributions").get(id).correctedBySubmission === latest[0].id), "history is kept, linked to the correction");
+    assert.equal(corrected.id, first.id, "the same planting report ID");
+    assert.equal(latest[0].finalReportId, `FPR-${fixture.eventId}`);
+    // Staff forward, then Admin rejection (final for that revision)...
+    await service.forwardPlantingReport(latest[0].id, "planting-staff", "", "MENRO Staff", "staff");
+    await service.rejectPlantingReport(latest[1].id, "planting-admin", "Wrong planting site recorded", "MENRO Admin", "admin");
+    assert.deepEqual(latest.map((row) => table("plantingContributions").get(row.id).workflowStatus), ["Rejected", "Rejected"]);
+    await assert.rejects(service.createPlantingReport({ ...fixture.payload, items, correctionOf: latest[0].id }, [await fixture.photo("purple", "after-reject.jpg")]),
+      (error) => error.status === 409, "a rejection is not correctable");
+    // ...but a new revision of the same logical report may be submitted.
+    const resubmitted = await service.createPlantingReport({ ...fixture.payload, items }, [await fixture.photo("teal", "revision-2.jpg")]); reports.push(resubmitted);
+    const revision2 = resubmitted.submissions.filter((row) => row.finalReportRevision === 2);
+    assert.equal(revision2.length, 2); assert.equal(revision2[0].finalReportId, `FPR-${fixture.eventId}`);
+    assert.equal(resubmitted.submissions.filter((row) => row.workflowStatus === "Rejected").length, 2, "rejection history is preserved");
+    assert.equal(resubmitted.reviewStatus, "Pending Review");
+  } finally { for (const report of reports) await cleanupPhotos(report); }
+});
+
+test("a legacy partial report keeps its history; the final report covers only the remaining unreported balance", async (t) => {
+  const service = require("../src/services/plantingReport.service");
+  const fixture = await finalReportFixture("final-v4-legacy", { narra: 10 });
+  const reports = [];
+  try {
+    // Historical record: one per-type submission (legacy path), approved.
+    process.env.PLANTING_FINAL_REPORT_ENFORCED = "false";
+    t.after(() => { delete process.env.PLANTING_FINAL_REPORT_ENFORCED; });
+    const legacy = await service.createPlantingReport({ ...fixture.payload, inventoryId: "calamansi", quantityPlanted: 60, confirmationMode: "partial" },
+      [await fixture.photo("navy", "legacy.jpg")]); reports.push(legacy);
+    await service.forwardPlantingReport(legacy.submissions[0].id, "planting-staff", "", "MENRO Staff", "staff");
+    const legacyApproved = await service.approvePlantingReport(legacy.submissions[0].id, "planting-admin", "", "MENRO Admin", "admin");
+    assert.equal(legacyApproved.reviewStatus, "Awaiting Remaining Report");
+    delete process.env.PLANTING_FINAL_REPORT_ENFORCED;
+
+    const final = await service.createPlantingReport({ ...fixture.payload, items: [
+      { inventoryId: "calamansi", leftoverQuantity: 5, leftoverReason: "Spare seedlings kept by the barangay" }, { inventoryId: "narra", leftoverQuantity: 0 }] },
+    [await fixture.photo("olive", "final.jpg")]); reports.push(final);
+    const finalRows = final.submissions.filter((row) => row.finalReportGroupId);
+    assert.deepEqual(finalRows.map((row) => [row.inventoryId, row.quantity, row.leftoverQuantity]), [["calamansi", 35, 5], ["narra", 10, 0]],
+      "Planted = remaining unreported balance - leftovers");
+    assert.equal(table("plantingContributions").get(legacy.submissions[0].id).workflowStatus, "Completed", "the legacy record is unchanged");
+    await service.forwardPlantingReport(finalRows[0].id, "planting-staff", "", "MENRO Staff", "staff");
+    const done = await service.approvePlantingReport(finalRows[0].id, "planting-admin", "", "MENRO Admin", "admin");
+    assert.equal(done.acceptedQuantity, 105); assert.equal(done.acceptedLeftoverQuantity, 5);
+    assert.equal(done.reportingProgress, "Completed"); assert.equal(done.reviewStatus, "Completed");
+  } finally { for (const report of reports) await cleanupPhotos(report); }
 });

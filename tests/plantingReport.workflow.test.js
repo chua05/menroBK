@@ -559,3 +559,79 @@ test("report review stage follows the staged workflow, never ahead of its least-
   assert.equal(reviewStatusFor([n({ staffReviewStatus: "Accepted" }), n({ staffReviewStatus: "Rejected" })]), "Completed");
   assert.equal(reviewStatusFor([n({ staffReviewStatus: "Accepted" }), n({ staffReviewStatus: "Pending Review" })]), "Pending Review");
 });
+
+test("a report reads Completed only when its whole released balance is Admin-approved", () => {
+  const { reviewStatusFor, reviewStagesFor, normalizeSubmission } = require("../src/services/parentPlantingReport.service");
+  const n = (entry) => normalizeSubmission({ verificationStatus: "Verified", ...entry });
+  const accepted = [n({ staffReviewStatus: "Accepted" })];
+  assert.equal(reviewStatusFor(accepted, "Completed"), "Completed");
+  // Legacy partial: every submission approved, but seedlings remain unreported.
+  assert.equal(reviewStatusFor(accepted, "Partial"), "Awaiting Remaining Report");
+  assert.equal(reviewStatusFor([...accepted, n({ staffReviewStatus: "Rejected" })], "Partial"), "Awaiting Remaining Report");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Rejected" })], "Awaiting Submission"), "Rejected");
+  assert.equal(reviewStatusFor([n({ staffReviewStatus: "Pending Review" })], "Partial"), "Pending Review");
+  // A report waiting on Staff and Admin is in both queues.
+  assert.deepEqual(reviewStagesFor([
+    n({ staffReviewStatus: "Pending Review" }),
+    n({ staffReviewStatus: "Pending Review", workflowStatus: "Reviewed" }),
+    n({ staffReviewStatus: "Accepted" }),
+    n({ staffReviewStatus: "Rejected", workflowStatus: "Returned for Correction", correctedBySubmission: "x" }),
+  ]), ["Pending Review", "Reviewed"]);
+  assert.deepEqual(reviewStagesFor([n({ staffReviewStatus: "Accepted" })]), []);
+});
+
+test("approving a Participant submission keeps per-species confirmed totals for mixed Staff/Participant reports", async () => {
+  process.env.VERIFIED_PLANTING_COHORT_ENABLED = "true";
+  const eventId = "event-mixed", reportId = `event_${eventId}`;
+  table("plantingReports").set(reportId, {
+    reportType: "parent", reportNumber: "RPT-2026-200", requestId: `request-${eventId}`, eventId,
+    siteId: `site-${eventId}`, distributionId: `distribution-${eventId}`, officialPlantingWorkflow: true,
+    quantityReleased: 100, quantityPlanted: 100, activeSubmittedQuantity: 100, acceptedQuantity: 40,
+    pendingReviewQuantity: 60, acceptedSeedlingsByInventory: { molave: 40 }, confirmationBases: ["menro-field-report"],
+    remainingAvailableQuantity: 0, reportingProgress: "Fully Reported — Awaiting Review",
+    verificationStatus: "Fully Reported — Awaiting Review", createdAt: new Date(),
+  });
+  table("events").set(eventId, {
+    seedlingTotalQuantity: 100, recordedSeedlingsByInventory: { narra: 60, molave: 40 },
+    seedlingItems: [{ inventoryId: "narra", quantity: 60, species: "Narra" }, { inventoryId: "molave", quantity: 40, species: "Molave" }],
+  });
+  table("plantingContributions").set("mixed-official", {
+    id: "mixed-official", reportId, eventId, inventoryId: "molave", quantity: 40, officialStaffReport: true,
+    staffApprovalRequired: true, confirmationBasis: "menro-field-report", verificationStatus: "Needs Review",
+    staffReviewStatus: "Accepted", workflowStatus: "Completed", contributorId: "staff-9",
+  });
+  table("plantingContributions").set("mixed-participant", {
+    id: "mixed-participant", reportId, eventId, inventoryId: "narra", quantity: 60, participantId: "participant-1",
+    contributorId: "participant-1", staffApprovalRequired: true, verificationStatus: "Verified",
+    staffReviewStatus: "Pending Review", workflowStatus: "Reviewed", staffReviewedBy: "staff-1",
+    photos: [{ photoPath: "planting-reports/test/mixed.jpg" }],
+  });
+  const report = await adminApprove("mixed-participant");
+  const parent = table("plantingReports").get(reportId);
+  assert.deepEqual(parent.acceptedSeedlingsByInventory, { molave: 40, narra: 60 });
+  assert.deepEqual(parent.confirmationBases, ["documented-participant-report", "menro-field-report"]);
+  assert.equal(report.reportingProgress, "Completed");
+  assert.equal(report.reviewStatus, "Completed");
+  const cohort = [...table("verifiedPlantingCohorts").values()].find((entry) => entry.source.plantingReportId === reportId);
+  assert.ok(cohort, "Admin approval of the final share activates monitoring");
+  assert.deepEqual(cohort.source.confirmationBases, ["documented-participant-report", "menro-field-report"]);
+  assert.deepEqual(cohort.source.species.map((item) => [item.inventoryId, item.verifiedPlantedQuantity]), [["narra", 60], ["molave", 40]]);
+  delete process.env.VERIFIED_PLANTING_COHORT_ENABLED;
+});
+
+test("Participant approval on a mixed report refuses drifted per-species totals instead of writing them", async () => {
+  const eventId = "event-drift", reportId = `event_${eventId}`;
+  table("plantingReports").set(reportId, {
+    reportType: "parent", eventId, officialPlantingWorkflow: true, quantityReleased: 100, activeSubmittedQuantity: 100,
+    acceptedQuantity: 55, pendingReviewQuantity: 45, reportingProgress: "Fully Reported — Awaiting Review",
+  });
+  table("events").set(eventId, { seedlingTotalQuantity: 100, seedlingItems: [{ inventoryId: "narra", quantity: 100 }] });
+  table("plantingContributions").set("drift-participant", {
+    id: "drift-participant", reportId, eventId, inventoryId: "narra", quantity: 45, participantId: "participant-1",
+    staffApprovalRequired: true, verificationStatus: "Verified", staffReviewStatus: "Pending Review",
+    workflowStatus: "Reviewed", photos: [{ photoPath: "planting-reports/test/drift.jpg" }],
+  });
+  await assert.rejects(adminApprove("drift-participant"), (error) => error.status === 409 && /reconciliation/.test(error.message));
+  assert.equal(table("plantingContributions").get("drift-participant").workflowStatus, "Reviewed", "nothing was written");
+  assert.equal(table("plantingReports").get(reportId).acceptedQuantity, 55);
+});

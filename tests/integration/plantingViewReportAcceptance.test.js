@@ -66,11 +66,15 @@ async function photo(role, index) {
   return { status: response.status, type: response.headers.get("content-type") || "", bytes };
 }
 
-async function submit(role, name, fixture, quantity) {
+// One final Planting Report for the event: every released type, with final
+// leftovers (and their reason); the backend computes Final Planted.
+async function submit(role, name, fixture, leftoverQuantity, extra = {}) {
   const form = new FormData();
   Object.entries({
-    distributionId: REQUEST_ID, inventoryId: INVENTORY_ID, siteId: SITE_ID, barangay: "Bical",
-    quantityPlanted: String(quantity), plantingDate: "2026-10-01", plantingLocation: "View Report Test Site",
+    distributionId: REQUEST_ID, siteId: SITE_ID, barangay: "Bical",
+    items: JSON.stringify([{ inventoryId: INVENTORY_ID, leftoverQuantity,
+      ...(leftoverQuantity > 0 ? { leftoverReason: "Seedlings damaged in transport" } : {}) }]),
+    confirmationMode: "final", ...extra, plantingDate: "2026-10-01", plantingLocation: "View Report Test Site",
     eventId: EVENT_ID, eventName: "View Report acceptance planting",
     submittedByName: name, submittedBySector: "Organization Member", submittedByContactNumber: "09123456789",
     remarks: "View Report acceptance",
@@ -148,7 +152,8 @@ test("Participant submission -> Staff/Admin View Report shows Submitted, details
   assert.equal(before.listed.submissions.length, 0);
   assert.equal((await photo("staff", 0)).status, 404);
 
-  const first = await submit("participant", "View participant", "valid-original.jpg", 10);
+  // 25 released: 15 final leftovers (with reason) -> Final Planted 10.
+  const first = await submit("participant", "View participant", "valid-original.jpg", 15);
   assert.equal(first.status, 201, JSON.stringify(first.payload));
   assert.equal(first.payload.success, true);
   const firstId = first.payload.data.submissions?.[0]?.id;
@@ -159,13 +164,16 @@ test("Participant submission -> Staff/Admin View Report shows Submitted, details
     for (const view of [listed, single]) {
       assert.equal(view.submissionStatus, "Submitted", `${role}: progress must read Submitted`);
       assert.equal(view.reviewStatus, "Pending Review", `${role}: review must stay Pending Review`);
-      assert.equal(view.reportingProgress, "Partial");
+      assert.equal(view.reportingProgress, "Fully Reported — Awaiting Review");
       assert.notEqual(view.verificationStatus, "Approved");
       assert.equal(view.submissions.length, 1);
       const saved = view.submissions[0];
       assert.equal(saved.id, firstId);
       assert.equal(saved.species, "Narra");
-      assert.equal(saved.quantity, 10);
+      assert.equal(saved.quantity, 10, "Final Planted = Released - Leftovers");
+      assert.equal(saved.leftoverQuantity, 15);
+      assert.equal(saved.leftoverReason, "Seedlings damaged in transport");
+      assert.equal(saved.finalReportId, `FPR-${EVENT_ID}`);
       assert.equal(saved.staffReviewStatus, "Pending Review");
       assert.ok(saved.recordedAt);
       assert.equal(saved.submittedByName, "View participant");
@@ -176,8 +184,9 @@ test("Participant submission -> Staff/Admin View Report shows Submitted, details
       assert.equal(Number(saved.photos[0].longitude).toFixed(3), "123.875");
       assert.ok(saved.photos[0].photoCapturedAt);
       assert.equal(view.photos.length, 1);
-      assert.equal(view.submittedByName, "View participant");
       assert.equal(view.pendingReviewQuantity, 10);
+      assert.equal(view.declaredLeftoverQuantity, 15);
+      assert.equal(view.remainingAvailableQuantity, 0);
     }
     const evidence = await photo(role, 0);
     assert.equal(evidence.status, 200, `${role} cannot load evidence`);
@@ -187,45 +196,53 @@ test("Participant submission -> Staff/Admin View Report shows Submitted, details
   assert.equal((await photo("outsider", 0)).status, 403, "unrelated participant must not load evidence");
   assert.equal((await photo("staff", 1)).status, 404, "nonexistent evidence must be reported missing");
 
-  // A second contributor (multiple submissions on one report).
-  const second = await submit("member", "View member", "outside-site.jpg", 5);
-  assert.equal(second.status, 201, JSON.stringify(second.payload));
-  const secondId = second.payload.data.submissions.find((item) => item.id !== firstId)?.id;
-  assert.ok(secondId);
+  // One final report per event: a second, independent report is refused.
+  const duplicate = await submit("member", "View member", "outside-site.jpg", 0);
+  assert.equal(duplicate.status, 409, JSON.stringify(duplicate.payload));
+  assert.equal((await staffView("staff")).single.submissions.length, 1);
 
-  // Page refresh: list and single read agree; chronological history; both photos load.
-  const afterSecond = await staffView("staff");
-  for (const view of [afterSecond.listed, afterSecond.single]) {
-    assert.deepEqual(view.submissions.map((item) => item.id), [firstId, secondId]);
-    assert.equal(view.submittedByName, "View member", "latest submitter is the most recent submission");
-    assert.equal(view.submissions[1].locationVerificationStatus, "site_mismatch");
-    assert.equal(view.photos.length, 2);
-    assert.equal(view.reviewStatus, "Pending Review");
-    assert.equal(view.pendingReviewQuantity, 15);
-  }
-  for (const index of [0, 1]) assert.equal((await photo("admin", index)).status, 200);
-
-  // Staged review (main workflow): Staff forwards -> Admin approves; Staff returns the other.
-  await api("staff", "PATCH", `/planting-reports/${firstId}/forward`, { remarks: "Evidence reviewed" });
-  const forwarded = await staffView("admin");
-  assert.equal(forwarded.single.submissions[0].workflowStatus, "Reviewed");
-  assert.equal(forwarded.single.reviewStatus, "Pending Review", "second submission still awaits Staff review");
-  await api("staff", "PATCH", `/planting-reports/${secondId}/return`, { remarks: "Outside assigned site" });
+  // Staff returns it; the original submitter corrects it as the next revision.
+  await api("staff", "PATCH", `/planting-reports/${firstId}/return`, { remarks: "Leftover count needs checking" });
   const returned = await staffView("staff");
-  assert.equal(returned.single.reviewStatus, "Reviewed", "earliest unfinished stage is the forwarded one");
-  await api("admin", "PATCH", `/planting-reports/${firstId}/approve`, { remarks: "Approved" });
+  assert.equal(returned.single.reviewStatus, "Returned for Correction");
+  assert.equal(returned.single.pendingReviewQuantity, 0);
+  const notOwner = await submit("member", "View member", "outside-site.jpg", 0, { correctionOf: firstId });
+  assert.equal(notOwner.status, 409, "only the original submitter may correct it");
+  const corrected = await submit("participant", "View participant", "outside-site.jpg", 5, { correctionOf: firstId });
+  assert.equal(corrected.status, 201, JSON.stringify(corrected.payload));
+  const afterCorrection = await staffView("staff");
+  for (const view of [afterCorrection.listed, afterCorrection.single]) {
+    assert.equal(view.id, REPORT_ID, "the same report ID");
+    assert.equal(view.submissions.length, 2, "the returned revision is kept as history");
+    const [old, latest] = view.submissions;
+    assert.equal(old.id, firstId); assert.equal(old.workflowStatus, "Returned for Correction"); assert.equal(old.correctedBySubmission, latest.id);
+    assert.equal(latest.correctionOf, firstId); assert.equal(latest.finalReportRevision, 1); assert.equal(latest.finalReportId, `FPR-${EVENT_ID}`);
+    assert.equal(latest.quantity, 20); assert.equal(latest.leftoverQuantity, 5);
+    assert.equal(latest.locationVerificationStatus, "site_mismatch");
+    assert.equal(view.reviewStatus, "Pending Review");
+    assert.equal(view.photos.length, 2);
+  }
+  for (const index of [0, 1]) assert.equal((await photo("admin", index)).status, 200, "historical evidence stays retrievable");
+  const latestId = afterCorrection.single.submissions[1].id;
+
+  // Staff forwards -> Admin approves: Completed with leftovers.
+  assert.equal((await call("admin", "PATCH", `/planting-reports/${latestId}/approve`, { remarks: "Too early" })).status, 409, "Admin cannot approve before Staff review");
+  await api("staff", "PATCH", `/planting-reports/${latestId}/forward`, { remarks: "Evidence reviewed" });
+  assert.equal((await staffView("admin")).single.reviewStatus, "Reviewed");
+  await api("admin", "PATCH", `/planting-reports/${latestId}/approve`, { remarks: "Approved" });
   const decided = await staffView("admin");
   for (const view of [decided.listed, decided.single]) {
-    assert.deepEqual(view.submissions.map((item) => item.workflowStatus), ["Completed", "Returned for Correction"]);
+    assert.deepEqual(view.submissions.map((item) => item.workflowStatus), ["Returned for Correction", "Completed"]);
     assert.equal(view.submissionStatus, "Submitted");
-    assert.equal(view.reviewStatus, "Returned for Correction");
+    assert.equal(view.reviewStatus, "Completed");
+    assert.equal(view.reportingProgress, "Completed", "Admin approval completes the final report with leftovers");
+    assert.equal(view.acceptedQuantity, 20);
+    assert.equal(view.acceptedLeftoverQuantity, 5);
     assert.equal(view.pendingReviewQuantity, 0);
-    assert.equal(view.acceptedQuantity, 10);
-    assert.notEqual(view.reportingProgress, "Completed", "10 of 25 accepted is not Completed");
   }
-  for (const index of [0, 1]) assert.equal((await photo("staff", index)).status, 200, "historical evidence stays retrievable");
 
-  // Participant redaction is preserved for the participant endpoints.
+  // Participant endpoints keep their redaction rules.
   const participantView = await api("participant", "GET", `/planting-reports/${REPORT_ID}`);
-  assert.equal(participantView.submissions.find((item) => item.id === secondId).submittedByContactNumber, "");
+  assert.equal(participantView.submissions.length, 2);
+  assert.equal((await call("outsider", "GET", `/planting-reports/${REPORT_ID}`)).status >= 403, true, "unrelated participants cannot open the report");
 });

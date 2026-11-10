@@ -129,6 +129,10 @@ const submitPlantingReport = async (
       });
     }
 
+    // A final planting report sends every released type in `items`; the
+    // backend computes Planted = Remaining - Leftovers per type.
+    const finalItems = req.body?.items !== undefined && req.body?.items !== "" ? req.body.items : undefined;
+
     // --------------------------------
     // REQUIRED FIELDS
     // --------------------------------
@@ -137,8 +141,7 @@ const submitPlantingReport = async (
       !siteId ||
       !barangay ||
       !eventId ||
-      quantityPlanted ===
-        undefined ||
+      (finalItems === undefined && quantityPlanted === undefined) ||
       !plantingDate ||
       !plantingLocation ||
       !String(submittedByName || "").trim() ||
@@ -171,13 +174,14 @@ const submitPlantingReport = async (
     // QUANTITY
     // --------------------------------
     const parsedQuantity =
-      Number(quantityPlanted);
+      finalItems !== undefined ? 0 : Number(quantityPlanted);
 
     if (
-      !Number.isInteger(
-        parsedQuantity
-      ) ||
-      (req.body?.confirmationMode === "final" ? parsedQuantity < 0 : parsedQuantity <= 0)
+      finalItems === undefined && (
+        !Number.isInteger(
+          parsedQuantity
+        ) ||
+        (req.body?.confirmationMode === "final" ? parsedQuantity < 0 : parsedQuantity <= 0))
     ) {
       return res.status(400).json({
         success: false,
@@ -227,7 +231,8 @@ const submitPlantingReport = async (
           quantityPlanted:
             parsedQuantity,
           leftoverQuantity,
-          confirmationMode: req.body?.confirmationMode || "partial",
+          confirmationMode: finalItems !== undefined ? "final" : req.body?.confirmationMode || "partial",
+          ...(finalItems !== undefined ? { items: finalItems } : {}),
 
           plantingDate,
 

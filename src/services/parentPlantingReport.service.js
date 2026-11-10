@@ -78,15 +78,36 @@ const REVIEW_STAGE_ORDER = [
   WORKFLOW_STATUS.RETURNED,
 ];
 
-function reviewStatusFor(normalizedSubmissions) {
-  if (normalizedSubmissions.length === 0) return "Not Submitted";
-  const stages = normalizedSubmissions
+// Every submission approved so far, but released seedlings remain unreported
+// (legacy partial reports, or a rejected/returned share): not Completed yet.
+const AWAITING_REMAINING_REPORT = "Awaiting Remaining Report";
+
+function activeStages(normalizedSubmissions) {
+  return normalizedSubmissions
     .filter((entry) => entry.verificationStatus !== "Invalid" && !entry.correctedBySubmission)
     .map((entry) => entry.workflowStatus || deriveWorkflowStatus(entry));
+}
+
+// `reportingProgress` (optional) is the parent's quantity progress. Only a
+// report whose progress is "Completed" (Admin-approved for its whole released
+// balance, leftovers included) reads as Completed.
+function reviewStatusFor(normalizedSubmissions, reportingProgress) {
+  if (normalizedSubmissions.length === 0) return "Not Submitted";
+  const stages = activeStages(normalizedSubmissions);
   for (const stage of REVIEW_STAGE_ORDER) if (stages.includes(stage)) return stage;
   if (stages.length > 0 && stages.every((stage) => stage === WORKFLOW_STATUS.REJECTED)) return WORKFLOW_STATUS.REJECTED;
-  if (stages.includes(WORKFLOW_STATUS.COMPLETED)) return WORKFLOW_STATUS.COMPLETED;
+  if (stages.includes(WORKFLOW_STATUS.COMPLETED)) {
+    return reportingProgress === undefined || reportingProgress === "Completed"
+      ? WORKFLOW_STATUS.COMPLETED : AWAITING_REMAINING_REPORT;
+  }
   return WORKFLOW_STATUS.REJECTED;
+}
+
+// Every unfinished review stage present on the report, in workflow order, so a
+// report waiting on both Staff and Admin is counted in both queues.
+function reviewStagesFor(normalizedSubmissions) {
+  const stages = activeStages(normalizedSubmissions);
+  return REVIEW_STAGE_ORDER.filter((stage) => stages.includes(stage));
 }
 
 function parentRef(eventId) {
@@ -179,7 +200,10 @@ async function reportDetails(id, data) {
   // evidence endpoint resolves photo indexes through this same function, so
   // list photo indexes and secure photo retrieval stay aligned.
   const contributions = allContributions
-    .filter((entry) => entry.officialStaffReport === true || Array.isArray(entry.photos) && entry.photos.length > 0)
+    // Rows of a final report (v4) share one evidence set stored on the group's
+    // first row, so the other per-type rows have no photos of their own.
+    .filter((entry) => entry.officialStaffReport === true || Array.isArray(entry.photos) && entry.photos.length > 0 ||
+      Boolean(entry.finalReportGroupId))
     .sort((a, b) => timestampMillis(a.recordedAt) - timestampMillis(b.recordedAt) ||
       String(a.id).localeCompare(String(b.id)));
   const participantById = new Map(participantSnapshot.docs.map((doc) => [doc.id, doc.data()]));
@@ -225,7 +249,8 @@ async function reportDetails(id, data) {
     // Submission progress and Staff review are separate: a saved submission is
     // "Submitted" while its review remains "Pending Review" until Staff decides.
     submissionStatus: contributions.length > 0 ? "Submitted" : "Awaiting Submission",
-    reviewStatus: reviewStatusFor(summary.submissions),
+    reviewStatus: reviewStatusFor(summary.submissions, summary.reportingProgress),
+    reviewStages: reviewStagesFor(summary.submissions),
     participantBarangay: primaryContribution?.participantBarangay || data.participantBarangay || data.barangay || "",
     organizationAffiliation: primaryContribution?.organizationAffiliation || data.organizationAffiliation || "",
     participantContactNumber: primaryContribution?.participantContactNumber || data.participantContactNumber || "",
@@ -320,4 +345,4 @@ async function finalizeParent(id, requesterId) {
 }
 
 module.exports = { parentRef, parentForEventInTransaction, reportDetails, finalizeParent,
-  normalizeSubmission, summarizeSubmissions, reviewStatusFor };
+  normalizeSubmission, summarizeSubmissions, reviewStatusFor, reviewStagesFor, AWAITING_REMAINING_REPORT };

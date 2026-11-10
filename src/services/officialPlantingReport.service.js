@@ -5,7 +5,11 @@ const { availableForReporting, progressFor, wholeQuantity } = require("../utils/
 const { reportDetails, normalizeSubmission } = require("./parentPlantingReport.service");
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { WORKFLOW_STATUS, deriveWorkflowStatus, requiredReason, optionalRemarks } = require("../utils/plantingReviewWorkflow.util");
+const { FINAL_REPORT_VERSION, MAX_LEFTOVER_REASON_LENGTH, finalReportIdFor, isFinalReportRow, assertNoActiveFinalReport,
+  nextFinalRevision, sortGroupRows } = require("../utils/finalPlantingReport.util");
 const DECISIONS = { approve: "approve", reject: "reject", return: "return" };
+// Same switch as the Participant path (plantingReport.service): one final report per event.
+const finalReportEnforced = () => String(process.env.PLANTING_FINAL_REPORT_ENFORCED ?? "true").trim().toLowerCase() !== "false";
 const fail = (status, message, fieldErrors) => Object.assign(new Error(message), { status, ...(fieldErrors ? { fieldErrors } : {}) });
 const safeId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
 const digest = value => createHash("sha256").update(value).digest("hex");
@@ -76,6 +80,13 @@ async function submitOfficialReport(user, input) {
   if (!Array.isArray(input.items) || !input.items.length || input.items.length > 10 || new Set(input.items.map(row => row.inventoryId)).size !== input.items.length) throw fail(400, "Select each released species once.", { items: "Select each released species once." });
   for (const row of input.items) if (!safeId(row.inventoryId) || !wholeQuantity(row.leftoverQuantity) ||
       row.quantityPlanted !== undefined && !wholeQuantity(row.quantityPlanted)) throw fail(400, "Quantities must be nonnegative whole numbers.", { items: "Quantities must be nonnegative whole numbers." });
+  // Final leftovers are documentation only, but each needs its reason.
+  for (const [index, row] of input.items.entries()) {
+    if (row.leftoverReason !== undefined && row.leftoverReason !== null && typeof row.leftoverReason !== "string") throw fail(400, "The leftover reason must be text.", { [`leftoverReason-${index}`]: "Enter the reason as text." });
+    const reason = String(row.leftoverReason || "").trim();
+    if (Number(row.leftoverQuantity) > 0 && !reason) throw fail(400, "Enter the reason for the leftover seedlings.", { [`leftoverReason-${index}`]: "Enter the reason for the leftover seedlings." });
+    if (reason.length > MAX_LEFTOVER_REASON_LENGTH) throw fail(400, `The leftover reason must be at most ${MAX_LEFTOVER_REASON_LENGTH} characters.`, { [`leftoverReason-${index}`]: `Use at most ${MAX_LEFTOVER_REASON_LENGTH} characters.` });
+  }
   if (typeof input.remarks !== "string" || input.remarks.length > 2000) throw fail(400, "Remarks must be at most 2000 characters.", { remarks: "Remarks must be at most 2000 characters." });
   if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) throw fail(400, "Refresh the release before reporting.");
   const operationId = digest(`${user.uid}:${input.clientSubmissionId}`);
@@ -106,14 +117,27 @@ async function submitOfficialReport(user, input) {
     const parentDoc = await transaction.get(parentRef);
     if (!parentDoc.exists || parentDoc.data().reportType !== "parent" || parentDoc.data().requestId !== requestDoc.id || parentDoc.data().reportingProgress === "Completed") throw fail(409, "This release requires reconciliation or is already fully verified.");
     const parent = parentDoc.data();
-    let correctionRef, correction;
+    const enforced = finalReportEnforced();
+    const existingRows = (await transaction.get(db.collection("plantingContributions").where("reportId", "==", parentId))).docs
+      .map(doc => ({ id: doc.id, ...doc.data() }));
+    let correctionRef, correction, correctedRows = [];
     if (input.correctionOf) {
       if (!safeId(input.correctionOf)) throw fail(400, "Invalid correction reference.");
       correctionRef = db.collection("plantingContributions").doc(input.correctionOf);
       const prior = await transaction.get(correctionRef); correction = prior.data();
+      const correctable = row => row.reportId === parentId && row.authenticatedSubmitterUid === user.uid &&
+        row.staffReviewStatus === "Rejected" && deriveWorkflowStatus(row) === WORKFLOW_STATUS.RETURNED && !row.correctedBySubmission;
       // Only a submission Admin returned for correction may be corrected; an Admin rejection is final.
-      if (!prior.exists || correction.reportId !== parentId || correction.authenticatedSubmitterUid !== user.uid || correction.staffReviewStatus !== "Rejected" || deriveWorkflowStatus(correction) !== WORKFLOW_STATUS.RETURNED || correction.correctedBySubmission || input.items.length !== 1 || input.items[0].inventoryId !== correction.inventoryId) throw fail(409, "This submission cannot be corrected.");
+      if (!prior.exists || !correctable(correction)) throw fail(409, "This submission cannot be corrected.");
+      // A returned final report is corrected as a whole. A legacy single
+      // submission keeps its one-species correction unless final reports are enforced.
+      correctedRows = isFinalReportRow(correction)
+        ? existingRows.filter(row => row.finalReportGroupId === correction.finalReportGroupId)
+        : [{ ...correction, id: input.correctionOf }];
+      if (!correctedRows.length || correctedRows.some(row => !correctable(row)) ||
+          !enforced && (input.items.length !== 1 || input.items[0].inventoryId !== correction.inventoryId)) throw fail(409, "This submission cannot be corrected.");
     }
+    if (enforced) assertNoActiveFinalReport(existingRows);
     const adminRecipients = await require("./notification.service").getRoleRecipientsInTransaction(transaction, ["admin"]);
     const recorded = { ...(event.recordedSeedlingsByInventory || {}) }, leftovers = { ...(event.leftoverSeedlingsByInventory || {}) };
     const rows = input.items.map((row, index) => {
@@ -127,8 +151,18 @@ async function submitOfficialReport(user, input) {
       if (submitted !== quantity) throw fail(409, "Quantity planted must equal the available balance minus leftovers. Refresh the release and try again.", { items: "Refresh the release and enter the final leftover quantity." });
       recorded[row.inventoryId] = Number(recorded[row.inventoryId] || 0) + quantity;
       leftovers[row.inventoryId] = Number(leftovers[row.inventoryId] || 0) + leftoverQuantity;
-      return { id: `${operationId}_${index}`, inventoryId: row.inventoryId, species: item.species, quantity, leftoverQuantity, releasedQuantity: item.quantityReleased };
+      return { id: `${operationId}_${index}`, inventoryId: row.inventoryId, species: item.species, quantity, leftoverQuantity, releasedQuantity: item.quantityReleased,
+        leftoverReason: leftoverQuantity > 0 ? String(row.leftoverReason || "").trim() : "" };
     }).filter(row => row.quantity + row.leftoverQuantity > 0);
+    // Species are validated above (400); a final report must then cover every
+    // released type that still has a balance.
+    if (enforced) {
+      const open = option.items.filter(item => item.availableQuantity > 0);
+      if (!open.length) throw fail(409, "No seedlings remain to be reported for this planting event.");
+      if (open.some(item => !input.items.some(row => row.inventoryId === item.inventoryId))) {
+        throw fail(409, "The final planting report must include every released seedling type with a remaining balance. Refresh and try again.", { items: "Include every released seedling type." });
+      }
+    }
     const planted = rows.reduce((sum, row) => sum + row.quantity, 0), leftover = rows.reduce((sum, row) => sum + row.leftoverQuantity, 0);
     submissionIds = rows.map(row => row.id);
     if (planted + leftover <= 0) throw fail(400, "Report a planted or leftover quantity.", { items: "Report a planted or leftover quantity." });
@@ -136,17 +170,21 @@ async function submitOfficialReport(user, input) {
     const active = Number(parent.activeSubmittedQuantity || 0) + planted, declaredLeftovers = Number(parent.declaredLeftoverQuantity || 0) + leftover;
     const pending = Number(parent.pendingReviewQuantity || 0) + planted, pendingLeftovers = Number(parent.pendingReviewLeftoverQuantity || 0) + leftover;
     const progress = progressFor({ released: parent.quantityReleased, active, accepted: Number(parent.acceptedQuantity || 0), pending, leftovers: declaredLeftovers, acceptedLeftovers: Number(parent.acceptedLeftoverQuantity || 0), pendingLeftovers });
-    for (const row of rows) {
+    const finalFields = enforced ? { finalReportId: finalReportIdFor(eventDoc.id), finalReportGroupId: operationId, finalReportRevision: nextFinalRevision(existingRows),
+      confirmationMode: "final", ...(correctedRows.length ? { finalReportCorrectionOfGroup: correctedRows[0].finalReportGroupId || correctedRows[0].id } : {}) } : {};
+    for (const [groupIndex, row] of rows.entries()) {
       const { id, ...values } = row;
+      const prior = correctedRows.find(entry => entry.inventoryId === row.inventoryId) || null;
       transaction.create(db.collection("plantingContributions").doc(id), { ...values, reportId: parentId, eventId: eventDoc.id, requestId: requestDoc.id,
-        officialStaffReport: true, officialOperationId: operationId, adminApprovalRequired: true, staffApprovalRequired: true, submissionWorkflowVersion: 3,
+        ...finalFields, ...(enforced ? { finalReportGroupIndex: groupIndex } : {}),
+        officialStaffReport: true, officialOperationId: operationId, adminApprovalRequired: true, staffApprovalRequired: true, submissionWorkflowVersion: enforced ? FINAL_REPORT_VERSION : 3,
         confirmationBasis: input.confirmationBasis, participantId: request.participantId, contributorId: user.uid,
         contributorName: user.fullName || user.name || "MENRO Staff", authenticatedSubmitterUid: user.uid, submittedByName: user.fullName || user.name || "MENRO Staff", submittedByType: "MENRO Staff",
         requesterName: option.requesterName, participantSector: option.participantSector, siteId: event.plantingSiteId,
         plantingDate: event.date, verificationStatus: "Needs Review", staffReviewStatus: "Pending Review", workflowStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, photos: [], remarks: input.remarks.trim(),
-        ...(correction ? { correctionOf: correctionRef.id, revision: Number(correction.revision || 0) + 1 } : { revision: 0 }), createdAt: now, updatedAt: now });
+        ...(prior ? { correctionOf: prior.id, revision: Number(prior.revision || 0) + 1 } : { revision: correction ? Number(correction.revision || 0) + 1 : 0 }), createdAt: now, updatedAt: now });
     }
-    if (correctionRef) transaction.update(correctionRef, { correctedBySubmission: rows[0].id });
+    for (const row of correctedRows) transaction.update(db.collection("plantingContributions").doc(row.id), { correctedBySubmission: rows[0].id });
     transaction.update(eventRef, { recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftovers,
       recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) + planted, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) + leftover,
       remainingSeedlingQuantity: Math.max(0, event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) - planted - leftover),
@@ -184,8 +222,15 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
   await db.runTransaction(async transaction => {
     const doc = await transaction.get(ref);
     if (!doc.exists || doc.data().officialStaffReport !== true) throw fail(404, "Official submission not found.");
-    const current = doc.data(); parentId = current.reportId;
-    if (current.staffReviewStatus !== "Pending Review" || deriveWorkflowStatus(current) !== WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL) throw fail(409, "Only pending official submissions can be decided.");
+    const requested = { ...doc.data(), id: doc.id || id }; parentId = requested.reportId;
+    // A final report (v4) is decided as a whole: every species row together.
+    const rows = isFinalReportRow(requested)
+      ? sortGroupRows((await transaction.get(db.collection("plantingContributions").where("finalReportGroupId", "==", requested.finalReportGroupId))).docs
+        .map(row => ({ ...row.data(), id: row.id })).filter(row => row.reportId === parentId && row.officialStaffReport === true))
+      : [requested];
+    if (!rows.some(row => row.id === requested.id)) throw fail(409, "The final planting report changed. Refresh and try again.");
+    const current = rows[0], decidedIds = rows.map(row => row.id);
+    if (rows.some(row => row.staffReviewStatus !== "Pending Review" || deriveWorkflowStatus(row) !== WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL)) throw fail(409, "Only pending official submissions can be decided.");
     if (approve && current.confirmationBasis === "menro-field-report") {
       const operation = await transaction.get(db.collection("officialPlantingOperations").doc(current.officialOperationId));
       const evidenceId = operation.data()?.evidenceSubmissionId;
@@ -200,8 +245,10 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     const parentRef = db.collection("plantingReports").doc(parentId), eventRef = db.collection("events").doc(current.eventId);
     const [parentDoc, eventDoc] = await Promise.all([transaction.get(parentRef), transaction.get(eventRef)]);
     if (!parentDoc.exists || !eventDoc.exists || parentDoc.data().requestId !== current.requestId || eventDoc.data().sourceRequestId !== current.requestId) throw fail(409, "Official report relationships require reconciliation.");
-    const parent = parentDoc.data(), event = eventDoc.data(), quantity = Number(current.quantity), leftover = Number(current.leftoverQuantity || 0);
-    if (!wholeQuantity(quantity) || !wholeQuantity(leftover) || Number(parent.pendingReviewQuantity || 0) < quantity || Number(parent.pendingReviewLeftoverQuantity || 0) < leftover) throw fail(409, "Official report balances require reconciliation.");
+    const parent = parentDoc.data(), event = eventDoc.data();
+    if (rows.some(row => !wholeQuantity(Number(row.quantity)) || !wholeQuantity(Number(row.leftoverQuantity || 0)))) throw fail(409, "Official report balances require reconciliation.");
+    const quantity = rows.reduce((sum, row) => sum + Number(row.quantity), 0), leftover = rows.reduce((sum, row) => sum + Number(row.leftoverQuantity || 0), 0);
+    if (Number(parent.pendingReviewQuantity || 0) < quantity || Number(parent.pendingReviewLeftoverQuantity || 0) < leftover) throw fail(409, "Official report balances require reconciliation.");
     const active = Number(parent.activeSubmittedQuantity || 0) - (approve ? 0 : quantity), declaredLeftovers = Number(parent.declaredLeftoverQuantity || 0) - (approve ? 0 : leftover);
     const accepted = Number(parent.acceptedQuantity || 0) + (approve ? quantity : 0), acceptedLeftovers = Number(parent.acceptedLeftoverQuantity || 0) + (approve ? leftover : 0);
     const pending = Number(parent.pendingReviewQuantity || 0) - quantity, pendingLeftovers = Number(parent.pendingReviewLeftoverQuantity || 0) - leftover;
@@ -210,8 +257,8 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     const acceptedByInventory = {}, confirmationBases = new Set();
     for (const row of submissionSnapshot.docs) {
       const data = normalizeSubmission(row.data());
-      if ((data.officialStaffReport === true || data.photos?.length) && data.verificationStatus !== "Invalid" &&
-          (approve && row.id === id || data.staffReviewStatus === "Accepted" || data.staffApprovalRequired !== true && data.verificationStatus === "Verified" && data.staffReviewStatus === "Not Required")) {
+      if ((data.officialStaffReport === true || data.photos?.length || data.finalReportGroupId) && data.verificationStatus !== "Invalid" &&
+          (approve && decidedIds.includes(row.id) || data.staffReviewStatus === "Accepted" || data.staffApprovalRequired !== true && data.verificationStatus === "Verified" && data.staffReviewStatus === "Not Required")) {
         acceptedByInventory[data.inventoryId] = Number(acceptedByInventory[data.inventoryId] || 0) + Number(data.quantity || 0);
         confirmationBases.add(data.confirmationBasis || "documented-participant-report");
       }
@@ -228,8 +275,11 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     if (approve) await require("./verifiedPlantingCohort.service").ensureCohortForAuthoritativeReportInTransaction(transaction, { reportId: parentId, report: nextParent, now });
     if (!approve) {
       const recorded = { ...(event.recordedSeedlingsByInventory || {}) }, leftovers = { ...(event.leftoverSeedlingsByInventory || {}) };
-      if (Number(recorded[current.inventoryId] || 0) < quantity || Number(leftovers[current.inventoryId] || 0) < leftover) throw fail(409, "Official report ledger requires reconciliation.");
-      recorded[current.inventoryId] -= quantity; leftovers[current.inventoryId] -= leftover;
+      for (const row of rows) {
+        const rowQuantity = Number(row.quantity), rowLeftover = Number(row.leftoverQuantity || 0);
+        if (Number(recorded[row.inventoryId] || 0) < rowQuantity || Number(leftovers[row.inventoryId] || 0) < rowLeftover) throw fail(409, "Official report ledger requires reconciliation.");
+        recorded[row.inventoryId] -= rowQuantity; leftovers[row.inventoryId] -= rowLeftover;
+      }
       transaction.update(eventRef, { recordedSeedlingsByInventory: recorded, leftoverSeedlingsByInventory: leftovers,
         recordedSeedlingQuantity: Number(event.recordedSeedlingQuantity || 0) - quantity, leftoverSeedlingQuantity: Number(event.leftoverSeedlingQuantity || 0) - leftover,
         remainingSeedlingQuantity: event.seedlingItems.reduce((sum, item) => sum + availableForReporting(event, item), 0) + quantity + leftover,
@@ -238,11 +288,13 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
     transaction.update(parentRef, nextParent);
     const adminName = user.fullName || user.name || "MENRO Admin";
     const nextStage = approve ? WORKFLOW_STATUS.COMPLETED : decision === DECISIONS.reject ? WORKFLOW_STATUS.REJECTED : WORKFLOW_STATUS.RETURNED;
-    transaction.update(ref, { staffReviewStatus: approve ? "Accepted" : "Rejected", workflowStatus: nextStage, reviewedBy: user.uid, reviewedByName: adminName, reviewedAt: now,
+    for (const row of rows) transaction.update(db.collection("plantingContributions").doc(row.id), { staffReviewStatus: approve ? "Accepted" : "Rejected", workflowStatus: nextStage, reviewedBy: user.uid, reviewedByName: adminName, reviewedAt: now,
       adminDecisionBy: user.uid, adminDecisionByName: adminName, adminDecisionAt: now, reviewRemarks: reason,
       ...(decision === DECISIONS.reject ? { rejectionReason: reason } : {}),
       ...(decision === DECISIONS.return ? { returnReason: reason, returnedBy: user.uid, returnedByName: adminName, returnedByRole: "admin", returnedAt: now } : {}), updatedAt: now });
-    require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: id,
+    const key = current.id;
+    require("./verificationLog.service").createVerificationLogInTransaction(transaction, { plantingReportId: parentId, submissionId: key,
+      ...(isFinalReportRow(current) ? { finalReportId: current.finalReportId || "", finalReportGroupId: current.finalReportGroupId, submissionIds: decidedIds } : {}),
       action: approve ? "Admin Approval" : decision === DECISIONS.reject ? "Admin Rejection" : "Admin Return for Correction",
       previousStatus: WORKFLOW_STATUS.PENDING_ADMIN_APPROVAL, newStatus: nextStage, performedBy: user.uid, performedByRole: "admin", performedByName: adminName, remarks: reason, createdAt: now });
     const notice = {
@@ -250,9 +302,9 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
       reject: { key: "rejected", type: "planting_report_rejected", title: "Official Planting Report Rejected", message: `MENRO Admin rejected your official planting report. This decision is final. Reason: ${reason}` },
       return: { key: "correction", type: "planting_report_returned", title: "Official Planting Report Returned for Correction", message: `MENRO Admin returned your official planting report for correction. Reason: ${reason}` },
     }[decision];
-    require("./notification.service").createNotificationInTransaction(transaction, { notificationId: `official_planting_${id}_${notice.key}`, recipientUserId: current.authenticatedSubmitterUid,
+    require("./notification.service").createNotificationInTransaction(transaction, { notificationId: `official_planting_${key}_${notice.key}`, recipientUserId: current.authenticatedSubmitterUid,
       type: notice.type, title: notice.title, message: notice.message,
-      relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now });
+      relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: key, createdAt: now });
   });
   const parent = await db.collection("plantingReports").doc(parentId).get();
   return reportDetails(parentId, parent.data());
