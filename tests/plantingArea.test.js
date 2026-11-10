@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { plantingArea, normalizeRequestPlantingArea, verifiedProposedSite } = require("../src/utils/plantingArea.util");
+const { plantingArea, normalizeRequestPlantingArea, verifiedProposedSite, applyRegisteredSiteArea } = require("../src/utils/plantingArea.util");
 test("Other requires a positive finite exact decimal, including small values", () => {
   for (const value of ["0.5", ".25", "0.000001", 0.0000001, "12.75"]) assert.equal(plantingArea("Other / Exact Area", value).hectares, Number(value));
   for (const value of ["", " ", null, undefined, "0", "-1", "NaN", "Infinity", "1e3", "0x10", "1,5", "1.2.3", "1/2", false, Infinity]) {
@@ -36,4 +36,13 @@ test("normalization preserves coordinates, clears stale exact values and never c
   assert.equal(source.exactArea, "old");
   assert.throws(() => normalizeRequestPlantingArea({ ...source, areaChoice: "Other / Exact Area", exactArea: "NaN" }), error => Boolean(error.fieldErrors?.exactArea));
   assert.equal(normalizeRequestPlantingArea(undefined), undefined);
+});
+test("existing sites take only a positive registered area and proposed workflows are untouched", () => {
+  const existing = normalizeRequestPlantingArea({ siteMode: "existing", existingSiteId: "site-1", areaChoice: "Other / Exact Area", exactArea: "NaN", areaSource: "client" });
+  assert.equal(existing.areaChoice, ""); assert.equal(existing.areaHectares, null); assert.equal(existing.areaSource, undefined);
+  assert.equal(applyRegisteredSiteArea(existing, { areaHectares: 3.2 }).areaHectares, 3.2);
+  for (const areaHectares of [0, -1, "", null, "abc", Infinity, undefined]) assert.equal(applyRegisteredSiteArea(existing, { areaHectares }).areaHectares, null);
+  const proposed = { siteMode: "proposed", areaHectares: 1 };
+  assert.equal(applyRegisteredSiteArea(proposed, { areaHectares: 9 }), proposed);
+  assert.equal(applyRegisteredSiteArea(existing, null), existing);
 });

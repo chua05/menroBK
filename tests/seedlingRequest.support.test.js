@@ -859,3 +859,47 @@ test("proposed Niyogan locations are rejected before resubmission writes", async
     /Planting Location Not Eligible/
   );
 });
+
+
+test("existing-site requests save the registered site area; proposed-site area stays optional", async () => {
+  records.sites.set("site-area", { siteName: "Registered Area Site", status: "active", barangay: "Bical", maximumCapacity: 100, planted: 0, areaHectares: 2.5 });
+  records.sites.set("site-no-area", { siteName: "Legacy Site", status: "active", barangay: "Bical", maximumCapacity: 100, planted: 0 });
+  records.seedlingInventory.set("inventory-area", { species: "Narra", availableQuantity: 20 });
+  const payload = (siteId, workflow) => ({ items: [{ inventoryId: "inventory-area", quantity: 2 }], participantId: "participant-area", status: "Pending",
+    eventProposal: { plantingSiteId: siteId, barangay: "Bical" }, workflow });
+  // A client-supplied area for an existing site is ignored in favour of the registered area.
+  const existing = await service.createSeedlingRequest(payload("site-area", { siteMode: "existing", existingSiteId: "site-area", areaChoice: "5 hectares", exactArea: "", areaSource: "client" }));
+  const stored = records.seedlingRequests.get(existing.id).workflow;
+  assert.equal(stored.areaHectares, 2.5); assert.equal(stored.plantingAreaHectares, 2.5);
+  assert.equal(stored.areaSource, "registered-site"); assert.equal(stored.areaChoice, ""); assert.equal(stored.exactArea, "");
+  const legacySite = await service.createSeedlingRequest(payload("site-no-area", { siteMode: "existing", existingSiteId: "site-no-area" }));
+  assert.equal(records.seedlingRequests.get(legacySite.id).workflow.areaHectares, null, "a site without a registered area is never given an invented one");
+  assert.equal(records.sites.get("site-area").areaHectares, 2.5, "site records are not modified");
+  assert.equal(Object.hasOwn(records.sites.get("site-no-area"), "areaHectares"), false);
+  const proposed = await service.createSeedlingRequest(payload("PROPOSED", { siteMode: "proposed", areaChoice: "", exactArea: "", latitude: "12.65", longitude: "123.91" }));
+  const proposedWorkflow = records.seedlingRequests.get(proposed.id).workflow;
+  assert.equal(proposedWorkflow.areaHectares, null); assert.equal(proposedWorkflow.siteReviewRequired, true); assert.equal(proposedWorkflow.areaSource, undefined);
+  const proposedArea = await service.createSeedlingRequest(payload("PROPOSED", { siteMode: "proposed", areaChoice: "Other / Exact Area", exactArea: "0.75", latitude: "12.65", longitude: "123.91" }));
+  assert.equal(records.seedlingRequests.get(proposedArea.id).workflow.areaHectares, 0.75);
+  await assert.rejects(service.createSeedlingRequest(payload("PROPOSED", { siteMode: "proposed", areaChoice: "Other / Exact Area", exactArea: "abc" })), (error) => Boolean(error.fieldErrors?.exactArea));
+
+  records.seedlingRequests.set("request-area-returned", { status: "Returned", participantId: "participant-area", participantName: "Area Participant", requestNumber: "REQ-2026-090",
+    inventoryDeducted: false, inventoryReserved: false, reviewHistory: [], workflow: { siteMode: "proposed", areaChoice: "1 hectare", areaHectares: 1 } });
+  await service.resubmitSeedlingRequest("request-area-returned", "participant-area", { ...payload("site-area", { siteMode: "existing", existingSiteId: "site-area", areaChoice: "3 hectares" }),
+    purpose: "Community planting", plantingLocation: "Registered Area Site, Bical", preferredReleaseDate: validPreferredReleaseDate,
+    eventProposal: { eventName: "Area event", barangay: "Bical", plantingSiteId: "site-area", proposedDate: validPreferredReleaseDate, proposedStartTime: "08:00", proposedEndTime: "10:00", expectedParticipants: 3 } });
+  const resubmitted = records.seedlingRequests.get("request-area-returned").workflow;
+  assert.equal(resubmitted.areaHectares, 2.5); assert.equal(resubmitted.areaSource, "registered-site"); assert.equal(resubmitted.areaChoice, "");
+});
+
+test("request validation needs no area for existing sites and keeps proposed area optional", () => {
+  const base = { sector: "Resident / Individual", effectiveRequestType: "individual", purpose: "Farm / Agricultural Planting", addressProvince: "Sorsogon", addressMunicipality: "Bulan",
+    addressBarangay: "Zone VIII", street: "Purok 1", siteBarangay: "Zone VIII", releaseMethod: "Pick-up", caretaker: "Requester", carePlan: "Water weekly", monitoringFrequency: "Weekly" };
+  const validate = (workflow) => seedlingController._test.validateWorkflow({ ...base, ...workflow }, "Farm / Agricultural Planting");
+  assert.doesNotThrow(() => validate({ siteMode: "existing", existingSiteId: "site-1" }));
+  assert.doesNotThrow(() => validate({ siteMode: "existing", existingSiteId: "site-1", areaChoice: "not-an-option" }), "existing-site area input is ignored");
+  const proposed = { siteMode: "proposed", siteName: "Proposed", specificLocation: "Purok 2", latitude: "12.6", longitude: "123.9", niyogan: "no", landType: "Residential / Private Property", currentCondition: "Open" };
+  assert.doesNotThrow(() => validate(proposed));
+  assert.throws(() => validate({ ...proposed, areaChoice: "Other / Exact Area", exactArea: "" }), (error) => Boolean(error.fieldErrors?.exactArea));
+  assert.throws(() => validate({ ...proposed, areaChoice: "free-text" }), (error) => Boolean(error.fieldErrors?.areaChoice));
+});
