@@ -38,12 +38,19 @@ const STAFF_REQUEST_ID = `${PREFIX}-staff-request`;
 const STAFF_EVENT_ID = `${PREFIX}-staff-event`;
 const STAFF_REPORT_ID = `event_${STAFF_EVENT_ID}`;
 const STAFF_SITE_ID = `${PREFIX}-staff-site`;
+// A fourth event for guest attendance (Phase 4): an invitation link and one
+// abandoned legacy reservation from the retired guest contribution workflow.
+const ATTEND_REQUEST_ID = `${PREFIX}-attend-request`;
+const ATTEND_EVENT_ID = `${PREFIX}-attend-event`;
+const ATTEND_REPORT_ID = `event_${ATTEND_EVENT_ID}`;
+const ATTEND_SITE_ID = `${PREFIX}-attend-site`;
+const LEGACY_RESERVATION_ID = `${PREFIX}-legacy-reservation`;
 
 async function cleanup() {
   const deletions = [];
   for (const [collection, field] of [["plantingContributions", "reportId"], ["plantingEvidenceHashes", "reportId"],
     ["notifications", "relatedRecordId"], ["verificationLogs", "plantingReportId"], ["officialPlantingOperations", "reportId"]]) {
-    for (const reportId of [REPORT_ID, FORM_REPORT_ID, STAFF_REPORT_ID]) {
+    for (const reportId of [REPORT_ID, FORM_REPORT_ID, STAFF_REPORT_ID, ATTEND_REPORT_ID]) {
       const snapshot = await db.collection(collection).where(field, "==", reportId).get();
       snapshot.docs.forEach((doc) => deletions.push(doc.ref.delete()));
     }
@@ -51,9 +58,15 @@ async function cleanup() {
   for (const [collection, id] of [["plantingReports", REPORT_ID], ["events", EVENT_ID],
     ["distributions", REQUEST_ID], ["seedlingRequests", REQUEST_ID], ["sites", SITE_ID],
     ["plantingReports", FORM_REPORT_ID], ["events", FORM_EVENT_ID], ["sites", FORM_SITE_ID],
-    ["plantingReports", STAFF_REPORT_ID], ["events", STAFF_EVENT_ID], ["sites", STAFF_SITE_ID], ["distributions", STAFF_REQUEST_ID], ["seedlingRequests", STAFF_REQUEST_ID], ["distributions", FORM_REQUEST_ID], ["seedlingRequests", FORM_REQUEST_ID]]) {
+    ["plantingReports", STAFF_REPORT_ID], ["events", STAFF_EVENT_ID], ["sites", STAFF_SITE_ID], ["distributions", STAFF_REQUEST_ID], ["seedlingRequests", STAFF_REQUEST_ID],
+    ["plantingReports", ATTEND_REPORT_ID], ["events", ATTEND_EVENT_ID], ["sites", ATTEND_SITE_ID], ["distributions", ATTEND_REQUEST_ID], ["seedlingRequests", ATTEND_REQUEST_ID],
+    ["eventInvitations", ATTEND_EVENT_ID], ["plantingContributions", LEGACY_RESERVATION_ID], ["distributions", FORM_REQUEST_ID], ["seedlingRequests", FORM_REQUEST_ID]]) {
     deletions.push(db.collection(collection).doc(id).delete());
   }
+  const attendance = await db.collection("eventAttendance").where("eventId", "==", ATTEND_EVENT_ID).get();
+  attendance.docs.forEach((doc) => deletions.push(doc.ref.delete()));
+  const reservationLogs = await db.collection("verificationLogs").where("submissionId", "==", LEGACY_RESERVATION_ID).get();
+  reservationLogs.docs.forEach((doc) => deletions.push(doc.ref.delete()));
   for (const [uid] of USERS) {
     deletions.push(db.collection("users").doc(uid).delete());
     deletions.push(auth.deleteUser(uid).catch((error) => { if (error.code !== "auth/user-not-found") throw error; }));
@@ -148,6 +161,36 @@ async function seed() {
   if (official.status !== 201 || officialPayload.success !== true) {
     throw new Error(`Staff final report failed: ${official.status} ${JSON.stringify(officialPayload)}`);
   }
+
+  // Guest attendance event (Completed, so attendance is open while the link is valid).
+  await db.collection("sites").doc(ATTEND_SITE_ID).set({ siteId: ATTEND_SITE_ID, siteName: "View Report Attendance Site",
+    barangay: "Bical", municipality: "Bulan", province: "Sorsogon", latitude: 12.674, longitude: 123.878,
+    coverageRadiusMeters: 100, status: "active", archived: false, testFixture: true });
+  const attendItems = [{ inventoryId: `${PREFIX}-attend-narra`, species: "Narra", requestedQuantity: 6, releasedQuantity: 6, quantity: 6 }];
+  await db.collection("seedlingRequests").doc(ATTEND_REQUEST_ID).set({ status: "Released", eventId: ATTEND_EVENT_ID,
+    participantId: USERS[0][0], participantName: "Browser Planter", requestNumber: "REQ-VIEW-ATTEND", items: attendItems, expectedParticipants: 5, testFixture: true });
+  await db.collection("distributions").doc(ATTEND_REQUEST_ID).set({ status: "Released", requestId: ATTEND_REQUEST_ID,
+    eventId: ATTEND_EVENT_ID, participantId: USERS[0][0], participantName: "Browser Planter",
+    plantingSiteId: ATTEND_SITE_ID, items: attendItems, totalQuantityReleased: 6, testFixture: true });
+  const attendEvent = { ...event, name: "View Report attendance planting", sourceRequestId: ATTEND_REQUEST_ID,
+    plantingSiteId: ATTEND_SITE_ID, plantingSiteName: "View Report Attendance Site",
+    seedlingItems: attendItems.map(({ inventoryId, species, quantity }) => ({ inventoryId, species, quantity })), seedlingTotalQuantity: 6,
+    pendingSeedlingsByInventory: { [`${PREFIX}-attend-narra`]: 3 }, pendingSeedlingQuantity: 3 };
+  await db.collection("events").doc(ATTEND_EVENT_ID).set(attendEvent);
+  await db.runTransaction(async (transaction) => {
+    await parentForEventInTransaction(transaction, ATTEND_EVENT_ID, attendEvent, Timestamp.now());
+  });
+  const guestService = require("../../src/services/guestEvent.service");
+  if (!guestService.isGuestInvitationConfigured()) throw new Error("GUEST_INVITATION_SECRET must match the backend server for attendance fixtures.");
+  await db.runTransaction(async (transaction) => { guestService.createInvitationInTransaction(transaction, ATTEND_EVENT_ID, ATTEND_REQUEST_ID, Timestamp.now()); });
+  // An abandoned reservation from the retired guest workflow (no evidence).
+  await db.collection("plantingContributions").doc(LEGACY_RESERVATION_ID).set({ reportId: ATTEND_REPORT_ID, requestId: ATTEND_REQUEST_ID,
+    eventId: ATTEND_EVENT_ID, participantId: `${PREFIX}-old-guest`, contributorId: `${PREFIX}-old-guest`, participantType: "guest",
+    contributorName: "Former Guest", inventoryId: `${PREFIX}-attend-narra`, species: "Narra", quantity: 3,
+    evidencePending: true, allocationReserved: true, staffApprovalRequired: true, requiresStaffReview: true,
+    submissionWorkflowVersion: 2, recordedAt: Timestamp.now(), testFixture: true });
+  const { token: attendanceToken } = await guestService.getInvitationForRequester(ATTEND_EVENT_ID, USERS[0][0]);
+  console.log(`Guest attendance token: ${attendanceToken}`);
 
   const token = await signIn(USERS[0][1]);
   const form = new FormData();

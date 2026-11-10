@@ -5,12 +5,12 @@ const { authorizeRoles } = require("../middleware/role.middleware");
 const { sendSuccess, sendError } = require("../utils/response.util");
 const guest = require("../services/guestEvent.service");
 const contributions = require("../services/plantingContribution.service");
-const { attachEvidence } = require("../services/plantingEvidence.service");
-const { uploadContributionEvidence, uploadConcurrencyGuard } = require("../middleware/upload.middleware");
-const { uploadLimiter, guestContributionLimiter } = require("../middleware/rateLimiter.middleware");
-const {
-  evidenceUploadMaintenanceGate,
-} = require("../middleware/evidenceUploadMaintenance.middleware");
+const { guestContributionLimiter } = require("../middleware/rateLimiter.middleware");
+
+// Guest planting/photo contributions are replaced by attendance-only
+// registration. Historical contributions stay readable; new ones are refused.
+const RETIRED = "Guest planting and photo contributions have been replaced by attendance registration. Use the event link to register attendance.";
+const retired = (_req, res) => sendError(res, 410, RETIRED);
 
 router.get("/invitation/:eventId", verifyToken, authorizeRoles("participant"), async (req, res) => {
   try {
@@ -52,93 +52,36 @@ router.get("/session/contributions", async (req, res) => {
   }
 });
 
-router.post("/session/contributions", async (req, res, next) => {
-  try {
-    req.guestSession = await guest.validateGuestSession(req.headers.authorization);
-    return next();
-  } catch (error) {
-    return sendError(res, 401, error.message === "Guest session expired."
-      ? "Your guest session has expired. Please use a valid invitation link."
-      : "Invalid guest session.");
-  }
-}, guestContributionLimiter, async (req, res) => {
-  const session = req.guestSession;
-  try {
-    const data = await contributions.recordContribution(
-      session.eventId,
-      session.participantId,
-      req.body?.inventoryId,
-      req.body?.quantity,
-      req.body?.submissionKey
-    );
-    return sendSuccess(res, 201, "Contribution recorded", data);
-  } catch (error) {
-    if (error.message.startsWith("Only ") || error.message.includes("remaining reportable quantity") ||
-      error.message.includes("available planting quantity") ||
-        error.message.includes("required") ||
-        error.message.includes("not allocated") || error.message.includes("not been released") ||
-        error.message.includes("submission key") || error.message.includes("finalized")) {
-        return sendError(res, 400, error.message);
-      } else if (error.message.includes("not authorized") || error.message.includes("available planting quantity")) {
-        return sendError(res, 400, error.message);
-    }
-    console.error(error);
-    return sendError(res, 500, "Failed to record contribution.");
-  }
-});
+router.post("/session/contributions", retired);
+router.post("/session/contributions/:id/evidence", retired);
 
-router.post("/session/contributions/:id/evidence", async (req, res, next) => {
-  try {
-    req.guestSession = await guest.validateGuestSession(req.headers.authorization);
-    return next();
-  } catch (error) {
-    return sendError(res, 401, error.message === "Guest session expired."
-      ? "Your guest session has expired. Please use a valid invitation link."
-      : "Invalid guest session.");
-  }
-}, evidenceUploadMaintenanceGate, uploadLimiter, uploadConcurrencyGuard, uploadContributionEvidence, async (req, res) => {
-  try {
-    const data = await attachEvidence(req.guestSession.eventId, req.guestSession.participantId,
-      req.params.id, req.files, req.headers["idempotency-key"]);
-    return sendSuccess(res, 200, "Planting evidence recorded", data);
-  } catch (error) {
-    if (require("../services/evidenceWorkflow.service").workflowErrorResponse(res, error)) return;
-    const expected = /required|photos|image|contribution|accepting evidence|Duplicate|date|coordinates|GPS|metadata|Bulan|site|timestamp|remaining reportable quantity|released|allocated|invalid/i
-      .test(error.message);
-    if (!expected) console.error(error);
-    return sendError(res, expected ? 400 : 500,
-      expected ? error.message : "Failed to record planting evidence.");
-  }
-});
-
+// Public event card for the attendance page (no allocation or balances).
 router.get("/:token", async (req, res) => {
   try {
-    const { eventId, event } = await guest.validateInvitation(req.params.token);
-    return sendSuccess(res, 200, "Guest event retrieved", await guest.publicEvent(eventId, event));
+    const { eventId, event, state } = await guest.validateAttendanceInvitation(req.params.token);
+    return sendSuccess(res, 200, "Guest event retrieved", await guest.attendanceEventView(eventId, event, state));
   } catch (error) {
-    return sendError(res, error.message === "This invitation link has expired." ? 410 : 404,
-      error.message === "This invitation link has expired."
-        ? error.message : "Guest event not found.");
+    if ([404, 410].includes(error.status)) return sendError(res, error.status, error.message);
+    console.error(error);
+    return sendError(res, 500, "Failed to load the guest event.");
   }
 });
 
-router.post("/:token/join", async (req, res) => {
+// Attendance registration: Full Name, Contact Number and Address only.
+router.post("/:token/attendance", guestContributionLimiter, async (req, res) => {
   try {
-    const joined = await guest.joinGuest(req.params.token, req.body);
-    return sendSuccess(res, 201, "Joined event", joined);
+    const registered = await guest.registerAttendance(req.params.token, req.body);
+    return sendSuccess(res, 201, "Attendance recorded", { eventId: registered.eventId, fullName: registered.fullName, registeredAt: registered.registeredAt });
   } catch (error) {
-    const message = error.message;
-    if (message === "This contact number has already joined the event.") return sendError(res, 409, message);
-    if (message.startsWith("A valid Philippine mobile number") || message.startsWith("Full name is required")) {
-      return sendError(res, 400, message);
+    if ([400, 404, 409, 410].includes(error.status)) {
+      return res.status(error.status).json({ success: false, message: error.message, ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}) });
     }
-    if (message === "Invalid guest invitation." || message === "Event not found.") {
-      return sendError(res, 404, "Guest event not found.");
-    }
-    if (message === "This invitation link has expired.") return sendError(res, 410, message);
     console.error(error);
-    return sendError(res, 500, "Failed to join event.");
+    return sendError(res, 500, "Failed to record attendance.");
   }
 });
+
+// The guest session existed only for planting contributions.
+router.post("/:token/join", retired);
 
 module.exports = router;

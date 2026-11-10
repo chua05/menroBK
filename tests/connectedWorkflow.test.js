@@ -987,7 +987,7 @@ test("Participant cannot reach legacy monitoring submit or resubmit routes", () 
   }
 });
 
-test("invitation is scoped to owner, guest contact to event, and contribution to released allocation", async () => {
+test("invitation is scoped to owner and guest contact to event; historical guest contributions keep their data path", async () => {
   table("seedlingRequests").set("request-3", {
     participantId: "participant-1", eventId: "EVT-GUEST-SCOPE", status: "Approved",
     participantName: "Requester One",
@@ -1020,38 +1020,27 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   await assert.rejects(guestService.joinGuest(token, {
     fullName: "Another", contactNumber: "+639123456789",
   }), /already joined/);
-  const routeResult = await invokeGuestContribution(
+  // New guest contributions are retired (decision C6): the route refuses and reserves nothing.
+  const retiredResult = await invokeGuestContribution(
     { authorization: `Guest ${joined.sessionToken}` },
     { inventoryId: "calamansi", quantity: 85, submissionKey: "submission_key_123" }
   );
-  assert.equal(routeResult.code, 201);
-  const first = routeResult.body.data;
+  assert.equal(retiredResult.code, 410);
+  assert.match(retiredResult.body.message, /replaced by attendance registration/);
+  assert.equal(table("events").get("EVT-GUEST-SCOPE").pendingSeedlingQuantity || 0, 0, "a retired route reserves nothing");
+  // Historical guest contributions (created before retirement) keep their data path.
+  const first = await contributionService.recordContribution("EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123");
   assert.equal(first.quantity, 85);
   assert.equal(first.participantId, joined.participantId);
   assert.equal(first.eventId, "EVT-GUEST-SCOPE");
-  const duplicateResult = await invokeGuestContribution(
-    { authorization: `Guest ${joined.sessionToken}` },
-    { inventoryId: "calamansi", quantity: 85, submissionKey: "submission_key_123" }
-  );
-  assert.equal(duplicateResult.code, 201);
-  const duplicate = duplicateResult.body.data;
+  const duplicate = await contributionService.recordContribution("EVT-GUEST-SCOPE", joined.participantId, "calamansi", 85, "submission_key_123");
   assert.equal(duplicate.id, first.id);
-  const invalidSessionResult = await invokeGuestContribution(
-    { authorization: "Guest invalid" },
-    { inventoryId: "calamansi", quantity: 1, submissionKey: "invalid_session_key" }
-  );
-  assert.equal(invalidSessionResult.code, 401);
-  assert.equal(invalidSessionResult.body.message, "Invalid guest session.");
+  await assert.rejects(guestService.validateGuestSession("Guest invalid"), /Invalid guest session/);
   const expiredGuest = await guestService.joinGuest(token, {
     fullName: "Expired Guest", contactNumber: "09987654321",
   });
   table("eventParticipants").get(expiredGuest.participantId).expiresAt = new Date(0);
-  const expiredSessionResult = await invokeGuestContribution(
-    { authorization: `Guest ${expiredGuest.sessionToken}` },
-    { inventoryId: "calamansi", quantity: 1, submissionKey: "expired_session_key" }
-  );
-  assert.equal(expiredSessionResult.code, 401);
-  assert.match(expiredSessionResult.body.message, /expired/i);
+  await assert.rejects(guestService.validateGuestSession(`Guest ${expiredGuest.sessionToken}`), /expired/i);
   assert.equal(table("events").get("EVT-GUEST-SCOPE").recordedSeedlingQuantity || 0, 0);
   const sharp = require("sharp");
   const evidenceImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "green" } })
@@ -1067,12 +1056,8 @@ test("invitation is scoped to owner, guest contact to event, and contribution to
   const { attachEvidence } = require("../src/services/plantingEvidence.service");
   await attachEvidence("EVT-GUEST-SCOPE", joined.participantId, first.id,
     [{ buffer: evidenceImage, mimetype: "image/jpeg", originalname: "guest-original.jpg" }]);
-  const excessiveResult = await invokeGuestContribution(
-    { authorization: `Guest ${joined.sessionToken}` },
-    { inventoryId: "calamansi", quantity: 10, submissionKey: "excess_quantity_key" }
-  );
-  assert.equal(excessiveResult.code, 400);
-  assert.match(excessiveResult.body.message, /Only 5 seedlings remain available/);
+  await assert.rejects(contributionService.recordContribution("EVT-GUEST-SCOPE", joined.participantId, "calamansi", 10, "excess_quantity_key"),
+    /Only 5 seedlings remain available/);
   assert.equal(table("events").get("EVT-GUEST-SCOPE").recordedSeedlingQuantity, 85);
   assert.equal(table("plantingContributions").get(first.id).staffReviewStatus, "Pending Review");
   assert.equal(table("plantingReports").get("event_EVT-GUEST-SCOPE").reportingProgress, "Partial");
@@ -1471,4 +1456,204 @@ test("a legacy partial report keeps its history; the final report covers only th
     assert.equal(done.acceptedQuantity, 105); assert.equal(done.acceptedLeftoverQuantity, 5);
     assert.equal(done.reportingProgress, "Completed"); assert.equal(done.reviewStatus, "Completed");
   } finally { for (const report of reports) await cleanupPhotos(report); }
+});
+
+// --------------------------------------------------------------------------
+// Phase 4: guest event attendance only + legacy reservation release
+// --------------------------------------------------------------------------
+async function attendanceFixture(name, eventOverrides = {}) {
+  const requestId = `request-${name}`, eventId = `EVT-${name}`;
+  table("seedlingRequests").set(requestId, { participantId: "requester-attend", eventId, status: "Released", participantName: "Requester" });
+  table("events").set(eventId, { sourceRequestId: requestId, status: "Completed", name: "Attendance planting", date: "2026-09-29", startTime: "08:00",
+    allocationReleasedAt: new Date(), seedlingItems: [{ inventoryId: "calamansi", species: "Calamansi", quantity: 40 }], seedlingTotalQuantity: 40,
+    plantingSiteId: "site-attend", barangay: "Bical", ...eventOverrides });
+  table("sites").set("site-attend", { status: "active", siteName: "Attendance Site", barangay: "Bical", latitude: 12.57, longitude: 123.965 });
+  await db.runTransaction(async (transaction) => { guestService.createInvitationInTransaction(transaction, eventId, requestId, new Date()); });
+  const { token } = await guestService.getInvitationForRequester(eventId, "requester-attend");
+  return { requestId, eventId, token };
+}
+const guestRoute = (path, method) => {
+  const layer = guestRoutes.stack.find((entry) => entry.route?.path === path && entry.route.methods[method]);
+  assert.ok(layer, `${method} ${path} exists`);
+  return layer.route.stack.at(-1).handle;
+};
+const snapshotLedgers = (eventId) => JSON.stringify({ event: table("events").get(eventId),
+  contributions: [...table("plantingContributions").values()].filter((row) => row.eventId === eventId),
+  reports: [...table("plantingReports").entries()].filter(([id]) => id === `event_${eventId}`),
+  participants: [...table("eventParticipants").values()].filter((row) => row.eventId === eventId) });
+
+test("guest attendance records only Full Name, Contact Number and Address, once per contact, during or after the event", async () => {
+  const { eventId, token } = await attendanceFixture("ATTEND");
+  const before = snapshotLedgers(eventId);
+  // The public card is attendance-only: no allocation or balances.
+  const card = await guestService.attendanceEventView(eventId, table("events").get(eventId));
+  assert.equal(card.attendanceOpen, true, "completed events still accept attendance while the link is valid");
+  assert.equal("allocation" in card, false);
+
+  const saved = await guestService.registerAttendance(token, { fullName: "  Maria   Santos ", contactNumber: "0912 345 6789", address: "Purok 3, Barangay Bical, Bulan" });
+  assert.equal(saved.fullName, "Maria Santos");
+  const rows = [...table("eventAttendance").values()].filter((row) => row.eventId === eventId);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(Object.keys(rows[0]).sort(), ["address", "contactNumber", "createdAt", "eventId", "fullName", "registeredAt", "requestId", "source"]);
+  assert.deepEqual([rows[0].fullName, rows[0].contactNumber, rows[0].address], ["Maria Santos", "09123456789", "Purok 3, Barangay Bical, Bulan"]);
+  assert.ok([...table("eventAttendance").keys()].every((id) => !id.includes("09123456789")), "record IDs never contain the contact number");
+
+  await assert.rejects(guestService.registerAttendance(token, { fullName: "Maria S.", contactNumber: "+639123456789", address: "Another address 1" }),
+    (error) => error.status === 409, "one attendance per event and contact");
+  for (const [details, field] of [
+    [{ fullName: "A", contactNumber: "09170000001", address: "Purok 1, Bical" }, "fullName"],
+    [{ fullName: "Juan Cruz", contactNumber: "12345", address: "Purok 1, Bical" }, "contactNumber"],
+    [{ fullName: "Juan Cruz", contactNumber: "09170000001", address: "" }, "address"],
+    [{ fullName: "Juan Cruz", contactNumber: "09170000001", address: "x".repeat(201) }, "address"],
+    [{ fullName: "Juan\u0000Cruz", contactNumber: "09170000001", address: "Purok 1, Bical" }, "fullName"],
+  ]) await assert.rejects(guestService.registerAttendance(token, details), (error) => error.status === 400 && Boolean(error.fieldErrors?.[field]), field);
+  // Planting fields are not accepted at all.
+  for (const extra of [{ inventoryId: "calamansi" }, { quantity: 5 }, { photos: [] }]) {
+    await assert.rejects(guestService.registerAttendance(token, { fullName: "Juan Cruz", contactNumber: "09170000001", address: "Purok 1, Bical", ...extra }), (error) => error.status === 400);
+  }
+  assert.equal(snapshotLedgers(eventId), before, "attendance never touches balances, reservations, contributions, reports or guest sessions");
+
+  // Route: 201 with no personal data echoed beyond the name.
+  const res = routeResponse();
+  await guestRoute("/:token/attendance", "post")({ params: { token }, body: { fullName: "Pedro Reyes", contactNumber: "09181234567", address: "Zone 2, Bical" } }, res);
+  assert.equal(res.result.code, 201);
+  assert.deepEqual(Object.keys(res.result.body.data).sort(), ["eventId", "fullName", "registeredAt"]);
+});
+
+test("attendance links: not before the event starts; refused when revoked, expired, tampered or the event is cancelled", async () => {
+  const future = await attendanceFixture("ATTEND-FUTURE", { date: "2099-01-01", status: "Upcoming" });
+  const futureCard = await guestService.attendanceEventView(future.eventId, table("events").get(future.eventId));
+  assert.equal(futureCard.attendanceOpen, false); assert.ok(futureCard.attendanceOpensAt);
+  await assert.rejects(guestService.registerAttendance(future.token, { fullName: "Early Guest", contactNumber: "09170000002", address: "Purok 1, Bical" }),
+    (error) => error.status === 409 && /opens when the planting event starts/.test(error.message));
+
+  const cancelled = await attendanceFixture("ATTEND-CANCELLED", { status: "Cancelled" });
+  await assert.rejects(guestService.validateAttendanceInvitation(cancelled.token), (error) => error.status === 410);
+  const expired = await attendanceFixture("ATTEND-EXPIRED");
+  table("eventInvitations").get(expired.eventId).expiresAt = new Date(0);
+  await assert.rejects(guestService.validateAttendanceInvitation(expired.token), (error) => error.status === 410 && /expired/.test(error.message));
+  const revoked = await attendanceFixture("ATTEND-REVOKED");
+  table("eventInvitations").get(revoked.eventId).revokedAt = new Date();
+  await assert.rejects(guestService.validateAttendanceInvitation(revoked.token), (error) => error.status === 404);
+  const valid = await attendanceFixture("ATTEND-TAMPER");
+  const tampered = `${valid.eventId}.${"0".repeat(64)}.${"0".repeat(64)}`;
+  await assert.rejects(guestService.validateAttendanceInvitation(tampered), (error) => error.status === 404);
+  // Another event's token cannot register attendance for this event.
+  const otherToken = (await attendanceFixture("ATTEND-OTHER")).token;
+  const forged = `${valid.eventId}.${otherToken.split(".").slice(1).join(".")}`;
+  await assert.rejects(guestService.validateAttendanceInvitation(forged), (error) => error.status === 404);
+  // Route errors keep their status.
+  const res = routeResponse();
+  await guestRoute("/:token", "get")({ params: { token: cancelled.token } }, res);
+  assert.equal(res.result.code, 410);
+});
+
+test("attendance is visible only to the event requester, MENRO Staff and Admin", async () => {
+  const { eventId, token } = await attendanceFixture("ATTEND-RBAC");
+  await guestService.registerAttendance(token, { fullName: "Ana Lim", contactNumber: "09191112222", address: "Purok 5, Bical" });
+  for (const user of [{ uid: "requester-attend", role: "participant" }, { uid: "staff-1", role: "staff" }, { uid: "admin-1", role: "admin" }]) {
+    const rows = await guestService.listEventAttendance(eventId, user);
+    assert.deepEqual(rows.map((row) => [row.fullName, row.contactNumber, row.address]), [["Ana Lim", "09191112222", "Purok 5, Bical"]], user.role);
+  }
+  for (const user of [{ uid: "participant-other", role: "participant" }, { uid: "", role: "staff" }, { uid: "guest", role: "guest" }]) {
+    await assert.rejects(guestService.listEventAttendance(eventId, user), (error) => error.status === 403, JSON.stringify(user));
+  }
+  await assert.rejects(guestService.listEventAttendance("EVT-missing", { uid: "staff-1", role: "staff" }), (error) => error.status === 404);
+  await assert.rejects(guestService.listEventAttendance("../x", { uid: "staff-1", role: "staff" }), (error) => error.status === 404);
+  // Route guard: only authenticated participant/staff/admin reach the service.
+  const eventRoutes = require("../src/routes/event.routes");
+  const layer = eventRoutes.stack.find((entry) => entry.route?.path === "/:id/attendance" && entry.route.methods.get);
+  assert.ok(layer);
+  const guard = layer.route.stack[1].handle;
+  for (const [role, allowed] of [["participant", true], ["staff", true], ["admin", true], ["guest", false]]) {
+    let passed = false; const res = routeResponse();
+    guard({ user: { uid: "u", role } }, res, () => { passed = true; });
+    assert.equal(passed, allowed, role);
+  }
+});
+
+test("new guest and attendee planting/photo contributions are retired; historical contributions stay readable", async () => {
+  const eventRoutes = require("../src/routes/event.routes");
+  const lastHandler = (router, path) => router.stack.find((entry) => entry.route?.path === path && entry.route.methods.post).route.stack.at(-1).handle;
+  for (const [router, path] of [[guestRoutes, "/session/contributions"], [guestRoutes, "/session/contributions/:id/evidence"], [guestRoutes, "/:token/join"],
+    [eventRoutes, "/:id/contributions"], [eventRoutes, "/:id/contributions/:contributionId/evidence"]]) {
+    const res = routeResponse();
+    await lastHandler(router, path)({ params: {}, body: { inventoryId: "calamansi", quantity: 1 }, headers: {} }, res);
+    assert.equal(res.result.code, 410, path);
+  }
+  assert.ok(guestRoutes.stack.some((entry) => entry.route?.path === "/session/contributions" && entry.route.methods.get), "historical contributions stay readable");
+});
+
+test("Staff/Admin release an abandoned legacy reservation with a required reason and an audit entry", async () => {
+  const { eventId } = await attendanceFixture("RESERVE");
+  table("eventParticipants").set("guest-reserve", { eventId, participantType: "guest", fullName: "Old Guest" });
+  const reservation = await contributionService.recordContribution(eventId, "guest-reserve", "calamansi", 15, "legacy_reservation_1");
+  assert.equal(table("events").get(eventId).pendingSeedlingsByInventory.calamansi, 15);
+  assert.equal((await guestService.publicEvent(eventId, table("events").get(eventId))).allocation[0].remaining, 25, "the reservation blocks 15");
+  const listed = await contributionService.listLegacyReservations(eventId);
+  assert.deepEqual(listed.map((row) => [row.id, row.reservationStatus, row.quantity]), [[reservation.id, "Reserved", 15]]);
+
+  const staffUser = { uid: "staff-1", role: "staff", fullName: "Staff Name" };
+  await assert.rejects(contributionService.releaseLegacyReservation(eventId, reservation.id, { uid: "p", role: "participant" }, "x"), (error) => error.status === 403);
+  await assert.rejects(contributionService.releaseLegacyReservation(eventId, reservation.id, staffUser, "  "), (error) => error.status === 400);
+  await assert.rejects(contributionService.releaseLegacyReservation(eventId, reservation.id, staffUser, "x".repeat(1001)), (error) => error.status === 400);
+  await assert.rejects(contributionService.releaseLegacyReservation("EVT-other", reservation.id, staffUser, "Wrong event"), (error) => error.status === 404);
+  const released = await contributionService.releaseLegacyReservation(eventId, reservation.id, staffUser, "Guest never uploaded evidence after the event");
+  assert.equal(released.reservationStatus, "Released");
+  const event = table("events").get(eventId);
+  assert.equal(event.pendingSeedlingsByInventory.calamansi, 0); assert.equal(event.pendingSeedlingQuantity, 0);
+  assert.equal((await guestService.publicEvent(eventId, event)).allocation[0].remaining, 40, "the balance is available for the final report");
+  const row = table("plantingContributions").get(reservation.id);
+  assert.ok(row, "the historical record is kept");
+  assert.deepEqual([row.allocationReserved, row.reservationReleasedBy, row.reservationReleaseReason], [false, "staff-1", "Guest never uploaded evidence after the event"]);
+  const log = [...table("verificationLogs").values()].find((entry) => entry.action === "Legacy Reservation Released" && entry.submissionId === reservation.id);
+  assert.equal(log.performedBy, "staff-1"); assert.match(log.remarks, /Guest never uploaded evidence/);
+  await assert.rejects(contributionService.releaseLegacyReservation(eventId, reservation.id, staffUser, "Again"), (error) => error.status === 409, "only once");
+
+  // A reservation whose evidence was attached is not abandoned and cannot be released.
+  const withEvidence = await contributionService.recordContribution(eventId, "guest-reserve", "calamansi", 5, "legacy_reservation_2");
+  table("plantingContributions").get(withEvidence.id).photos = [{ imageHash: "attached" }];
+  await assert.rejects(contributionService.releaseLegacyReservation(eventId, withEvidence.id, { ...staffUser, role: "admin" }, "No"), (error) => error.status === 409);
+  // Route guard: Staff/Admin only.
+  const eventRoutes = require("../src/routes/event.routes");
+  const layer = eventRoutes.stack.find((entry) => entry.route?.path === "/:id/reservations/:contributionId/release" && entry.route.methods.post);
+  for (const [role, allowed] of [["staff", true], ["admin", true], ["participant", false]]) {
+    let passed = false;
+    layer.route.stack[1].handle({ user: { uid: "u", role } }, routeResponse(), () => { passed = true; });
+    assert.equal(passed, allowed, role);
+  }
+});
+
+test("a released reservation is never counted as planting activity in analytics", async () => {
+  const { eventId } = await attendanceFixture("RESERVE-ANALYTICS");
+  table("eventParticipants").set("guest-analytics", { eventId, participantType: "guest", fullName: "Old Guest" });
+  const reservation = await contributionService.recordContribution(eventId, "guest-analytics", "calamansi", 7, "legacy_reservation_analytics");
+  await contributionService.releaseLegacyReservation(eventId, reservation.id, { uid: "admin-1", role: "admin" }, "Abandoned");
+  // With the event report Completed, an unreviewed row would count as accounted planting.
+  table("plantingReports").get(`event_${eventId}`).reportingProgress = "Completed";
+  const analytics = require("../src/services/analytics.service");
+  const totals = (dashboard) => {
+    const found = {};
+    (function walk(value) {
+      if (!value || typeof value !== "object") return;
+      for (const [key, entry] of Object.entries(value)) {
+        if (["recordedPlantedQuantity", "verifiedPlantedQuantity"].includes(key) && !(key in found)) found[key] = entry;
+        walk(entry);
+      }
+    })(dashboard);
+    return found;
+  };
+  const withRelease = totals(await analytics.getDashboard({}));
+  const row = table("plantingContributions").get(reservation.id);
+  const saved = { reservationReleasedAt: row.reservationReleasedAt, reservationStatus: row.reservationStatus };
+  delete row.reservationReleasedAt; delete row.reservationStatus;
+  const withoutExclusion = totals(await analytics.getDashboard({}));
+  Object.assign(row, saved);
+  assert.equal(withoutExclusion.recordedPlantedQuantity - withRelease.recordedPlantedQuantity, 7, "the released reservation is excluded from recorded planting");
+  assert.equal(withoutExclusion.verifiedPlantedQuantity - withRelease.verifiedPlantedQuantity, 7, "and from verified planting");
+  // Attendance has no reader in analytics, monitoring or planting verification.
+  for (const file of ["analytics.service.js", "monitoring.service.js", "parentPlantingReport.service.js", "plantingReport.service.js", "officialPlantingReport.service.js", "verifiedPlantingCohort.service.js"]) {
+    const text = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/services", file), "utf8");
+    assert.doesNotMatch(text, /eventAttendance/, `${file} never reads attendance`);
+  }
 });

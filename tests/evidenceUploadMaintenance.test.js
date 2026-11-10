@@ -145,13 +145,16 @@ test("all evidence-writing routes place maintenance before upload processing", (
   const sources = [
     // Participant photos, official photos, and both private attendance writers.
     ["plantingReport.routes.js", 4],
-    ["event.routes.js", 1],
-    ["guestEvent.routes.js", 1],
     ["monitoring.routes.js", 3],
   ];
   for (const [file, expected] of sources) {
     const source = fs.readFileSync(path.join(__dirname, "../src/routes", file), "utf8");
     const occurrences = source.match(/evidenceUploadMaintenanceGate/g) || [];
     assert.equal(occurrences.length - 1, expected, `${file} route coverage`);
+  }
+  // Guest and attendee photo contributions are retired: those routes accept no uploads at all.
+  for (const file of ["event.routes.js", "guestEvent.routes.js"]) {
+    const source = fs.readFileSync(path.join(__dirname, "../src/routes", file), "utf8");
+    assert.doesNotMatch(source, /evidenceUploadMaintenanceGate|uploadContributionEvidence|attachEvidence/, `${file} has no evidence upload path`);
   }
 });
