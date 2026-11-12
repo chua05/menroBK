@@ -71,4 +71,5 @@ async function generate() {
   console.log(`Valid GPS: ${valid.latitude}, ${valid.longitude}`);
 }
 
-generate().catch((error) => { console.error(error.message); process.exitCode = 1; });
+module.exports = { jpeg };
+if (require.main === module) generate().catch((error) => { console.error(error.message); process.exitCode = 1; });

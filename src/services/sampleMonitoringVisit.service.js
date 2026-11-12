@@ -33,7 +33,7 @@ async function priorApprovedVisit(cohortId, siteId, planVersion, baselineVersion
 }
 function summary(assessments) {
   return assessments.reduce((r, a) => {
-    if (a.condition === "Healthy") r.healthy++;else if (a.condition === "Damaged") r.damaged++;else if (a.condition === "Dead") r.dead++;else r.needsRechecking++;
+    if (a.condition === "Healthy") r.healthy++;else if (a.condition === "Damaged") r.damaged++;else if (a.condition === "Dead") r.dead++;else if (a.condition === "Needs Rechecking") r.needsRechecking++;
     return r;
   }, {
     healthy: 0,
@@ -42,13 +42,13 @@ function summary(assessments) {
     needsRechecking: 0
   });
 }
-function normalize(items, samples) {
+function normalize(items, samples, { draft = false } = {}) {
   if (!Array.isArray(items) || items.length !== samples.length) throw new Error("Every approved sample requires an assessment.");
   const allowed = new Set(samples.map(s => s.permanentId));
   const seen = new Set();
   return items.map(a => {
     const sampleId = String(a?.sampleId || "");
-    if (!allowed.has(sampleId) || seen.has(sampleId) || !CONDITIONS.has(a?.condition)) throw new Error("Assessment does not match an approved sample.");
+    if (!allowed.has(sampleId) || seen.has(sampleId) || !(CONDITIONS.has(a?.condition) || draft && (a?.condition == null || a.condition === ""))) throw new Error("Assessment does not match an approved sample.");
     seen.add(sampleId);
     const remarks = String(a?.remarks || "").trim().slice(0, 1000),
       outcome = String(a?.investigationOutcome || "").trim();
@@ -58,7 +58,7 @@ function normalize(items, samples) {
     if (outcome && !String(a?.searchFindings || "").trim()) throw new Error("Not Located After Rechecking requires documented search findings.");
     return {
       sampleId,
-      condition: a.condition,
+      condition: a.condition || null,
       remarks,
       heightCentimeters: validation.measurement(a.heightCentimeters),
       diameterCentimeters: validation.measurement(a.diameterCentimeters),
@@ -139,6 +139,7 @@ async function get(visitId, { actorId, actorRole } = {}) {
     id: s.id,
     ...value,
     writesPaused: release.resolve().paused,
+    visitContext: await require("./sampleMonitoringViewContext").monitoringContext(db, value),
   };
 }
 async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
@@ -173,11 +174,18 @@ async function save({
   actorId,
   expectedVersion,
   assessments,
-  submit = false
+  submit = false,
+  visitRemarks,
+  dateMonitored
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   validation.version(expectedVersion);
   validation.boolean(submit, "submit");
+  if (visitRemarks !== undefined && (typeof visitRemarks !== "string" || visitRemarks.trim().length > 1000)) throw validation.invalid("Visit remarks must be at most 1000 characters.");
+  if (dateMonitored !== undefined) {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+    if (typeof dateMonitored !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateMonitored) || !Number.isFinite(Date.parse(dateMonitored)) || new Date(dateMonitored).toISOString().slice(0, 10) !== dateMonitored || dateMonitored > today) throw validation.invalid("Date Monitored must be a valid date and cannot be in the future.");
+  }
   release.assertUser(actorId); release.assertWrite();
   const ref = visitRef(visitId);
   await db.runTransaction(async tx => {
@@ -194,7 +202,7 @@ async function save({
     const priorVisit = await validation.historicalVisit(id => tx.get(visitRef(id)), cur);
     const inputBySampleId = new Map((assessments || []).map(row => [row?.sampleId, row]));
     const priorBySampleId = new Map((cur.sampleAssessments || []).map(entry => [entry.sampleId, entry]));
-    const values = normalize(assessments, samples).map(entry => {
+    const values = normalize(assessments, samples, { draft: !submit }).map(entry => {
       const prior = priorBySampleId.get(entry.sampleId);
       const comparable = value => value && ({ condition: value.condition, remarks: value.remarks || "", heightCentimeters: value.heightCentimeters ?? null, diameterCentimeters: value.diameterCentimeters ?? null, investigationOutcome: value.investigationOutcome || null, searchFindings: value.searchFindings || null, recheckQueued: Boolean(value.recheckQueued) });
       const correctedAfterReturn = cur.status === "RETURNED" && JSON.stringify(comparable(entry)) !== JSON.stringify(comparable(prior));
@@ -206,12 +214,15 @@ async function save({
       };
     });
     if (submit && values.some(entry => !entry.condition)) throw conflict("Every approved sample requires an assessment before submission.");
+    if (submit) require("./sampleMonitoringOriginalEvidence").reviewRequirements({...cur, dateMonitored:dateMonitored ?? cur.dateMonitored, sampleAssessments:values});
     const version = Number(cur.version) + 1;
     const status = submit ? "PENDING_ADMIN_APPROVAL" : "DRAFT";
     const now = Timestamp.now();
     release.writeScope(actorId, cur.cohortId);
     tx.update(ref, {
       sampleAssessments: values,
+      ...(visitRemarks !== undefined ? { visitRemarks: visitRemarks.trim() } : {}),
+      ...(dateMonitored !== undefined ? { dateMonitored } : {}),
       summary: summary(values),
       status,
       version,
@@ -222,7 +233,9 @@ async function save({
         status,
         updatedBy: actorId,
         updatedAt: now,
-        summary: summary(values)
+        summary: summary(values),
+        ...(dateMonitored !== undefined || cur.dateMonitored ? { dateMonitored: dateMonitored ?? cur.dateMonitored } : {}),
+        visitRemarks: visitRemarks === undefined ? cur.visitRemarks || "" : visitRemarks.trim()
       }],
       updatedAt: now
     });
@@ -234,7 +247,8 @@ async function review({
   actorId,
   expectedVersion,
   approve,
-  reasons = ""
+  reasons = "",
+  originalEvidenceReviews
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   validation.version(expectedVersion);
@@ -250,7 +264,9 @@ async function review({
     const cohort = await tx.get(db.collection("verifiedPlantingCohorts").doc(d.data().cohortId));
     release.assertScope(actorId, d.data().cohortId);
     validation.cohortBinding(cohort.data(), d.data());
+    let reviewedOriginals = [];
     if (approve) {
+      reviewedOriginals = require("./sampleMonitoringOriginalEvidence").assertOriginalReview(d.data(), originalEvidenceReviews);
       normalize(d.data().sampleAssessments, cohort.data().baseline.sampleUnits || []);
       const prior = await validation.historicalVisit(id => tx.get(visitRef(id)), d.data());
       for (const row of d.data().sampleAssessments) validation.references(row, row.sampleId, prior, d.data().priorVisitId);
@@ -267,7 +283,8 @@ async function review({
         version: d.data().version,
         status,
         reviewedBy: actorId,
-        reviewedAt: now
+        reviewedAt: now,
+        ...(reviewedOriginals.length ? {originalEvidenceReviews:reviewedOriginals, accuracyAcknowledgment:"UNKNOWN", policyStatus:"PROPOSED_PENDING_MENRO_APPROVAL"} : {})
       }]
     });
   });

@@ -3,8 +3,14 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 
-const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
-const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true";
+const formAcceptance = process.env.MENRO_SAMPLE_MONITORING_FORM_ACCEPTANCE === "true";
+if (formAcceptance) {
+  require("node:assert/strict").equal(process.env.MENRO_LEGACY_MONITORING_ISOLATED_EMULATORS, "true");
+  require("node:assert/strict").equal(process.env.MENRO_PHASE3C_ISOLATED_EMULATORS, undefined);
+  require("node:assert/strict").equal(require("../../src/config/integrationEnvironment").validateIntegrationEnvironment().legacyMonitoringIsolated, true);
+}
+const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true" || formAcceptance;
+const extended = process.env.MENRO_PHASE3D4_ACCEPTANCE === "true" || formAcceptance;
 const combinedWorkflow = process.env.MENRO_COMBINED_WORKFLOW_ACCEPTANCE === "true";
 if (combinedWorkflow && !isolated) throw new Error("Combined workflow acceptance requires isolated demo emulators.");
 const evidenceReadOnly = process.env.MENRO_PHASE3D4_EVIDENCE_READ_ONLY === "true";
@@ -16,7 +22,7 @@ if (releaseAcceptance) for (const name of ["PERMANENT_SAMPLE_WRITE_PAUSED", "PER
 if (evidenceReadOnly && (!extended || !isolated)) throw new Error("Read-only evidence acceptance requires isolated Phase 3D/4 mode.");
 if (extended && !isolated) throw new Error("Phase 3D/4 acceptance requires isolated emulators.");
 if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true", PERMANENT_SAMPLE_ANALYTICS_ENABLED: "true" });
-const topology = isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
+const topology = formAcceptance ? { project: "demo-menro-legacy-monitoring-20261106", firestore: "127.0.0.1:8381", auth: "127.0.0.1:9399", storage: "127.0.0.1:9398", bucket: "demo-menro-legacy-monitoring-20261106.firebasestorage.app" } : isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
 Object.assign(process.env, {
   NODE_ENV: "test", MENRO_INTEGRATION_TEST: "true", MENRO_REQUEST_LETTER_ACCEPTANCE: "true",
   GCLOUD_PROJECT: topology.project, FIREBASE_PROJECT_ID: topology.project,
@@ -34,6 +40,24 @@ const app = require("../../src/app");
 const visitService = require("../../src/services/sampleMonitoringVisit.service");
 const prefix = `phase3c-browser-${randomUUID()}`;
 const ids = Object.fromEntries(["admin", "staff", "participant", "otherStaff"].map((role) => [role, `${prefix}-${role}`]));
+// The real dashboard may number a fixture report on first read. Keep those
+// real counter transactions UUID-scoped in this acceptance mode only.
+if (formAcceptance) {
+  const originalCollection = db.collection.bind(db);
+  db.collection = (name, ...args) => {
+    const collection = originalCollection(name, ...args);
+    if (name === "counters") {
+      const doc = collection.doc.bind(collection);
+      collection.doc = id => {
+        require("node:assert/strict").equal(typeof id, "string");
+        const scoped = id.startsWith(`${prefix}_`) ? id : `${prefix}_${id}`;
+        require("node:fs").appendFileSync(path.join(os.tmpdir(), "menro-phase3c-test-evidence", `${prefix}.counter-refs.jsonl`), `${JSON.stringify(scoped)}\n`);
+        return doc(scoped);
+      };
+    }
+    return collection;
+  };
+}
 const password = "Phase3c-Browser-Only-2026!";
 const siteId = `${prefix}-site`, cohortId = `${prefix}-cohort`;
 const { cleanupFixture, fixturePath, manifestPath } = require("./phase3cBrowserFixtureCleanup");
@@ -75,8 +99,9 @@ async function main() {
   await fs.mkdir(evidenceDirectory, { recursive: true });
   await fs.writeFile(diagnosticPath, "", { encoding: "utf8", flag: "wx" });
   diagnosticReady = true;
-  const visitId = visitService._test.id(cohortId, "2099-01-01");
-  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId, combinedWorkflow }), { encoding: "utf8", flag: "wx" });
+  const visitDate = formAcceptance ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()) : "2099-01-01";
+  const visitId = visitService._test.id(cohortId, visitDate);
+  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId, visitDate, formAcceptance, combinedWorkflow }), { encoding: "utf8", flag: "wx" });
   for (const [role, uid] of Object.entries(ids)) {
     const email = `${role}.${prefix}@example.test`;
     await auth.createUser({ uid, email, password, emailVerified: true });
@@ -86,12 +111,13 @@ async function main() {
   await db.collection("sites").doc(siteId).set({ siteName: "Phase 3C browser fixture", latitude: 12.662301, longitude: 123.932983, coverageRadiusMeters: 50, status: "Active", testFixture: prefix });
   if (extended) {
     await db.collection("seedlingRequests").doc(`${prefix}-source`).set({ participantId: ids.participant, testFixture: prefix });
-    await db.collection("plantingReports").doc(`${prefix}-report`).set({ requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: 10, testFixture: prefix });
+    await db.collection("plantingReports").doc(`${prefix}-report`).set({ requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: formAcceptance ? 20 : 10, testFixture: prefix });
   }
   await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, ...(extended ? { requestId: `${prefix}-source` } : {}) }, baselineVersion: 1,
-    samplingPlan: { status: "APPROVED", version: 1, selectedSamples: [{ permanentId: "TREE-001" }] },
-    baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: "TREE-001", condition: "Healthy" }] }, testFixture: prefix });
-  const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
+    verifiedPlantedQuantity: formAcceptance ? 20 : 10,
+    samplingPlan: { status: "APPROVED", version: 1, selectedSamples: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map(permanentId => ({ permanentId, species: "Narra" })) },
+    baseline: { approvalStatus: "APPROVED", sampleUnits: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map((permanentId, index) => ({ permanentId, condition: "Healthy", ...(formAcceptance ? { heightMeters: 1, diameterCentimeters: 5, latitude: 12.662301 + index * 0.00003, longitude: 123.932983, captureDate: visitDate } : {}) })) }, testFixture: prefix });
+  const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate, testOnly: true });
   assert.equal(visit.status, "DRAFT");
   const workflowFixture = combinedWorkflow ? await require("./combinedWorkflowFixture").seed(prefix) : {};
   const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
@@ -102,7 +128,7 @@ async function main() {
   await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project,
     releaseAcceptance, ...releaseFixture, ...workflowFixture,
     evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
-    password, visitId: visit.id, diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
+    password, visitId: visit.id, visitDate, sampleIds: visit.sampleAssessments.map(row => row.sampleId), diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));
 }
 async function stop(code = 0) {

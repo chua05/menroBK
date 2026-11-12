@@ -1,0 +1,11 @@
+const assert=require("node:assert/strict"),fs=require("node:fs/promises"),path=require("node:path"),os=require("node:os"),{createHash}=require("node:crypto");
+const integration=require("../../src/config/integrationEnvironment").validateIntegrationEnvironment();assert.equal(integration.legacyMonitoringIsolated,true);assert.equal(process.env.MENRO_SAMPLE_MONITORING_FORM_ACCEPTANCE,"true");
+async function main(){
+ const fixture=JSON.parse(await fs.readFile(path.join(os.tmpdir(),"menro-phase3c-browser-fixture.json"),"utf8"));assert.equal(fixture.project,integration.projectId);assert.match(fixture.prefix,/^phase3c-browser-[0-9a-f-]{36}$/);
+ const {db,getStorageBucket}=require("../../src/config/firebase"),bucket=getStorageBucket();assert.equal(db.projectId,integration.projectId);assert.equal(bucket.name,`${integration.projectId}.firebasestorage.app`);
+ const row=(await db.collection("sampleMonitoringVisits").doc(fixture.visitId).get()).data();assert.equal(row.createdBy,`${fixture.prefix}-staff`);assert.equal(row.cohortId,`${fixture.prefix}-cohort`);assert.equal(row.siteId,`${fixture.prefix}-site`);
+ const trees=[];
+ for(const tree of row.sampleAssessments){const evidence=[];for(const history of tree.evidenceHistory||[]){const ref=history.privateEvidence;assert.equal(ref.bucket,bucket.name);const file=bucket.file(ref.objectName);assert.equal((await file.exists())[0],true);const bytes=(await file.download())[0];assert.equal(createHash("sha256").update(bytes).digest("hex"),ref.sha256);const metadata=(await file.getMetadata())[0];assert.equal(metadata.metadata.uploadIntentId,ref.uploadIntentId);const intent=(await db.collection("evidenceUploadIntents").doc(ref.uploadIntentId).get()).data();assert.equal(intent.status,"LINKED");assert.equal(intent.actorId,row.createdBy);evidence.push({revision:history.revision,sha256Matches:true,storedBytes:bytes.length,location:history.location});}trees.push({sampleId:tree.sampleId,assessmentRevision:tree.assessmentRevision,evidence});}
+ console.log(JSON.stringify({monitoringEvidenceAudit:true,status:row.status,version:row.version,visitDate:row.visitDate,dateMonitored:row.dateMonitored||null,nextMonitoringDate:row.nextMonitoringDate||null,trees}));
+}
+main().then(()=>process.exit(0)).catch(error=>{console.error({monitoringEvidenceAudit:false,name:error.name,code:error.code||null});process.exitCode=1;});

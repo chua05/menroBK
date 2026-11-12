@@ -10,10 +10,10 @@ function boolean(value, name) {
 function measurement(value) {
   if (value === null || value === undefined || typeof value === "string" && !value.trim()) return null;
   if (typeof value !== "number" && !(typeof value === "string" && /^[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?$/i.test(value.trim()))) {
-    throw invalid("Measurements must be finite numbers or empty.");
+    throw invalid("Measurements must be nonnegative finite numbers or empty.");
   }
   const number = Number(value);
-  if (!Number.isFinite(number)) throw invalid("Measurements must be finite numbers or empty.");
+  if (!Number.isFinite(number) || number < 0) throw invalid("Measurements must be nonnegative finite numbers or empty.");
   return number;
 }
 function cohortBinding(cohort, visit) {
