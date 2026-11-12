@@ -22,6 +22,11 @@ async function monitoringContext(db, visit) {
     plantingDate: report.plantingDate || report.eventDate || source.plantingDate || null,
     reportStatus: report.reportingProgress || report.verificationStatus || null,
     verifiedPlantedQuantity: cohort.verifiedPlantedQuantity ?? null,
+    // Display only: authoritative cohort species rows. Unknown per-species planted counts stay null.
+    speciesQuantities: (Array.isArray(source.species) ? source.species : [])
+      .filter(row => row && typeof row.species === "string" && row.species.trim())
+      .map(row => ({ species: row.species.trim(),
+        verifiedPlantedQuantity: Number.isSafeInteger(row.verifiedPlantedQuantity) && row.verifiedPlantedQuantity >= 0 ? row.verifiedPlantedQuantity : null })),
     planStatus: plan.status || null, baselineStatus: baseline.approvalStatus || null,
     approvedSampleTarget: plan.status === "APPROVED" && Array.isArray(plan.selectedSamples) ? plan.selectedSamples.length : null,
     registeredSampleTrees: units ? units.length : null,
