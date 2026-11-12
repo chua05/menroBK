@@ -49,3 +49,13 @@ test("actual assessment date persists without changing scheduled visitDate and r
 test("optional legacy display geometry does not break authorized history or invent an unknown sample target",async()=>{
  seed();table("sites").set("site",{siteName:"Legacy site",polygon:[null,{lat:12.65,lng:123.91}]});const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true});const context=(await s.get(visit.id,{actorId:"staff",actorRole:"staff"})).visitContext;assert.equal(context.approvedSampleTarget,null);assert.deepEqual(context.site.polygon,[{lat:12.65,lng:123.91}]);assert.equal(context.registeredSampleTrees,2);
 });
+test("display context lists authoritative species quantities and never invents unknown planted counts", async () => {
+  seed(); const cohort=table("verifiedPlantingCohorts").get("c");
+  cohort.source.species=[{inventoryId:"inv-1",species:"Narra",releasedQuantity:40,verifiedPlantedQuantity:30},{inventoryId:"inv-2",species:"Molave",releasedQuantity:12},{inventoryId:"inv-3",species:"  ",verifiedPlantedQuantity:5},{species:"Bad",verifiedPlantedQuantity:-3}];
+  const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true});
+  const context=(await s.get(visit.id,{actorId:"staff",actorRole:"staff"})).visitContext;
+  assert.deepEqual(context.speciesQuantities,[{species:"Narra",verifiedPlantedQuantity:30},{species:"Molave",verifiedPlantedQuantity:null},{species:"Bad",verifiedPlantedQuantity:null}]);
+  assert.doesNotMatch(JSON.stringify(context.speciesQuantities),/inventoryId|releasedQuantity|inv-/);
+  seed(); const legacy=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-02",testOnly:true});
+  assert.deepEqual((await s.get(legacy.id,{actorId:"staff",actorRole:"staff"})).visitContext.speciesQuantities,[]);
+});
