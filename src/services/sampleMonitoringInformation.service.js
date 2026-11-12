@@ -10,6 +10,7 @@ const digest = values => crypto.createHash("sha256").update(JSON.stringify(value
 const validId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,200}$/.test(value);
 const safe = (id, row) => ({ id, visitId: row.visitId, cohortId: row.cohortId, siteId: row.siteId,
   question: row.question, status: row.status, version: row.version, createdAt: row.createdAt,
+  ...(row.sampleId ? { sampleId: row.sampleId, assessmentRevision: row.assessmentRevision } : {}),
   answeredAt: row.answeredAt || null, answer: row.answer || null,
   history: (row.history || []).map(({ action, at, role }) => ({ action, at, role })), writesPaused: release.resolve().paused });
 
@@ -68,26 +69,33 @@ function createService({ db, notify, now, enabled }) {
     return row;
   }
   return {
-    async create({ visitId, question, key, ...actor }) {
+    async create({ visitId, sampleId, assessmentRevision, question, key, ...actor }) {
       gate(actor);
       if (!["staff", "admin"].includes(actor.actorRole)) fail(403, "Access denied.");
       release.assertWrite();
       question = text(question, 2000); key = text(key, 120);
-      const id = `VPMI-${digest([visitId, actor.actorId, key])}`;
+      if (sampleId !== undefined && (!validId(sampleId) || !Number.isSafeInteger(assessmentRevision) || assessmentRevision < 0)) fail(400, "A permanent tree and assessment revision are required.");
+      const id = `VPMI-${digest(sampleId ? [visitId, sampleId, assessmentRevision, "rechecking"] : [visitId, actor.actorId, key])}`;
       return db.runTransaction(async tx => {
         const read = r => tx.get(r);
         const current = await visit(read, visitId, actor);
+        if (sampleId) {
+          const assessment = current.sampleAssessments?.find(row => row.sampleId === sampleId);
+          if (!assessment) fail(404, "Tree not found in this monitoring visit.");
+          if (assessment.condition !== "Needs Rechecking" || Number(assessment.assessmentRevision || 0) !== assessmentRevision) fail(409, "Save the current rechecking assessment before requesting information.");
+        }
         const target = await recipient(read, current);
         release.assertScope(target.uid, current.cohortId);
         const doc = ref("sampleMonitoringInformationRequests", id);
         const existing = await read(doc);
-        const fingerprint = digest([question, target.uid, target.requestId, target.plantingReportId, current.cohortId, current.siteId]);
+        const fingerprint = digest([question, target.uid, target.requestId, target.plantingReportId, current.cohortId, current.siteId, ...(sampleId ? [sampleId, assessmentRevision] : [])]);
         if (existing.exists) {
           if (existing.data().fingerprint !== fingerprint) fail(409, "Idempotency key conflicts with an existing question.");
           return safe(id, existing.data());
         }
         const at = now();
         const row = { visitId, cohortId: current.cohortId, siteId: current.siteId,
+          ...(sampleId ? { sampleId, assessmentRevision } : {}),
           requestedBy: actor.actorId, requestedByRole: actor.actorRole, recipientUserId: target.uid,
           sourceRequestId: target.requestId, plantingReportId: target.plantingReportId, fingerprint,
           question, status: "OPEN", version: 0, createdAt: at,

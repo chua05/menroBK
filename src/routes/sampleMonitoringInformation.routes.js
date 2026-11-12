@@ -23,6 +23,7 @@ router.get("/", send("list", req => ({ visitId: req.query.visitId, cursor: req.q
   limit: req.query.limit, paged: req.query.paged === "true" })));
 router.post("/", authorizeRoles("staff", "admin"), send("create", req => ({
   visitId: req.body?.visitId, question: req.body?.question, key: req.get("Idempotency-Key"),
+  ...(req.body?.sampleId !== undefined ? { sampleId: req.body.sampleId, assessmentRevision: req.body.assessmentRevision } : {}),
 })));
 router.get("/:requestId", send("get", req => ({ requestId: req.params.requestId })));
 router.post("/:requestId/answer", authorizeRoles("participant"), send("answer", req => ({

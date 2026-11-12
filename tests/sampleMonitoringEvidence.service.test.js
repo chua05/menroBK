@@ -81,6 +81,7 @@ const db = {
 };
 
 let enabled = true;
+let captureEvidenceAllowed = true;
 let consumed = 0;
 let linked = 0;
 let failNextStorageUpload = false;
@@ -97,7 +98,7 @@ for (const [path, exports] of [
   [
     "../src/services/evidenceCaptureSession.service",
     {
-      resolveSubmissionEvidence: async () => [
+      resolveSubmissionEvidence: async () => captureEvidenceAllowed ? [
         {
           id: "session",
           imageSha256: "hash",
@@ -105,7 +106,7 @@ for (const [path, exports] of [
           longitude: 124,
           accuracyMeters: 5,
         },
-      ],
+      ] : [null],
       prepareConsumption: async (transaction, sessions) => {
         const records = await Promise.all(
           sessions.map(session => transaction.get(ref("captureSessions", session.id))),
@@ -253,6 +254,7 @@ function restartService() {
 }
 
 function seed() {
+  captureEvidenceAllowed = true;
   rows.clear();
   operations.clear();
   revisions.clear();
@@ -538,4 +540,21 @@ test("rejects baseline, visit, sample, revision, and duplicate-hash changes with
     assert.equal(consumed, 0);
     assert.equal(linked, 0);
   }
+});
+
+
+test("unsupported original evidence reports a capture-required code without storage or linkage", async () => {
+  seed(); captureEvidenceAllowed = false;
+  const request = { ...input(), evidenceManifest: [{ source: "uploaded-original" }] };
+  await assert.rejects(() => service.upload(request), error => error.status === 409 &&
+    error.code === "MONITORING_CAPTURE_REQUIRED" && /Verified Staff capture is required/.test(error.message));
+  assert.equal(uploadIntents.size, 0);
+  assert.equal(table("sampleMonitoringEvidenceHashes").size, 0);
+  assert.equal(table("sampleMonitoringVisits").get("v").sampleAssessments[0].evidenceHistory, undefined);
+  assert.equal(table("captureSessions").get("session").state, "VERIFIED");
+  assert.equal(consumed, 0); assert.equal(linked, 0);
+  // A rejected unsupported file does not poison a later legitimate camera operation.
+  captureEvidenceAllowed = true;
+  await service.upload({ ...input(), idempotencyKey: "camera_after_rejection_123" });
+  assert.equal(consumed, 1); assert.equal(linked, 1);
 });

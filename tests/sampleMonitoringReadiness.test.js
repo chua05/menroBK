@@ -16,10 +16,10 @@ function setup(status = "DRAFT") {
   return { ...f, visit, cohort, service: require("../src/services/sampleMonitoringVisit.service"),
     save: { visitId: "visit", actorId: "owner", expectedVersion: 0, assessments: [{ sampleId: "TREE-001", condition: "Healthy" }] } };
 }
-test("measurement parsing preserves empty/null and finite values without inventing biological bounds", () => {
+test("measurement parsing preserves empty/null and nonnegative finite values without inventing biological limits", () => {
   for (const value of [undefined, null, "", "  "]) assert.equal(validation.measurement(value), null);
-  for (const value of [0, 12.5, -2, "120", " 1.5 ", "1e2"]) assert.equal(validation.measurement(value), Number(value));
-  for (const value of [NaN, Infinity, -Infinity, "NaN", "Infinity", "2cm", true, [], {}, "0x10"]) assert.throws(() => validation.measurement(value), { status: 400 });
+  for (const value of [0, 12.5, "120", " 1.5 ", "1e2"]) assert.equal(validation.measurement(value), Number(value));
+  for (const value of [-2, "-0.1", NaN, Infinity, -Infinity, "NaN", "Infinity", "2cm", true, [], {}, "0x10"]) assert.throws(() => validation.measurement(value), { status: 400 });
 });
 test("save rejects coerced versions and nonboolean submit without writes", async () => {
   for (const changed of [{ expectedVersion: null }, { expectedVersion: "0" }, { expectedVersion: -1 }, { expectedVersion: 0.5 }, { submit: "false" }]) {

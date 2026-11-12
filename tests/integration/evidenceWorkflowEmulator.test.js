@@ -310,7 +310,7 @@ test("durably linked Staff monitoring record survives an interrupted HTTP respon
   const result = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), key));
   assert.equal(result.history.length, 1);
 });
-test("guest authorization, cloud linkage, parent photo ordering and retry accounting", async () => {
+test("retired guest evidence returns 410 without side effects; historical evidence and attendance remain accessible", async (t) => {
   const siteId = await site(), eventId = `${prefix}-guest-event`, reportId = `event_${eventId}`, requestId = `${prefix}-guest-request`;
   const participantId = hash(randomUUID()), token = `${participantId}.${hash(randomUUID())}`, contributionId = `${prefix}-guest-contribution`;
   const date = shiftCalendarDate(today, -1);
@@ -320,31 +320,86 @@ test("guest authorization, cloud linkage, parent photo ordering and retry accoun
     pendingSeedlingsByInventory: { "synthetic-item": 10 }, pendingSeedlingQuantity: 10 });
   await db.collection("seedlingRequests").doc(requestId).create({ eventId, status: "Released", participantId: users.participant });
   await db.collection("plantingReports").doc(reportId).create({ reportType: "parent", eventId, requestId, participantId: users.participant,
-    verificationStatus: "Partial", reportingProgress: "Partial", quantityReleased: 100, quantityPlanted: 0 });
+    verificationStatus: "Partial", reportingProgress: "Partial", quantityReleased: 100, quantityPlanted: 10 });
   await db.collection("eventParticipants").doc(participantId).create({ participantType: "guest", eventId, sessionHash: hash(token),
     expiresAt: Timestamp.fromMillis(Date.now() + 3600000), fullName: "Synthetic guest" });
   await db.collection("plantingContributions").doc(contributionId).create({ reportId, eventId, participantId,
     contributorId: participantId, participantType: "guest", inventoryId: "synthetic-item", quantity: 10,
-    evidencePending: true, allocationReserved: true });
+    recordedAt: Timestamp.now(), evidencePending: false, allocationReserved: false });
   const bytes = await image(date), key = randomUUID(), route = `/guest-events/session/contributions/${contributionId}/evidence`;
-  assert.equal((await api("Guest invalid", "POST", route, form({}, bytes, "photos"), key)).status, 401);
-  const own = `Guest ${token}`;
+  // Seed historical private evidence through the existing emulator storage saga,
+  // not through a retired HTTP write endpoint. All retirement assertions start afterward.
+  const { workflow, runWorkflow } = require("../../src/services/evidenceWorkflow.service");
+  await runWorkflow({ actor: { guestParticipantId: participantId }, workflow: "planting-contribution", target: contributionId,
+    payload: { historicalFixture: contributionId }, files: [{ buffer: bytes }], key: randomUUID() }, async (operation) => {
+    const reference = await workflow().upload(operation, 0, { buffer: bytes }, { recordId: contributionId, evidenceType: "planting-contribution" });
+    await db.runTransaction(async transaction => {
+      const complete = await workflow().prepareLink(transaction, operation);
+      transaction.update(db.collection("plantingContributions").doc(contributionId), { photos: [{ privateEvidence: reference }] });
+      complete({ recordId: contributionId });
+    });
+    return contributionId;
+  }, async () => contributionId);
   const strangerId = hash(randomUUID()), strangerToken = `${strangerId}.${hash(randomUUID())}`;
   await db.collection("eventParticipants").doc(strangerId).create({ participantType: "guest", eventId,
     sessionHash: hash(strangerToken), expiresAt: Timestamp.fromMillis(Date.now() + 3600000) });
-  assert.equal((await api(`Guest ${strangerToken}`, "POST", route, form({}, bytes, "photos"), key)).status, 400);
-  ok(await api(own, "POST", route, form({}, bytes, "photos"), key), 200);
-  ok(await api(own, "POST", route, form({}, bytes, "photos"), key), 200);
+  const snapshot = async () => ({
+    records: await Promise.all(["events", "plantingReports", "plantingContributions", "eventParticipants", "plantingEvidenceHashes",
+      "evidenceUploadIntents", "evidenceWorkflowOperations", "evidenceQuotaReservations", "evidenceQuotaDays", "evidenceQuotaAudit"]
+      .map(async collection => (await db.collection(collection).get()).docs.map(doc => ({ id: doc.id, ...doc.data() })))),
+    objects: (await getStorageBucket().getFiles())[0].map(file => file.name).sort(),
+  });
+  const before = await snapshot();
+  for (const actor of ["Guest invalid", `Guest ${strangerToken}`, `Guest ${token}`, `Guest ${token}`]) {
+    assert.equal((await api(actor, "POST", route, form({}, bytes, "photos"), key)).status, 410);
+  }
+  assert.deepEqual(await snapshot(), before, "retired uploads cannot change evidence, quotas or planting balances");
   const report = ok(await api("staff", "GET", `/planting-reports/${reportId}`), 200);
   assert.equal(report.photos.length, 1); assert.equal(report.quantityPlanted, 10);
-  const result = await api("staff", "GET", `/evidence/planting-reports/${reportId}/photos/0`);
-  assert.equal(result.status, 200); assert.deepEqual(result.bytes, bytes);
+  for (const actor of ["staff", "admin"]) {
+    const result = await api(actor, "GET", `/evidence/planting-reports/${reportId}/photos/0`);
+    assert.equal(result.status, 200); assert.deepEqual(result.bytes, bytes);
+    assert.equal(result.response.headers.get("cache-control"), "private, no-store");
+  }
   assert.equal((await api("other", "GET", `/evidence/planting-reports/${reportId}/photos/0`)).status, 403);
   const saved = (await db.collection("plantingContributions").doc(contributionId).get()).data();
   assert.equal(saved.photos.length, 1);
-  const quota = (await db.collection("evidenceQuotaReservations").doc(saved.photos[0].privateEvidence.uploadIntentId).get()).data();
-  assert.equal(quota.actualFiles, 1);
+  await assertPrivateObject(saved.photos[0].privateEvidence, bytes);
+
+  // Exercise current attendance independently of retired planting contributions.
+  const previousSecret = process.env.GUEST_INVITATION_SECRET;
+  process.env.GUEST_INVITATION_SECRET = `test-only-${randomUUID()}`;
+  const invitationRef = db.collection("eventInvitations").doc(eventId);
+  const attendanceRef = db.collection("eventAttendance").doc(hash(`attendance:${eventId}:09123456789`));
+  t.after(async () => {
+    try {
+      for (const ref of [attendanceRef, invitationRef]) {
+        const doc = await ref.get();
+        if (doc.exists) {
+          assert.equal(doc.data().eventId, eventId); assert.equal(doc.data().requestId, requestId);
+          await ref.delete();
+        }
+      }
+    } finally {
+      if (previousSecret === undefined) delete process.env.GUEST_INVITATION_SECRET;
+      else process.env.GUEST_INVITATION_SECRET = previousSecret;
+    }
+  });
+  const guest = require("../../src/services/guestEvent.service");
+  await db.runTransaction(async transaction => {
+    assert.equal(guest.createInvitationInTransaction(transaction, eventId, requestId, Timestamp.now()), true);
+  });
+  const invitation = await guest.getInvitationForRequester(eventId, users.participant);
+  assert.equal(ok(await api("participant", "GET", `/guest-events/${invitation.token}`), 200).attendanceOpen, true);
+  const attendance = ok(await api("participant", "POST", `/guest-events/${invitation.token}/attendance`, {
+    fullName: "Synthetic attendee", contactNumber: "09123456789", address: "Purok 1, Bical, Bulan",
+  }));
+  assert.equal(attendance.eventId, eventId);
+  assert.equal((await attendanceRef.get()).exists, true);
+  assert.equal(ok(await api("staff", "GET", `/events/${eventId}/attendance`), 200).length, 1);
+  assert.deepEqual(await snapshot(), before, "attendance must not change photographic evidence, quotas or planting balances");
 });
+
 test("legacy local evidence remains privately retrievable in mixed cloud mode", async () => {
   const reportId = `${prefix}-legacy-report`, bytes = await image(), directory = path.join(UPLOAD_ROOT, "planting-reports", prefix);
   await fs.mkdir(directory, { recursive: true }); await fs.writeFile(path.join(directory, "local.jpg"), bytes, { flag: "wx" });
@@ -353,15 +408,52 @@ test("legacy local evidence remains privately retrievable in mixed cloud mode", 
   assert.equal(result.status, 200); assert.deepEqual(result.bytes, bytes);
   assert.equal((await api("other", "GET", `/evidence/planting-reports/${reportId}/photos/0`)).status, 403);
 });
-test("registered request-linked contributions preserve parent aggregation, immutable target and photo index", async () => {
+test("one final request-linked report preserves pending review, idempotency and parent photo indexing", async (t) => {
   const fields = await plantingFixture(true), bytes = await image(fields.plantingDate), key = randomUUID();
-  const first = ok(await api("participant", "POST", "/planting-reports", form(fields, bytes, "photos"), key));
-  const again = ok(await api("participant", "POST", "/planting-reports", form(fields, bytes, "photos"), key));
+  const parentId = `event_${fields.eventId}`;
+  // The final-report contract adds an audit record; clean only this fixture's log.
+  t.after(async () => {
+    const logs = await db.collection("verificationLogs").where("plantingReportId", "==", parentId).get();
+    for (const doc of logs.docs) {
+      assert.equal(doc.data().performedBy, users.participant);
+      assert.equal(doc.data().action, "Participant Final Report Submission");
+      const submission = await db.collection("plantingContributions").doc(doc.data().submissionId).get();
+      assert.equal(submission.data().reportId, parentId);
+      assert.equal(submission.data().contributorId, users.participant);
+      await doc.ref.delete();
+    }
+  });
+  const event = (await db.collection("events").doc(fields.eventId).get()).data();
+  const inventoryId = event.seedlingItems[0].inventoryId;
+  assert.equal(event.seedlingItems.length, 1); assert.equal(event.seedlingItems[0].quantity, 100);
+  const { quantityPlanted, ...finalFields } = fields;
+  const payload = { ...finalFields, items: JSON.stringify([{ inventoryId, leftoverQuantity: 75,
+    leftoverReason: "Synthetic seedlings remaining after final planting" }]) };
+  assert.equal(quantityPlanted, 25);
+  const first = ok(await api("participant", "POST", "/planting-reports", form(payload, bytes, "photos"), key));
+  const again = ok(await api("participant", "POST", "/planting-reports", form(payload, bytes, "photos"), key));
   assert.equal(first.id, again.id); assert.equal(again.photos.length, 1);
-  assert.equal((await db.collection("plantingContributions").where("reportId", "==", first.id).get()).size, 1);
-  const result = await api("participant", "GET", `/evidence/planting-reports/${first.id}/photos/0`);
-  assert.equal(result.status, 200); assert.deepEqual(result.bytes, bytes);
+  assert.equal(again.quantityPlanted, 25); assert.equal(again.reviewStatus, "Pending Review");
+  assert.equal(again.acceptedQuantity, 0); assert.equal(again.pendingReviewQuantity, 25);
+  const contributions = await db.collection("plantingContributions").where("reportId", "==", first.id).get();
+  assert.equal(contributions.size, 1);
+  const logs = await db.collection("verificationLogs").where("plantingReportId", "==", first.id).get();
+  assert.equal(logs.size, 1); assert.equal(logs.docs[0].data().submissionId, contributions.docs[0].id);
+  const saved = contributions.docs[0].data();
+  assert.equal(saved.inventoryId, inventoryId); assert.equal(saved.quantity, 25);
+  assert.equal(saved.leftoverQuantity, 75); assert.equal(saved.staffReviewStatus, "Pending Review");
+  assert.ok(saved.finalReportGroupId); assert.equal(saved.photos.length, 1);
+  const intent = (await db.collection("evidenceUploadIntents").doc(saved.photos[0].privateEvidence.uploadIntentId).get()).data();
+  assert.equal(intent.recordId, contributions.docs[0].id); assert.equal(intent.status, "LINKED");
+  assert.equal(saved.photos[0].privateEvidence.sha256, hash(bytes));
+  await assertPrivateObject(saved.photos[0].privateEvidence, bytes);
+  for (const actor of ["participant", "staff", "admin"]) {
+    const result = await api(actor, "GET", `/evidence/planting-reports/${first.id}/photos/0`);
+    assert.equal(result.status, 200); assert.deepEqual(result.bytes, bytes);
+  }
+  assert.equal((await api("other", "GET", `/evidence/planting-reports/${first.id}/photos/0`)).status, 403);
 });
+
 test("invalid site GPS cannot be retained on correction and requires a new immutable image", async () => {
   const fields = await monitoringFixture(), bytes = await image(today, true);
   assert.equal((await api("participant", "POST", "/monitoring", form(fields, bytes), randomUUID())).status, 403);

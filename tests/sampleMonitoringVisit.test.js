@@ -10,3 +10,42 @@ test("draft saves retain authoritative evidence history and ignore forged client
 test("returned correction advances only the changed sample revision once",async()=>{seed();const v=await s.create({cohortId:"c",actorId:"staff",visitDate:"2030-01-01",testOnly:true});let row=table("sampleMonitoringVisits").get(v.id);row.status="RETURNED";row.version=1;row.sampleAssessments[0]={...row.sampleAssessments[0],condition:"Healthy",assessmentRevision:0,evidenceHistory:[{revision:0}]};row.sampleAssessments[1]={...row.sampleAssessments[1],condition:"Healthy",assessmentRevision:0,evidenceHistory:[{revision:0}]};let saved=await s.save({visitId:v.id,actorId:"staff",expectedVersion:1,assessments:[{sampleId:"TREE-001",condition:"Damaged"},{sampleId:"TREE-002",condition:"Healthy"}]});assert.equal(saved.sampleAssessments[0].assessmentRevision,1);assert.equal(saved.sampleAssessments[1].assessmentRevision,0);assert.equal(saved.sampleAssessments[0].evidenceHistory.length,1);saved=await s.save({visitId:v.id,actorId:"staff",expectedVersion:2,assessments:[{sampleId:"TREE-001",condition:"Damaged"},{sampleId:"TREE-002",condition:"Healthy"}]});assert.equal(saved.sampleAssessments[0].assessmentRevision,1);});
 test("discovery scopes staff visits, orders pages, filters status, and derives actions without evidence leakage",async()=>{seed();table("sampleMonitoringVisits").set("a",{createdBy:"staff",cohortId:"c",siteId:"site",visitDate:"2030-01-03",status:"DRAFT",version:1,sampleAssessments:[{sampleId:"TREE-001",condition:"Healthy",evidenceHistory:[{privateEvidence:{objectName:"secret"}}]}]});table("sampleMonitoringVisits").set("b",{createdBy:"staff",cohortId:"c",siteId:"site",visitDate:"2030-01-02",status:"RETURNED",version:2,sampleAssessments:[{sampleId:"TREE-001",condition:null}]});table("sampleMonitoringVisits").set("other",{createdBy:"other",cohortId:"c",siteId:"site",visitDate:"2030-01-04",status:"PENDING_ADMIN_APPROVAL",version:1,sampleAssessments:[{sampleId:"TREE-001",condition:"Dead"}]});const first=await s.list({actorId:"staff",actorRole:"staff",limit:1});assert.deepEqual(first.visits.map(v=>v.id),["a"]);assert.equal(first.visits[0].actions.saveDraft,true);assert.equal(JSON.stringify(first).includes("secret"),false);const second=await s.list({actorId:"staff",actorRole:"staff",limit:1,cursor:first.nextCursor});assert.deepEqual(second.visits.map(v=>v.id),["b"]);assert.equal(second.nextCursor,null);const returned=await s.list({actorId:"staff",actorRole:"staff",status:"RETURNED",limit:50});assert.deepEqual(returned.visits.map(v=>v.id),["b"]);const admin=await s.list({actorId:"admin",actorRole:"admin",limit:50});assert.deepEqual(admin.visits.map(v=>v.id),["other","a","b"]);assert.equal(admin.visits[0].actions.review,true);await assert.rejects(()=>s.list({actorId:"staff",actorRole:"staff",cursor:"other"}),e=>e.status===400);enabled=false;await assert.rejects(()=>s.list({actorId:"staff",actorRole:"staff"}),e=>e.code==="COHORT_WORKFLOW_DISABLED");});
 test("detail hides non-owner visits while allowing owner Staff and Admin",async()=>{seed();table("sampleMonitoringVisits").set("owned",{createdBy:"staff",sampleAssessments:[{sampleId:"TREE-001",evidenceHistory:[{revision:0}]}]});assert.equal((await s.get("owned",{actorId:"staff",actorRole:"staff"})).id,"owned");assert.equal((await s.get("owned",{actorId:"admin",actorRole:"admin"})).id,"owned");await assert.rejects(()=>s.get("owned",{actorId:"other",actorRole:"staff"}),e=>e.status===404);await assert.rejects(()=>s.get("missing",{actorId:"staff",actorRole:"staff"}),e=>e.status===404);});
+
+
+test("partial draft keeps unassessed trees separate and persists bounded visit remarks without allowing incomplete submission", async () => {
+  seed(); const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true});
+  const assessments=[{sampleId:"TREE-001",condition:"Healthy",heightCentimeters:"120.5"},{sampleId:"TREE-002",condition:"",heightCentimeters:""}];
+  const draft=await s.save({visitId:visit.id,actorId:"staff",expectedVersion:0,assessments,visitRemarks:"  Field notes  "});
+  assert.equal(draft.status,"DRAFT"); assert.equal(draft.sampleAssessments[1].condition,null); assert.equal(draft.summary.needsRechecking,0);
+  assert.equal(draft.visitRemarks,"Field notes");assert.equal(draft.history[0].visitRemarks,"Field notes");
+  await assert.rejects(s.save({visitId:visit.id,actorId:"staff",expectedVersion:1,assessments,submit:true}));
+  assert.equal((await s.get(visit.id)).version,1);
+});
+test("negative and nonfinite measurements and overlong visit remarks are rejected before persistence", async () => {
+  seed(); const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true});
+  for(const value of [-1,Infinity,"NaN","12 cm"]) await assert.rejects(s.save({visitId:visit.id,actorId:"staff",expectedVersion:0,assessments:[{sampleId:"TREE-001",condition:"Healthy",heightCentimeters:value},{sampleId:"TREE-002",condition:"Dead"}]}));
+  await assert.rejects(s.save({visitId:visit.id,actorId:"staff",expectedVersion:0,assessments:[],visitRemarks:"a".repeat(1001)}));
+  assert.equal((await s.get(visit.id)).version,0);
+});
+test("authorized display context returns actual report, baseline and prior measurements without private transport metadata", async () => {
+  seed(); const cohort=table("verifiedPlantingCohorts").get("c"); cohort.source.plantingReportId="report";cohort.verifiedPlantedQuantity=20;cohort.samplingPlan.selectedSamples=[{permanentId:"TREE-001",species:"Narra"},{permanentId:"TREE-002",species:"Molave"}];
+  cohort.baseline.sampleUnits[0]={permanentId:"TREE-001",heightMeters:1.2,latitude:12.65,longitude:123.91,photoReferences:[{evidenceId:"private-test"}]};
+  table("sites").set("site",{siteName:"Authoritative site",barangay:"Bical",latitude:12.65,longitude:123.91});
+  table("plantingReports").set("report",{reportNumber:"RPT-TEST",verificationStatus:"Approved",plantingDate:"2026-10-01"});
+  const prior=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-10-30",testOnly:true});
+  table("sampleMonitoringVisits").set(prior.id,{...prior,status:"APPROVED",sampleAssessments:[{sampleId:"TREE-001",condition:"Healthy",heightCentimeters:125,evidenceHistory:[{revision:0,privateEvidence:{objectName:"DO-NOT-EXPOSE"},captureSessionId:"SECRET"}]}]});
+  const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true}); const context=(await s.get(visit.id,{actorId:"staff",actorRole:"staff"})).visitContext;
+  assert.equal(context.reportNumber,"RPT-TEST");assert.equal(context.siteName,"Authoritative site");assert.equal(context.approvedSampleTarget,2);assert.equal(context.samples[0].baseline.heightCentimeters,120);assert.equal(context.samples[0].previous.heightCentimeters,125);
+  assert.doesNotMatch(JSON.stringify(context),/DO-NOT-EXPOSE|SECRET|privateEvidence|objectName/);
+});
+
+test("actual assessment date persists without changing scheduled visitDate and rejects invalid or future dates",async()=>{
+ seed();const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2030-01-01",testOnly:true});
+ const input={visitId:visit.id,actorId:"staff",expectedVersion:0,assessments:[{sampleId:"TREE-001",condition:"Healthy"},{sampleId:"TREE-002",condition:null}]};
+ for(const dateMonitored of ["2099-01-01","2026-02-30","invalid",null])await assert.rejects(()=>s.save({...input,dateMonitored}),{status:400});
+ const saved=await s.save({...input,dateMonitored:"2026-11-01"});assert.equal(saved.dateMonitored,"2026-11-01");assert.equal(saved.visitDate,"2030-01-01");assert.equal(saved.history.at(-1).dateMonitored,"2026-11-01");
+});
+
+test("optional legacy display geometry does not break authorized history or invent an unknown sample target",async()=>{
+ seed();table("sites").set("site",{siteName:"Legacy site",polygon:[null,{lat:12.65,lng:123.91}]});const visit=await s.create({cohortId:"c",actorId:"staff",visitDate:"2026-11-01",testOnly:true});const context=(await s.get(visit.id,{actorId:"staff",actorRole:"staff"})).visitContext;assert.equal(context.approvedSampleTarget,null);assert.deepEqual(context.site.polygon,[{lat:12.65,lng:123.91}]);assert.equal(context.registeredSampleTrees,2);
+});

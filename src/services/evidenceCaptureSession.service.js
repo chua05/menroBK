@@ -214,6 +214,11 @@ function validateLocation(site, input) {
   if (!Number.isFinite(accuracyMeters) || accuracyMeters < 0 || accuracyMeters > MAX_ACCURACY_METERS) {
     throw problem("CAPTURE_LOCATION_INACCURATE", 422, "Camera evidence requires GPS accuracy of 50 meters or better.");
   }
+  return { ...validateSiteLocation(site, input), accuracyMeters };
+}
+function validateSiteLocation(site, input) {
+  const latitude = Number(input.latitude), longitude = Number(input.longitude);
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) throw problem("CAPTURE_LOCATION_INVALID", 422, "Valid evidence coordinates are required.");
   if (!isPointWithinMunicipality(latitude, longitude)) {
     throw problem("CAPTURE_LOCATION_OUTSIDE_BULAN", 422, "Camera evidence must be captured within the Municipality of Bulan.");
   }
@@ -235,7 +240,7 @@ function validateLocation(site, input) {
     throw problem("CAPTURE_LOCATION_OUTSIDE_SITE", 422, "Camera evidence must be captured within the assigned planting site.");
   }
   return {
-    latitude, longitude, accuracyMeters, distanceMeters,
+    latitude, longitude, distanceMeters,
     boundaryRule: hasConfiguredRadius ? "configured-radius" : hasSitePolygon ? "site-polygon" : "50m-fallback",
     boundaryLimitMeters: hasConfiguredRadius ? radius : hasSitePolygon ? null : SITE_FALLBACK_METERS,
   };
@@ -338,7 +343,8 @@ async function resolveSubmissionEvidence({ actorId, workflow, binding, files, ma
         !["VERIFIED", "CONSUMED"].includes(session.state) ||
         !nonceMatches(session.nonceHash, entry.nonce) || !nonceMatches(session.verificationIdHash, entry.verificationId) ||
         generateImageHash(files[index].buffer) !== session.imageSha256 ||
-        Object.entries(binding).some(([key, value]) => value && String(session[key] || "") !== String(value)) ||
+        Object.entries(binding).some(([key, value]) => value !== undefined && value !== null && value !== "" &&
+          String(session[key] ?? "") !== String(value)) ||
         (workflow === "cohort-baseline" && (!expectedSampleId || session.sampleId !== expectedSampleId))) {
       throw problem("CAPTURE_IMAGE_MISMATCH", 409, "Verified camera evidence no longer matches this submission.");
     }
@@ -365,5 +371,6 @@ async function prepareConsumption(transaction, sessions) {
 module.exports = {
   COLLECTION, SESSION_TTL_MS, MAX_ACCURACY_METERS, SITE_FALLBACK_METERS, CaptureSessionError,
   createCaptureSession, verifyCaptureSession, resolveSubmissionEvidence, prepareConsumption,
+  validateLocation, validateSiteLocation,
   _test: { parseBinding, validateLocation, nonceMatches, sha256, assertCaptureRole, monitoringReportTargetAllowed },
 };

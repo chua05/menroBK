@@ -80,3 +80,18 @@ test("blank, overlong and missing-key submissions are rejected without writes", 
   }
   assert.equal(f.records("sampleMonitoringInformationRequests").size, 0);
 });
+
+
+test("tree clarification binds the saved revision and deduplicates the same case across retry keys", async () => {
+  const f=setup();f.put("sampleMonitoringVisits","visit",{createdBy:"owner",cohortId:"cohort",siteId:"site",status:"DRAFT",sampleAssessments:[{sampleId:"TREE-001",condition:"Needs Rechecking",assessmentRevision:2}]});
+  const input={...f.question,sampleId:"TREE-001",assessmentRevision:2};const first=await f.service.create(input);const retry=await f.service.create({...input,key:"different-retry-key"});
+  assert.equal(first.id,retry.id);assert.equal(first.sampleId,"TREE-001");assert.equal(first.assessmentRevision,2);assert.equal(f.records("notifications").size,1);
+  await assert.rejects(f.service.create({...input,question:"A different question"}),error=>error.status===409);
+  const answered=await f.service.answer({requestId:first.id,actorId:"requester",actorRole:"participant",expectedVersion:0,key:"reply-tree",answer:"The marker is still beside the path."});
+  assert.equal(answered.sampleId,"TREE-001");assert.equal(answered.history.length,2);
+});
+test("tree information rejects unknown trees, stale revisions and unauthorized actors without notifications", async () => {
+  const f=setup();f.put("sampleMonitoringVisits","visit",{createdBy:"owner",cohortId:"cohort",siteId:"site",sampleAssessments:[{sampleId:"TREE-001",condition:"Needs Rechecking",assessmentRevision:1}]});
+  for(const change of [{sampleId:"TREE-OTHER",assessmentRevision:1},{sampleId:"TREE-001",assessmentRevision:0},{sampleId:"TREE-001",assessmentRevision:1,actorId:"other"},{sampleId:"TREE-001",assessmentRevision:1,actorId:"requester",actorRole:"participant"}])await assert.rejects(f.service.create({...f.question,...change}));
+  assert.equal(f.records("notifications").size,0);assert.equal(f.records("sampleMonitoringInformationRequests").size,0);
+});

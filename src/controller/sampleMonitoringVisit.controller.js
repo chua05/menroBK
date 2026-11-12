@@ -10,10 +10,12 @@ const gate = res => {
 // transport reference and capture ledger never belong in a visit JSON response.
 const publicVisit = visit => ({
   ...visit,
+  originalEvidenceReviewRequirements: (()=>{try{return require("../services/sampleMonitoringOriginalEvidence").reviewRequirements(visit);}catch{return [];}})(),
+  originalPhotoProposal: (()=>{try{return require("../config/sampleMonitoringOriginalProposal").requireOriginalProposal();}catch{return {linkingEnabled:false};}})(),
   ...(Array.isArray(visit?.sampleAssessments) ? {
     sampleAssessments: visit.sampleAssessments.map(assessment => ({
       ...assessment,
-      evidenceHistory: (assessment.evidenceHistory || []).map(({ revision, linkedAt }) => ({ revision, linkedAt })),
+      evidenceHistory: (assessment.evidenceHistory || []).map(({ revision, linkedAt, location, source, evidenceId, capturedAt, accuracyStatus, verificationStatus, policyStatus }) => ({ revision, linkedAt, ...(source === "uploaded-original" ? {source,evidenceId,capturedAt,accuracyStatus,verificationStatus,policyStatus} : {}), ...(location ? { location: { latitude: location.latitude, longitude: location.longitude, accuracyMeters: location.accuracyMeters } } : {}) })),
     })),
   } : {}),
 });
@@ -33,9 +35,9 @@ exports.get = (req, res) => gate(res) || send(res, 200, () => s.get(req.params.v
 }));
 exports.save = (req, res) => gate(res) || send(res, 200, () => s.save({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
-  assessments: req.body?.assessments, submit: req.body?.submit,
+  assessments: req.body?.assessments, submit: req.body?.submit, visitRemarks: req.body?.visitRemarks, dateMonitored: req.body?.dateMonitored,
 }));
 exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
-  approve: req.body?.approve, reasons: req.body?.reasons,
+  approve: req.body?.approve, reasons: req.body?.reasons, originalEvidenceReviews:req.body?.originalEvidenceReviews,
 }));

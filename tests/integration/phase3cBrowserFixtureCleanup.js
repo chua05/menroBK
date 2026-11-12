@@ -24,7 +24,9 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   const { db, auth, getStorageBucket } = require("../../src/config/firebase");
   assert.equal(db.projectId, integration.projectId);
   const siteId = `${prefix}-site`, cohortId = `${prefix}-cohort`, staffId = `${prefix}-staff`;
-  const visitId = require("../../src/services/sampleMonitoringVisit.service")._test.id(cohortId, "2099-01-01");
+  const visitDate = manifest?.visitDate || "2099-01-01";
+  assert.match(visitDate, /^\d{4}-\d{2}-\d{2}$/);
+  const visitId = require("../../src/services/sampleMonitoringVisit.service")._test.id(cohortId, visitDate);
   if (manifest) assert.equal(manifest.visitId, visitId);
   const siteRef = db.collection("sites").doc(siteId), cohortRef = db.collection("verifiedPlantingCohorts").doc(cohortId);
   const visitRef = db.collection("sampleMonitoringVisits").doc(visitId);
@@ -45,6 +47,8 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
     if (user) assert.equal(user.email.toLowerCase(), `${role}.${prefix}@example.test`.toLowerCase());
     users.push({ profileRef, user, uid });
   }
+  const originals = await db.collection("sampleMonitoringOriginalVerifications").where("visitId", "==", visitId).get();
+  for (const doc of originals.docs) { assert.equal(doc.data().actorId,staffId); assert.equal(doc.data().cohortId,cohortId); assert.equal(doc.data().siteId,siteId); }
   const captures = await db.collection("evidenceCaptureSessions").where("visitId", "==", visitId).get();
   for (const doc of captures.docs) {
     assert.equal(doc.data().actorId, staffId);
@@ -124,7 +128,12 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   const combined = manifest?.combinedWorkflow ? await require("./combinedWorkflowFixture").inspect(prefix) : null;
   if (combined) for (const id of combined.intentIds) intentIds.add(id);
   for (const doc of quota.docs) assert.ok(intentIds.has(doc.data().uploadIntentId));
-  const docs = [...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs,
+  const counterLedger = manifest?.formAcceptance ? await fs.readFile(path.join(evidenceDirectory, `${prefix}.counter-refs.jsonl`), "utf8")
+    .catch(error => { if (error.code === "ENOENT") return ""; throw error; }) : "";
+  const counterIds = [...new Set(counterLedger.split("\n").filter(Boolean).map(line => JSON.parse(line)))];
+  for (const id of counterIds) assert.ok(typeof id === "string" && id.startsWith(`${prefix}_`) && !id.includes("/"));
+  const fixtureCounters = (await Promise.all(counterIds.map(id => db.collection("counters").doc(id).get()))).filter(doc => doc.exists);
+  const docs = [...fixtureCounters, ...originals.docs, ...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs,
     ...information.docs, ...informationNotifications, ...sourceRecords, ...(combined?.docs || [])];
   if (dryRun) return { records: docs.length, users: users.filter(item => item.user).length, objects: objects.size, ownershipVerified: true };
   // No mutation precedes the ownership checks above. Errors other than absent

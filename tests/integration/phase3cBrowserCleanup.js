@@ -1,7 +1,10 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
+const formAcceptance = process.env.MENRO_SAMPLE_MONITORING_FORM_ACCEPTANCE === "true";
+if (formAcceptance) assert.equal(require("../../src/config/integrationEnvironment").validateIntegrationEnvironment().legacyMonitoringIsolated, true);
 const isolated = process.env.MENRO_PHASE3C_ISOLATED_EMULATORS === "true";
-const topology = isolated
+const topology = formAcceptance
+  ? { project: "demo-menro-legacy-monitoring-20261106", firestore: "127.0.0.1:8381", auth: "127.0.0.1:9399", storage: "127.0.0.1:9398" } : isolated
   ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298" }
   : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199" };
 for (const key of ["GOOGLE_APPLICATION_CREDENTIALS", "FIREBASE_PRIVATE_KEY", "FIREBASE_CLIENT_EMAIL", "FIREBASE_CONFIG"]) assert.equal(process.env[key], undefined);
