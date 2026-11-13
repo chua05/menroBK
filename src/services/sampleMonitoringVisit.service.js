@@ -11,6 +11,12 @@ const {
   resolveVerifiedPlantingCohortConfig
 } = require("../config/verifiedPlantingCohort");
 const CONDITIONS = new Set(["Healthy", "Damaged", "Dead", "Needs Rechecking"]);
+// A visit stays "open" until Admin approves it; returned visits are still open for Staff correction.
+const OPEN_VISIT_STATUSES = new Set(["DRAFT", "RETURNED", "PENDING_ADMIN_APPROVAL"]);
+const usesRejectedProvisionalPolicy = cohort => {
+  const config = resolveVerifiedPlantingCohortConfig();
+  return !config.provisionalSamplingAllowed && (!cohort?.samplingPolicySnapshot || cohort?.samplingPlan?.provisionalPolicy === config.provisionalSamplingPolicy);
+};
 const INVESTIGATION_OUTCOMES = new Set(["Not Located After Rechecking"]);
 const disabled = () => Object.assign(new Error("Verified planting cohort workflow is disabled."), {
   status: 409,
@@ -82,15 +88,26 @@ async function create({
     plan = c?.samplingPlan,
     units = c?.baseline?.sampleUnits;
   if (!snap.exists || plan?.status !== "APPROVED" || c?.baseline?.approvalStatus !== "APPROVED" || !Array.isArray(units) || !units.length) throw conflict("Approved cohort, plan, and baseline are required.");
+  if (usesRejectedProvisionalPolicy(c)) throw Object.assign(conflict("This cohort's sampling plan uses the test-only provisional rule. A MENRO-approved sampling policy is required."), { code: "TEST_ONLY_SAMPLING_POLICY_REJECTED" });
   const baselineVersion = Number(c.baselineVersion || 0),
     prior = await priorApprovedVisit(cohortId, c.source.siteId, plan.version, baselineVersion, visitDate),
     unresolved = new Map((prior?.sampleAssessments || []).filter(a => a.recheckQueued || a.condition === "Needs Rechecking").map(a => [a.sampleId, a]));
   const visitId = id(cohortId, visitDate),
-    ref = visitRef(visitId);
+    ref = visitRef(visitId),
+    cohortRef = db.collection("verifiedPlantingCohorts").doc(cohortId);
   await db.runTransaction(async tx => {
+    // T4: the cohort document is read and written in the same transaction, so concurrent creations for
+    // one cohort serialize; the retried transaction then sees the other visit and is refused.
     const old = await tx.get(ref);
+    await tx.get(cohortRef);
+    const cohortVisits = await tx.get(db.collection("sampleMonitoringVisits").where("cohortId", "==", cohortId));
     release.writeScope(actorId, cohortId);
-    if (!old.exists) tx.create(ref, {
+    if (old.exists) return;
+    if (cohortVisits.docs.some(doc => doc.id !== visitId && OPEN_VISIT_STATUSES.has(doc.data().status))) {
+      throw Object.assign(conflict("This cohort already has an open monitoring visit. Finish and have it reviewed before another visit is started."), { code: "OPEN_VISIT_EXISTS" });
+    }
+    tx.update(cohortRef, { monitoringVisitCreation: { lastVisitId: visitId, lastCreatedAt: Timestamp.now() } });
+    tx.create(ref, {
       schemaVersion: 1,
       cohortId,
       siteId: c.source.siteId,
@@ -290,12 +307,47 @@ async function review({
   });
   return get(visitId);
 }
+// T6: authorized, read-only explanation of why a permanent-sample visit cannot be started yet.
+// It never names other Staff members, exposes evidence, or changes any record.
+const READINESS_LIMIT = 25;
+async function readiness({ actorId, actorRole }) {
+  if (!["staff", "admin"].includes(actorRole)) throw Object.assign(new Error("Monitoring visits are restricted to MENRO Staff and Admin."), { status: 403 });
+  const policy = release.assertUser(actorId);
+  const snapshot = await release.scopeQuery(db.collection("verifiedPlantingCohorts"), policy, "__name__").limit(READINESS_LIMIT + 1).get();
+  const cohortDocs = snapshot.docs.slice(0, READINESS_LIMIT);
+  const config = resolveVerifiedPlantingCohortConfig();
+  const cohorts = await Promise.all(cohortDocs.map(async doc => {
+    const c = doc.data(), source = c.source || {}, reasons = [];
+    const [visits, siteDoc, reportDoc] = await Promise.all([
+      db.collection("sampleMonitoringVisits").where("cohortId", "==", doc.id).get(),
+      source.siteId ? db.collection("sites").doc(source.siteId).get() : null,
+      source.plantingReportId ? db.collection("plantingReports").doc(source.plantingReportId).get() : null,
+    ]);
+    if (policy.paused) reasons.push({ code: "WRITES_PAUSED" });
+    if (!c.samplingPolicySnapshot && !config.provisionalSamplingAllowed) reasons.push({ code: "SAMPLING_POLICY_SNAPSHOT_MISSING" });
+    if (c.samplingPolicySnapshot) {
+      const pending = require("./purposePolicy.service").samplingReadiness(Number(c.verifiedPlantedQuantity || 0), c.samplingPolicySnapshot, source.plantingDate).pending;
+      if (pending.length) reasons.push({ code: "SAMPLING_POLICY_PENDING", pending });
+    }
+    if (c.samplingPlan?.status !== "APPROVED") reasons.push({ code: "SAMPLING_PLAN_NOT_APPROVED", planStatus: c.samplingPlan?.status || "NOT_STARTED" });
+    else if (usesRejectedProvisionalPolicy(c) && c.samplingPolicySnapshot) reasons.push({ code: "TEST_ONLY_SAMPLING_POLICY" });
+    if (c.baseline?.approvalStatus !== "APPROVED") reasons.push({ code: "BASELINE_NOT_APPROVED", baselineStatus: c.baseline?.approvalStatus || c.baselineStatus || "NOT_STARTED" });
+    const open = visits.docs.map(visit => visit.data()).filter(visit => OPEN_VISIT_STATUSES.has(visit.status));
+    if (open.length) reasons.push({ code: "OPEN_VISIT_EXISTS", visitStatus: open[0].status, ownedByYou: open.some(visit => visit.createdBy === actorId) });
+    // Production creation stays blocked until MENRO approves the visit-scheduling policy.
+    reasons.push({ code: "VISIT_SCHEDULING_POLICY_PENDING" });
+    return { cohortId: doc.id, reportNumber: reportDoc?.exists ? reportDoc.data().reportNumber || null : null,
+      siteName: siteDoc?.exists ? siteDoc.data().siteName || null : null, canCreateVisit: false, reasons };
+  }));
+  return { cohorts, truncated: snapshot.docs.length > READINESS_LIMIT, visitCreationAvailable: false, schedulingPolicyStatus: "PENDING_MENRO_APPROVAL" };
+}
 module.exports = {
   create,
   list,
   get,
   save,
   review,
+  readiness,
   _test: {
     summary,
     normalize,

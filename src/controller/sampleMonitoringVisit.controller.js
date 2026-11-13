@@ -41,3 +41,9 @@ exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
   approve: req.body?.approve, reasons: req.body?.reasons, originalEvidenceReviews:req.body?.originalEvidenceReviews,
 }));
+
+// Read-only readiness reasons; not a visit document, so it bypasses visit response shaping.
+exports.readiness = (req, res) => gate(res) || Promise.resolve()
+  .then(() => s.readiness({ actorId: req.user.uid, actorRole: req.user.role }))
+  .then(data => res.status(200).json({ success: true, data }))
+  .catch(error => res.status(error.status || 400).json({ success: false, code: error.code, message: error.message }))
