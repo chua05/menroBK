@@ -192,3 +192,37 @@ test("new policy plans preserve one configured cohort target, species identity a
   const approved = await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true, estimationEligibilityApproved: true });
   assert.equal(approved.samplingPlan.estimationEligibilityApproved, true); assert.equal(approved.samplingPlanHistory.at(-1).samplingPolicyVersion, 2); assert.equal(approved.samplingPlanHistory.at(-1).estimationEligibilityApproved, true);
 });
+
+// T3: outside isolated tests the test-only provisional sampling rule is never accepted.
+async function outsideTestMode(fn) {
+  const previous = process.env.NODE_ENV;
+  process.env.NODE_ENV = "development";
+  try { await fn(); } finally { process.env.NODE_ENV = previous; }
+}
+const t3Plan = cohortId => ({ cohortId, actorId: "staff-1", expectedVersion: 0, selectionMethod: "documented-manual", submitForApproval: true,
+  selectedSamples: [{ permanentId: "TREE-001", unitType: "tree", species: "Narra", siteReference: "Plot A", selectionReason: "Marked permanent sample" }],
+  speciesSiteDistribution: [{ species: "Narra", siteReference: "Plot A", sampleIds: ["TREE-001"] }] });
+
+test("outside test mode a cohort without an approved policy snapshot cannot save a sampling plan", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("report-no-snapshot");
+  table("verifiedPlantingCohorts").set(cohortId, { source: { plantingReportId: "report-no-snapshot" }, verifiedPlantedQuantity: 10, baselineStatus: "NOT_STARTED", baselineVersion: 0 });
+  await outsideTestMode(async () => {
+    await assert.rejects(service.saveSamplingPlan(t3Plan(cohortId)), error => error.code === "SAMPLING_POLICY_SNAPSHOT_REQUIRED" && error.status === 409);
+  });
+  assert.equal(table("verifiedPlantingCohorts").get(cohortId).samplingPlan, undefined);
+});
+
+test("outside test mode a pending test-only plan cannot be approved but can still be returned", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("report-legacy-plan");
+  table("verifiedPlantingCohorts").set(cohortId, { source: { plantingReportId: "report-legacy-plan" }, verifiedPlantedQuantity: 10, baselineStatus: "NOT_STARTED", baselineVersion: 0 });
+  await service.saveSamplingPlan(t3Plan(cohortId));
+  assert.equal(table("verifiedPlantingCohorts").get(cohortId).samplingPlan.provisionalPolicy, "test-only-ceil-10-percent-min-1-v1");
+  await outsideTestMode(async () => {
+    await assert.rejects(service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true }), error => error.code === "TEST_ONLY_SAMPLING_POLICY_REJECTED");
+    assert.equal(table("verifiedPlantingCohorts").get(cohortId).samplingPlan.status, "PENDING_ADMIN_APPROVAL");
+    const returned = await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: false, remarks: "Awaiting MENRO policy" });
+    assert.equal(returned.samplingPlan.status, "RETURNED");
+  });
+});

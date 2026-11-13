@@ -246,6 +246,9 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
     const currentPlan = current.samplingPlan || { version: 0, status: "DRAFT" };
     if (Number(currentPlan.version || 0) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
     if (currentPlan.status === "APPROVED") throw conflict("An approved sampling plan cannot be replaced. Submit an approved replacement through MENRO policy.");
+    if (!current.samplingPolicySnapshot && !resolveVerifiedPlantingCohortConfig().provisionalSamplingAllowed) {
+      throw Object.assign(conflict("This cohort has no MENRO-approved sampling policy snapshot. A sampling plan cannot use the test-only provisional rule."), { code: "SAMPLING_POLICY_SNAPSHOT_REQUIRED" });
+    }
     const readiness = current.samplingPolicySnapshot ? require("./purposePolicy.service").samplingReadiness(current.verifiedPlantedQuantity, current.samplingPolicySnapshot, current.source?.plantingDate) : null;
     if (readiness?.pending.length) throw conflict("Sampling policy/procedures are pending MENRO approval; automatic and manual sample-plan activation remains blocked.");
     const target = readiness ? readiness.target : provisionalTarget(current.verifiedPlantedQuantity);
@@ -289,6 +292,11 @@ async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve
     const current = doc.data(); const plan = current.samplingPlan;
     if (!plan || plan.status !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending sampling plan can be reviewed.");
     if (Number(plan.version) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
+    // A plan built on the test-only provisional rule may still be returned, but never approved outside isolated tests.
+    const config = resolveVerifiedPlantingCohortConfig();
+    if (approve === true && plan.provisionalPolicy === config.provisionalSamplingPolicy && !config.provisionalSamplingAllowed) {
+      throw Object.assign(conflict("This sampling plan uses the test-only provisional rule and cannot be approved. Return it until a MENRO-approved policy applies."), { code: "TEST_ONLY_SAMPLING_POLICY_REJECTED" });
+    }
     if (estimationEligibilityApproved && (!current.samplingPolicySnapshot || !Array.isArray(current.samplingReadiness?.pending) || current.samplingReadiness.pending.length || plan.selectedSamples.some(sample => sample.unitType !== "tree"))) throw conflict("Sampling validity cannot be approved while minimums, allocation/selection procedures or tree identities are unresolved.");
     const now = Timestamp.now();
     const reviewed = { ...plan, ...(current.samplingPolicySnapshot ? { estimationEligibilityApproved: approve === true && estimationEligibilityApproved === true, samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}), status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
