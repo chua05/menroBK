@@ -68,6 +68,7 @@ const {
   optionalRemarks,
   fail: workflowFail,
 } = require("../utils/plantingReviewWorkflow.util");
+const { PARTICIPANT_PLANTING_NOTICES } = require("../utils/plantingReportNotifications");
 
 
 const REPORT_COLLECTION =
@@ -1728,7 +1729,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           createNotificationInTransaction(transaction, {
             notificationId: `planting_report_submitted_${parentId}_${contributionRef.id}_${data.participantId}`,
             recipientUserId: data.participantId, type: "planting_report_submitted", title: "Planting Report Submitted",
-            message: "Your final planting report was submitted and is pending MENRO Staff verification.",
+            message: PARTICIPANT_PLANTING_NOTICES.submitted.message("Your final planting report"),
             relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: contributionRef.id, createdAt: now,
           });
           if (suspiciousFlags.length > 0 || automatedStatus === "Flagged") {
@@ -1930,7 +1931,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
           recipientUserId: data.participantId,
           type: "planting_report_submitted",
           title: "Planting Report Submitted",
-          message: "Your planting report was submitted and is pending MENRO Staff verification.",
+          message: PARTICIPANT_PLANTING_NOTICES.submitted.message(),
           relatedRecordType: "plantingReport",
           relatedRecordId: parentId,
           relatedSubrecordId: contributionRef.id,
@@ -2015,7 +2016,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         recipientUserId: data.participantId,
         type: "planting_report_submitted",
         title: "Planting Report Submitted",
-        message: `${reportNumber} was submitted and is pending MENRO Staff verification.`,
+        message: PARTICIPANT_PLANTING_NOTICES.submitted.message(reportNumber),
         relatedRecordType: "plantingReport",
         relatedRecordId: docRef.id,
         createdAt: now,
@@ -2424,13 +2425,7 @@ const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, re
         message: `${actor.fullName || "MENRO Staff"} reviewed a planting report submission and forwarded it for your approval.`,
         relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now,
       }));
-      createNotificationInTransaction(transaction, {
-        notificationId: `planting_report_reviewed_${parentId}_${id}_${submitterOf(current)}`,
-        recipientUserId: submitterOf(current), type: "planting_report_reviewed",
-        title: "Planting Report Reviewed",
-        message: "MENRO Staff reviewed your planting report and forwarded it to the MENRO Admin for approval.",
-        relatedRecordType: "plantingReport", relatedRecordId: parentId, relatedSubrecordId: id, createdAt: now,
-      });
+      // Staff review is internal: the Participant's report stays "Submitted", so no Participant notice.
     });
     return getPlantingReportById(parentId);
   }
@@ -2464,13 +2459,7 @@ const forwardPlantingReport = async (id, reviewedBy, remarks, reviewedByName, re
       message: `${actor.fullName || "MENRO Staff"} reviewed ${currentReport.reportNumber || "a planting report"} and forwarded it for your approval.`,
       relatedRecordType: "plantingReport", relatedRecordId: id, createdAt: now,
     }));
-    createNotificationInTransaction(transaction, {
-      notificationId: `planting_report_reviewed_${id}_${currentReport.participantId}`,
-      recipientUserId: currentReport.participantId, type: "planting_report_reviewed",
-      title: "Planting Report Reviewed",
-      message: "MENRO Staff reviewed your planting report and forwarded it to the MENRO Admin for approval.",
-      relatedRecordType: "plantingReport", relatedRecordId: id, createdAt: now,
-    });
+    // Staff review is internal: the Participant's report stays "Submitted", so no Participant notice.
   });
   return withWorkflowStatus(await reportRef.get());
 };
@@ -2658,8 +2647,9 @@ const approvePlantingReport =
         createNotificationInTransaction(transaction, {
           recipientUserId: submitterOf(current),
           notificationId: `planting_report_accepted_${parentId}_${id}_${submitterOf(current)}`,
-          type: "planting_report_accepted", title: "Planting Report Approved",
-          message: "MENRO Admin approved your planting report. Your planted quantity is now confirmed.",
+          // Neutral Participant wording: verification is internal (stored stage stays Completed).
+          type: "planting_report_accepted", title: PARTICIPANT_PLANTING_NOTICES.recorded.title,
+          message: PARTICIPANT_PLANTING_NOTICES.recorded.message,
           relatedRecordType: "plantingReport", relatedRecordId: parentId,
           relatedSubrecordId: id, createdAt: now,
         });
@@ -2708,8 +2698,8 @@ const approvePlantingReport =
         recipientUserId: currentReport.participantId,
         notificationId: `planting_report_approved_${id}_${currentReport.participantId}`,
         type: "planting_report_approved",
-        title: "Planting Report Approved",
-        message: "MENRO Admin approved your planting report. Your planted quantity is now confirmed.",
+        title: PARTICIPANT_PLANTING_NOTICES.recorded.title,
+        message: PARTICIPANT_PLANTING_NOTICES.recorded.message,
         relatedRecordType: "plantingReport",
         relatedRecordId: id,
         createdAt: now,

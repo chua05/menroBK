@@ -225,7 +225,9 @@ test("Staff forwards or returns; only Admin reaches final decision routes; the i
     assert.equal(reviewed.reportingProgress, "Fully Reported — Awaiting Review");
     assert.equal(reviewed.acceptedQuantity, 100);
     assert.equal([...table("verifiedPlantingCohorts").values()].length, 0, "Staff review never activates monitoring");
-    assert.ok(table("notifications").get("planting_report_reviewed_event_event-accept_submission-accept_participant-1"));
+    // Staff review is internal: the Participant receives no "Reviewed" notice.
+    assert.equal(table("notifications").get("planting_report_reviewed_event_event-accept_submission-accept_participant-1"), undefined);
+    assert.equal([...table("notifications").values()].some((item) => item.recipientUserId === "participant-1" && item.type === "planting_report_reviewed"), false);
     await assert.rejects(forward("submission-accept"), /pending Staff review/);
     const report = await adminApprove("submission-accept", "Reviewed");
     const submission = table("plantingContributions").get("submission-accept");
@@ -246,6 +248,10 @@ test("Staff forwards or returns; only Admin reaches final decision routes; the i
     assert.equal(notification.recipientUserId, "participant-1");
     assert.equal(notification.relatedRecordId, "event_event-accept");
     assert.equal(notification.relatedSubrecordId, "submission-accept");
+    // Neutral Participant wording; the stored stage stays Completed and the verifier stays recorded.
+    assert.equal(notification.title, "Planting Report Recorded");
+    assert.equal(notification.message, "MENRO has recorded your planting report. No further action is needed.");
+    assert.doesNotMatch(`${notification.title} ${notification.message}`, /reviewed|approved|approval|completed|verified|verification|forwarded/i);
     const cohorts = [...table("verifiedPlantingCohorts").values()];
     assert.equal(cohorts.length, 1);
     assert.equal(cohorts[0].source.plantingReportId, "event_event-accept");
@@ -285,6 +291,7 @@ test("Staff forwards or returns; only Admin reaches final decision routes; the i
     const secondId = "planting_report_accepted_event_event-shared_submission-b_participant-3";
     assert.equal(table("notifications").get(firstId).recipientUserId, "participant-1");
     assert.equal(table("notifications").get(secondId).recipientUserId, "participant-3");
+    for (const id of [firstId, secondId]) assert.equal(table("notifications").get(id).title, "Planting Report Recorded");
     assert.notEqual(firstId, secondId);
     await assert.rejects(
       adminApprove("submission-a"),
@@ -317,6 +324,9 @@ test("Staff forwards or returns; only Admin reaches final decision routes; the i
     );
     assert.equal(notification.recipientUserId, "participant-1");
     assert.equal(notification.relatedSubrecordId, "submission-reject");
+    // Rejection is an outcome the Participant must know about, so it stays explicit with the reason.
+    assert.match(notification.message, /rejected/i);
+    assert.match(notification.message, /Evidence does not show this site/);
   });
 
 test("Admin approval after Staff review is final and preserves automated findings", async () => {
@@ -374,7 +384,11 @@ test("Staff returns a standalone report for correction with a required reason", 
   assert.equal(report.workflowStatus, "Returned for Correction");
   assert.equal(report.correctionAllowed, true);
   assert.equal(report.returnReason, "Retake the photos at the site");
-  assert.equal(table("notifications").get("planting_report_returned_return-1_participant-1").type, "planting_report_returned");
+  const returnedNotice = table("notifications").get("planting_report_returned_return-1_participant-1");
+  assert.equal(returnedNotice.type, "planting_report_returned");
+  // Correction-required notices stay explicit and carry the reason.
+  assert.equal(returnedNotice.title, "Planting Report Returned for Correction");
+  assert.match(returnedNotice.message, /Retake the photos at the site/);
   await assert.rejects(forward("return-1"), /pending Staff review/);
   await assert.rejects(adminApprove("return-1"), /Only planting reports reviewed by MENRO Staff/);
 });
@@ -422,8 +436,11 @@ test("early monitoring assignment goes to Staff/Admin while planting approval re
     const approved = await adminApprove(reportId, "Verified");
     assert.equal(approved.earlyMonitoring.officialOpeningDate, shiftCalendarDate(today, 14));
     assert.equal(approved.earlyMonitoring.applicable, true);
-    assert.equal(table("notifications").get(`planting_report_approved_${reportId}_participant-1`).recipientUserId,
-      "participant-1", "planting approval status stays requester-facing");
+    const recorded = table("notifications").get(`planting_report_approved_${reportId}_participant-1`);
+    assert.equal(recorded.recipientUserId, "participant-1", "the requester is still told the report was recorded");
+    assert.equal(recorded.title, "Planting Report Recorded");
+    assert.doesNotMatch(`${recorded.title} ${recorded.message}`, /approved|verified|completed|reviewed/i);
+    assert.equal(table("notifications").get(`planting_report_reviewed_${reportId}_participant-1`), undefined, "no Participant notice for Staff review");
     const taskNotices = [...table("notifications").values()].filter(item =>
       item.relatedRecordId === reportId && item.type === "early_monitoring_scheduled");
     assert.deepEqual(new Set(taskNotices.map(item => item.recipientUserId)),

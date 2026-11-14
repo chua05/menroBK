@@ -81,10 +81,16 @@ test("participant report: Staff forward then Admin approval completes; return an
   assert.notEqual(forwarded.reportingProgress, "Completed");
   const adminNotice = await db.collection("notifications").doc(`planting_report_forwarded_${reportId}_${approveId}_${ADMIN.uid}`).get();
   assert.equal(adminNotice.data()?.type, "planting_report_forwarded");
+  const participantNotices = async () => (await db.collection("notifications").where("recipientUserId", "==", PARTICIPANT).get()).docs.map((doc) => doc.data());
+  assert.equal((await participantNotices()).some((row) => row.type === "planting_report_reviewed"), false, "Staff review sends no Participant notice");
 
   const approved = await approve(approveId);
   assert.equal(approved.submissions.find((row) => row.id === approveId).workflowStatus, "Completed");
   assert.equal(approved.acceptedQuantity, 10);
+  const recorded = (await participantNotices()).filter((row) => row.relatedSubrecordId === approveId && row.type === "planting_report_accepted");
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0].title, "Planting Report Recorded");
+  assert.doesNotMatch(`${recorded[0].title} ${recorded[0].message}`, /approved|verified|completed|reviewed/i);
   // Verification persists the verifier and time, and cannot be repeated or followed by another Staff review.
   const verifiedDoc = (await db.collection("plantingContributions").doc(approveId).get()).data();
   assert.equal(verifiedDoc.workflowStatus, "Completed");
@@ -112,6 +118,11 @@ test("participant report: Staff forward then Admin approval completes; return an
   assert.equal(rejected.reportingProgress, "Partial", "only Admin-approved quantities count; nothing is completed early");
   assert.equal((await db.collection("events").doc(eventId).get()).data().recordedSeedlingQuantity, 10);
 
+  // Action-required outcomes stay explicit for the Participant, with the reason.
+  const finalNotices = await participantNotices();
+  assert.match(finalNotices.find((row) => row.relatedSubrecordId === returnId && row.type === "planting_report_returned")?.message || "", /Retake the photo inside the site/);
+  assert.match(finalNotices.find((row) => row.relatedSubrecordId === rejectId && row.type === "planting_report_rejected")?.message || "", /Planted outside the approved site/);
+  assert.equal(finalNotices.some((row) => row.type === "planting_report_reviewed"), false);
   const logs = await reports.getPlantingReportVerificationLogs(reportId);
   const actionsFor = (id) => logs.filter((log) => log.submissionId === id).map((log) => log.action);
   assert.deepEqual(actionsFor(approveId), ["Staff Review — Forwarded to Admin", "Admin Approval"]);
