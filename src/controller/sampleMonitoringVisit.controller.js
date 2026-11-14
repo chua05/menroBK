@@ -1,5 +1,11 @@
 const s = require("../services/sampleMonitoringVisit.service");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
+const { publicQueryError } = require("../utils/firestoreQueryError");
+// Missing Firestore indexes become a stable 503 without the raw console link.
+const fail = (res, rawError, context) => {
+  const error = publicQueryError(rawError, context);
+  return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
+};
 
 const gate = res => {
   if (resolveVerifiedPlantingCohortConfig().enabled) return false;
@@ -21,7 +27,7 @@ const publicVisit = visit => ({
 });
 const send = (res, status, fn) => Promise.resolve().then(fn)
   .then(data => res.status(status).json({ success: true, data: publicVisit(data) }))
-  .catch(error => res.status(error.status || 400).json({ success: false, code: error.code, message: error.message }));
+  .catch(error => fail(res, error, "sample-monitoring-visits"));
 
 exports.create = (req, res) => gate(res) || send(res, 201, () => s.create({
   cohortId: req.params.cohortId, actorId: req.user.uid, visitDate: req.body?.visitDate,
@@ -46,4 +52,4 @@ exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
 exports.readiness = (req, res) => gate(res) || Promise.resolve()
   .then(() => s.readiness({ actorId: req.user.uid, actorRole: req.user.role }))
   .then(data => res.status(200).json({ success: true, data }))
-  .catch(error => res.status(error.status || 400).json({ success: false, code: error.code, message: error.message }))
+  .catch(error => fail(res, error, "sample-monitoring-readiness"))
