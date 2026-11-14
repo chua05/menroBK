@@ -85,6 +85,14 @@ test("participant report: Staff forward then Admin approval completes; return an
   const approved = await approve(approveId);
   assert.equal(approved.submissions.find((row) => row.id === approveId).workflowStatus, "Completed");
   assert.equal(approved.acceptedQuantity, 10);
+  // Verification persists the verifier and time, and cannot be repeated or followed by another Staff review.
+  const verifiedDoc = (await db.collection("plantingContributions").doc(approveId).get()).data();
+  assert.equal(verifiedDoc.workflowStatus, "Completed");
+  assert.equal(verifiedDoc.adminDecisionBy, ADMIN.uid);
+  assert.ok(verifiedDoc.adminDecisionAt, "verification timestamp is stored");
+  await assert.rejects(approve(approveId), (error) => error.status === 409);
+  await assert.rejects(forward(approveId), (error) => error.status === 409);
+  assert.equal((await db.collection("plantingReports").doc(reportId).get()).data().acceptedQuantity, 10, "a repeated verification never double-counts");
 
   await assert.rejects(staffReturn(returnId, "  "), (error) => error.status === 400);
   const returned = await staffReturn(returnId, "Retake the photo inside the site");
@@ -123,7 +131,7 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
     quantityPlanted: 0, acceptedQuantity: 0, activeSubmittedQuantity: 0, pendingReviewQuantity: 0, reportingProgress: "Awaiting Submission" });
   const staff = { uid: STAFF.uid, fullName: STAFF.name, role: "staff" }, admin = { uid: ADMIN.uid, fullName: ADMIN.name, role: "admin" };
   const submit = (version, extra = {}) => official.submitOfficialReport(staff, { requestId, confirmationBasis: "release-based",
-    items: [{ inventoryId: "narra", leftoverQuantity: 2 }], remarks: "Emulator official report", clientSubmissionId: randomUUID(), expectedVersion: version, ...extra });
+    items: [{ inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Seedlings damaged in transport" }], remarks: "Emulator official report", clientSubmissionId: randomUUID(), expectedVersion: version, ...extra });
 
   const first = await submit(0); const firstId = first.officialSubmissionIds[0];
   assert.equal(first.submissions.find((row) => row.id === firstId).workflowStatus, "Pending Admin Approval");
@@ -135,12 +143,22 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   await assert.rejects(submit(2, { correctionOf: firstId }), (error) => error.status === 409, "an Admin rejection cannot be corrected");
 
   const second = await submit(2); const secondId = second.officialSubmissionIds[0];
-  const returned = await reports.returnPlantingReport(secondId, ADMIN.uid, "Confirm the leftover count", ADMIN.name, ADMIN.role);
+  const returned = await reports.returnPlantingReport(secondId, ADMIN.uid, "Confirm the leftover count", ADMIN.name, ADMIN.role,
+    { fields: [{ path: "remarks", comment: "Confirm the leftover count" }] });
   assert.equal(returned.submissions.find((row) => row.id === secondId).workflowStatus, "Returned for Correction");
   const corrected = await submit(4, { correctionOf: secondId }); const correctedId = corrected.officialSubmissionIds[0];
+  // Monitoring eligibility starts only at Admin verification: nothing exists for a submitted/returned report.
+  const cohortsFor = async () => (await db.collection("verifiedPlantingCohorts").where("source.plantingReportId", "==", reportId).get()).docs;
+  assert.equal((await cohortsFor()).length, 0, "no monitoring cohort before Admin verification");
   assert.equal(corrected.submissions.find((row) => row.id === correctedId).revision, 1);
   const approved = await reports.approvePlantingReport(correctedId, ADMIN.uid, "", ADMIN.name, ADMIN.role);
   assert.equal(approved.submissions.find((row) => row.id === correctedId).workflowStatus, "Completed");
   assert.equal(approved.reportingProgress, "Completed");
+  await assert.rejects(reports.approvePlantingReport(correctedId, ADMIN.uid, "", ADMIN.name, ADMIN.role), (error) => error.status === 409, "verification cannot be repeated");
+  if (process.env.VERIFIED_PLANTING_COHORT_ENABLED === "true") {
+    const cohorts = await cohortsFor();
+    assert.equal(cohorts.length, 1, "Admin verification records exactly one verified cohort; a repeat never duplicates it");
+    assert.equal((await db.collection("sampleMonitoringVisits").where("cohortId", "==", cohorts[0].id).get()).size, 0, "verification never creates a monitoring visit");
+  }
   assert.equal(approved.acceptedQuantity, 8);
 });
