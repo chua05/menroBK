@@ -73,6 +73,11 @@ test("participant report: Staff forward then Admin approval completes; return an
 
   await assert.rejects(approve(approveId), (error) => error.status === 409 && /must review and forward/.test(error.message));
   await assert.rejects(reports.approvePlantingReport(approveId, STAFF.uid, "", STAFF.name, STAFF.role), (error) => error.status === 403);
+  // Admin cannot perform the Staff review step, even by calling the service directly.
+  await assert.rejects(reports.forwardPlantingReport(approveId, ADMIN.uid, "", ADMIN.name, ADMIN.role), (error) => error.status === 403);
+  const untouched = (await db.collection("plantingContributions").doc(approveId).get()).data();
+  assert.equal(untouched.staffReviewStatus, "Pending Review"); assert.equal(untouched.staffReviewedBy, undefined);
+  assert.notEqual(untouched.workflowStatus, "Reviewed");
 
   const forwarded = await forward(approveId);
   const forwardedRow = forwarded.submissions.find((row) => row.id === approveId);
@@ -149,6 +154,11 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   const notices = await db.collection("notifications").where("relatedSubrecordId", "==", firstId).get();
   assert.ok(notices.docs.some((doc) => doc.data().recipientUserId === ADMIN.uid && doc.data().type === "planting_report_submitted_admin"));
   await assert.rejects(official.reviewOfficialSubmission(staff, firstId, "approve"), (error) => error.status === 403);
+  // A Staff-submitted report has no Staff review step: neither Staff nor Admin can "review" it, and Staff cannot verify it.
+  await assert.rejects(forward(firstId), (error) => error.status === 409 && /go directly to MENRO Admin/.test(error.message));
+  await assert.rejects(reports.forwardPlantingReport(firstId, ADMIN.uid, "", ADMIN.name, ADMIN.role), (error) => error.status === 403);
+  await assert.rejects(reports.approvePlantingReport(firstId, STAFF.uid, "", STAFF.name, STAFF.role), (error) => error.status === 403);
+  assert.equal((await db.collection("plantingContributions").doc(firstId).get()).data().workflowStatus, "Pending Admin Approval");
   const rejected = await official.reviewOfficialSubmission(admin, firstId, "reject", "Release record does not match the field count");
   assert.equal(rejected.submissions.find((row) => row.id === firstId).workflowStatus, "Rejected");
   await assert.rejects(submit(2, { correctionOf: firstId }), (error) => error.status === 409, "an Admin rejection cannot be corrected");
