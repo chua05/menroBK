@@ -66,7 +66,7 @@ test.before(async () => {
   await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report` }, baselineVersion: 1,
     samplingPlan: { status: "APPROVED", version: 1, selectedSamples: [{ permanentId: sampleId }] },
     baseline: { approvalStatus: "APPROVED", sampleUnits: [{ permanentId: sampleId, condition: "Healthy" }] }, testFixture: true });
-  const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
+  const visit = await visitService.create({actorRole:"staff", cohortId, actorId: ids.staff, visitDate: "2099-01-01", testOnly: true });
   assert.equal(visit.status, "DRAFT");
   server = app.listen(0, "127.0.0.1");
   await new Promise(resolve => server.once("listening", resolve));

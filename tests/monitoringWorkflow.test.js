@@ -77,6 +77,8 @@ function seed(entry = observation()) {
   table("notifications").clear();
   table("users").set("staff-notify", { role: "staff", status: "active" });
   table("users").set("admin-notify", { role: "admin", status: "active" });
+  // The default fixture observation is a historical Participant-reported observation.
+  table("users").set("participant-1", { role: "participant", status: "active" });
   table("monitoringRecords").set("monitor-1", {
     participantId: "participant-1", plantingReportId: "report-1", siteId: "site-1",
     startMonitoringDate: "2026-01-01", monitoringEndDate: "2028-01-01",
@@ -355,4 +357,127 @@ test("invalid retained evidence cannot be reused", async () => {
     totalMonitored: 10, healthyCount: 8, damagedCount: 1, deadCount: 1,
     monitoredDate: "2026-09-02", maturityStatus: "Immature", actorId: "staff-reporter", actorRole: "staff" }),
   (error) => error.code === "OBSERVATION_EVIDENCE_INVALID");
+});
+
+// ---- Staff ownership, self-review and Admin restrictions for aggregate monitoring ----
+function staffObservation(overrides = {}) {
+  return observation({ originalReporterId: "staff-reporter", monitoredBy: "staff-reporter",
+    auditHistory: [{ action: "Submitted", actorId: "staff-reporter", actorRole: "staff" }], ...overrides });
+}
+const correction = { monitoringId: "monitor-1", observationId: "OBS-1", expectedVersion: 1,
+  retainEvidenceRevision: 1, totalMonitored: 10, healthyCount: 7, damagedCount: 2,
+  deadCount: 1, monitoredDate: "2026-09-02", maturityStatus: "Immature", remarks: "Corrected" };
+function seedCorrectionTarget(entry) {
+  table("plantingReports").set("report-1", { participantId: "participant-1", siteId: "site-1", quantityPlanted: 10 });
+  table("sites").set("site-1", { latitude: 12.57, longitude: 123.965 });
+  seed(entry);
+}
+
+test("only the original Staff reporter can resubmit a returned Staff-reported observation", async () => {
+  seedCorrectionTarget(staffObservation({ reviewStatus: "Returned for Rechecking", reviewVersion: 1, returnedBy: "staff-reviewer" }));
+  await assert.rejects(service.resubmitMonitoringObservation({ ...correction, actorId: "staff-other", actorRole: "staff" }),
+    (error) => error.code === "MONITORING_NOT_ORIGINAL_REPORTER" && error.status === 403);
+  for (const actorRole of ["admin", "participant"]) {
+    await assert.rejects(service.resubmitMonitoringObservation({ ...correction, actorId: "staff-reporter", actorRole }),
+      (error) => error.code === "MONITORING_ACTION_FORBIDDEN" && error.status === 403);
+  }
+  let stored = table("monitoringRecords").get("monitor-1").history[0];
+  assert.equal(stored.reviewStatus, "Returned for Rechecking", "denied attempts change nothing");
+  assert.equal(stored.revisionHistory.length, 1);
+  await service.resubmitMonitoringObservation({ ...correction, actorId: "staff-reporter", actorRole: "staff" });
+  stored = table("monitoringRecords").get("monitor-1").history[0];
+  assert.equal(stored.reviewStatus, "Pending Review");
+  assert.equal(stored.revisionHistory.length, 2);
+  assert.equal(stored.revisionHistory[1].submittedBy, "staff-reporter");
+});
+
+test("a returned observation with an unknown reporter fails closed for other Staff", async () => {
+  seedCorrectionTarget(observation({ originalReporterId: "unknown-reporter", reviewStatus: "Returned for Rechecking", reviewVersion: 1 }));
+  await assert.rejects(service.resubmitMonitoringObservation({ ...correction, actorId: "staff-other", actorRole: "staff" }),
+    (error) => error.code === "MONITORING_NOT_ORIGINAL_REPORTER");
+});
+
+test("Staff cannot review or return their own aggregate observation; another Staff member can", async () => {
+  for (const action of ["reviewMonitoringObservation", "returnMonitoringObservation"]) {
+    seed(staffObservation());
+    await assert.rejects(service[action]({ monitoringId: "monitor-1", observationId: "OBS-1",
+      expectedVersion: 0, actorId: "staff-reporter", actorRole: "staff", reason: "Recheck" }),
+    (error) => error.code === "MONITORING_SELF_REVIEW_FORBIDDEN" && error.status === 403);
+    assert.equal(table("monitoringRecords").get("monitor-1").history[0].reviewStatus, "Pending Review");
+  }
+  // A Staff member who resubmitted a revision is also a reporter of that observation.
+  seed(staffObservation({ revisionHistory: [{ revisionNumber: 1, evidenceRevision: 1, submittedBy: "staff-reporter",
+    evidenceRef: { photoUrl: "/uploads/monitoring/staff-reporter/photo.jpg", latitude: 12.57, longitude: 123.965 } },
+  { revisionNumber: 2, evidenceRevision: 1, submittedBy: "staff-second", evidenceRef: { photoUrl: "/x.jpg" } }] }));
+  await assert.rejects(service.reviewMonitoringObservation({ monitoringId: "monitor-1", observationId: "OBS-1",
+    expectedVersion: 0, actorId: "staff-second", actorRole: "staff" }), (error) => error.code === "MONITORING_SELF_REVIEW_FORBIDDEN");
+  await service.reviewMonitoringObservation({ monitoringId: "monitor-1", observationId: "OBS-1",
+    expectedVersion: 0, actorId: "staff-reviewer", actorRole: "staff" });
+  const stored = table("monitoringRecords").get("monitor-1").history[0];
+  assert.equal(stored.reviewStatus, "Reviewed");
+  assert.equal(stored.staffReviewedBy, "staff-reviewer");
+});
+
+test("Admin cannot review, return or resubmit aggregate observations; Admin final decision is unchanged", async () => {
+  seed(staffObservation());
+  for (const action of ["reviewMonitoringObservation", "returnMonitoringObservation"]) {
+    await assert.rejects(service[action]({ monitoringId: "monitor-1", observationId: "OBS-1",
+      expectedVersion: 0, actorId: "admin-1", actorRole: "admin", reason: "Recheck" }),
+    (error) => error.code === "MONITORING_ACTION_FORBIDDEN");
+  }
+  await assert.rejects(service.createMonitoringRecord({ plantingReportId: "report-1", monitoredBy: "admin-1", actorRole: "admin" }),
+    (error) => error.code === "MONITORING_ACTION_FORBIDDEN");
+  seed(staffObservation({ reviewStatus: "Reviewed", reviewVersion: 1, staffReviewedBy: "staff-reviewer", staffReviewedAt: { seconds: 1 } }));
+  await service.approveMonitoringObservation({ monitoringId: "monitor-1", observationId: "OBS-1",
+    expectedVersion: 1, actorId: "admin-1", actorRole: "admin" });
+  assert.equal(table("monitoringRecords").get("monitor-1").history[0].reviewStatus, "Approved");
+});
+
+test("aggregate record remarks can be edited only by a Staff reporter of that record", async () => {
+  seed(staffObservation());
+  for (const [updatedBy, actorRole, code] of [["admin-1", "admin", "MONITORING_ACTION_FORBIDDEN"],
+    ["staff-other", "staff", "MONITORING_RECORD_NOT_OWNED"], ["participant-1", "participant", "MONITORING_ACTION_FORBIDDEN"]]) {
+    await assert.rejects(service.updateMonitoringRecord("monitor-1", { remarks: "Changed", updatedBy, actorRole }),
+      (error) => error.code === code && error.status === 403);
+  }
+  assert.equal(table("monitoringRecords").get("monitor-1").remarks, undefined);
+  await service.updateMonitoringRecord("monitor-1", { remarks: "Reporter note", updatedBy: "staff-reporter", actorRole: "staff" });
+  assert.equal(table("monitoringRecords").get("monitor-1").remarks, "Reporter note");
+});
+
+test("archiving keeps the record and appends an audit entry; archiving twice is refused", async () => {
+  seed(staffObservation());
+  await service.archiveMonitoringRecord("monitor-1", "admin-1", "admin");
+  const stored = table("monitoringRecords").get("monitor-1");
+  assert.equal(stored.archived, true);
+  assert.equal(stored.archivedByRole, "admin");
+  assert.equal(stored.history.length, 1, "observations are preserved");
+  assert.deepEqual(stored.archiveHistory.map(({ action, actorId, actorRole }) => ({ action, actorId, actorRole })),
+    [{ action: "Archived", actorId: "admin-1", actorRole: "admin" }]);
+  await assert.rejects(service.archiveMonitoringRecord("monitor-1", "staff-1", "staff"),
+    (error) => error.code === "MONITORING_ALREADY_ARCHIVED");
+  assert.equal(table("monitoringRecords").get("monitor-1").archiveHistory.length, 1);
+});
+
+test("historical Participant-reported observation (audit history) stays correctable by Staff, never by Participant or Admin", async () => {
+  seedCorrectionTarget(observation({ originalReporterId: "legacy-reporter", reviewStatus: "Returned for Rechecking", reviewVersion: 1,
+    auditHistory: [{ action: "Submitted", actorId: "legacy-reporter", actorRole: "participant" }] }));
+  for (const [actorId, actorRole] of [["legacy-reporter", "participant"], ["admin-1", "admin"]]) {
+    await assert.rejects(service.resubmitMonitoringObservation({ ...correction, actorId, actorRole }),
+      (error) => error.code === "MONITORING_ACTION_FORBIDDEN");
+  }
+  assert.equal(table("monitoringRecords").get("monitor-1").history[0].reviewStatus, "Returned for Rechecking");
+  await service.resubmitMonitoringObservation({ ...correction, actorId: "staff-any", actorRole: "staff" });
+  const stored = table("monitoringRecords").get("monitor-1").history[0];
+  assert.equal(stored.reviewStatus, "Pending Review");
+  assert.equal(stored.originalReporterId, "legacy-reporter", "historical reporter is preserved");
+  assert.equal(stored.revisionHistory.at(-1).submittedBy, "staff-any");
+});
+
+test("a Staff-reported observation whose audit says staff is never treated as historical", async () => {
+  seedCorrectionTarget(staffObservation({ reviewStatus: "Returned for Rechecking", reviewVersion: 1 }));
+  table("users").set("staff-reporter", { role: "participant" }); // a later role change does not reopen ownership
+  await assert.rejects(service.resubmitMonitoringObservation({ ...correction, actorId: "staff-other", actorRole: "staff" }),
+    (error) => error.code === "MONITORING_NOT_ORIGINAL_REPORTER");
+  table("users").delete("staff-reporter");
 });

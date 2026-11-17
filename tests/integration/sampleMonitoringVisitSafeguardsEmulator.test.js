@@ -48,7 +48,7 @@ test("real HTTP visit creation stays blocked without the isolated test flag", as
 });
 test("real concurrent creations for one cohort leave exactly one open visit", async () => {
   const dates = ["2031-02-01", "2031-02-02", "2031-02-03", "2031-02-04", "2031-02-05"];
-  const results = await Promise.allSettled(dates.map((visitDate, index) => visits.create({ cohortId: readyCohort, actorId: index % 2 ? ids.otherStaff : ids.staff, visitDate, testOnly: true })));
+  const results = await Promise.allSettled(dates.map((visitDate, index) => visits.create({actorRole:"staff", cohortId: readyCohort, actorId: index % 2 ? ids.otherStaff : ids.staff, visitDate, testOnly: true })));
   const created = results.filter(result => result.status === "fulfilled"), refused = results.filter(result => result.status === "rejected");
   assert.equal(created.length, 1, JSON.stringify(refused.map(result => result.reason?.code || result.reason?.message)));
   for (const result of refused) assert.equal(result.reason.code, "OPEN_VISIT_EXISTS", result.reason.message);

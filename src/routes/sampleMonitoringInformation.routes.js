@@ -21,7 +21,8 @@ const send = (method, args) => async (req, res) => {
 router.use(verifyToken, authorizeRoles("staff", "admin", "participant"));
 router.get("/", send("list", req => ({ visitId: req.query.visitId, cursor: req.query.cursor,
   limit: req.query.limit, paged: req.query.paged === "true" })));
-router.post("/", authorizeRoles("staff", "admin"), send("create", req => ({
+// Only MENRO Staff send Requester Clarification questions; Admin keeps read access.
+router.post("/", authorizeRoles("staff"), send("create", req => ({
   visitId: req.body?.visitId, question: req.body?.question, key: req.get("Idempotency-Key"),
   ...(req.body?.sampleId !== undefined ? { sampleId: req.body.sampleId, assessmentRevision: req.body.assessmentRevision } : {}),
 })));

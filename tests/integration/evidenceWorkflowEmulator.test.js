@@ -159,10 +159,10 @@ async function monitoringFixture(early = false) {
 async function raw(id) { return (await db.collection("monitoringRecords").doc(id).get()).data(); }
 test.before(async () => {
   assert.ok(UPLOAD_ROOT.startsWith(`${os.tmpdir()}${path.sep}`));
-  for (const role of ["participant", "other", "staff", "admin"]) {
+  for (const role of ["participant", "other", "staff", "reviewer", "admin"]) {
     const uid = `${prefix}-${role}`, email = `${uid}@example.test`, password = `Synthetic-${randomUUID()}!`;
     await auth.createUser({ uid, email, password, emailVerified: true });
-    await db.collection("users").doc(uid).create({ role: role === "other" ? "participant" : role,
+    await db.collection("users").doc(uid).create({ role: role === "other" ? "participant" : role === "reviewer" ? "staff" : role,
       status: "active", fullName: `Synthetic ${role}`, email });
     const response = await fetch(`http://${topology.auth}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, returnSecureToken: true }) });
@@ -214,7 +214,9 @@ test("official partial observation, count/remarks reuse and replacement retain i
   assert.equal(entry.isFullCohortAssessment, false); assert.equal(again.nextMonitoringDate, null);
   const route = `/monitoring/${first.id}/observations/${entry.id}`;
   assert.equal((await api("admin", "PATCH", `${route}/approve`, { expectedVersion: 0 })).status, 409);
-  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Check counts" }), 200);
+  // Staff cannot return their own observation; a different Staff member reviews it.
+  assert.equal((await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Check counts" })).status, 403);
+  ok(await api("reviewer", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Check counts" }), 200);
   const correction = { ...fields, expectedVersion: 1, retainEvidenceRevision: 1, healthyCount: 19, damagedCount: 4 };
   const correctionKey = randomUUID();
   const competingCorrections = await Promise.all([
@@ -228,11 +230,14 @@ test("official partial observation, count/remarks reuse and replacement retain i
   let saved = await raw(first.id);
   assert.deepEqual(saved.history[0].privateEvidence, saved.history[0].revisionHistory[0].evidenceRef.privateEvidence);
   const originalRef = saved.history[0].privateEvidence;
-  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 2, reason: "Clarify remarks" }), 200);
+  ok(await api("reviewer", "PATCH", `${route}/return`, { expectedVersion: 2, reason: "Clarify remarks" }), 200);
   const remarks = { ...correction, expectedVersion: 3, remarks: "Clarified remarks" }, remarksKey = randomUUID();
   ok(await api("staff", "PATCH", `${route}/resubmit`, form(remarks), remarksKey), 200);
-  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 4, reason: "Replace evidence" }), 200);
+  ok(await api("reviewer", "PATCH", `${route}/return`, { expectedVersion: 4, reason: "Replace evidence" }), 200);
   const replacement = await image(), replacementKey = randomUUID(), updated = { ...remarks, expectedVersion: 5 };
+  // A different Staff member and Admin cannot correct another Staff member's returned observation.
+  for (const role of ["reviewer", "admin"]) assert.equal((await api(role, "PATCH", `${route}/resubmit`, form(updated), randomUUID())).status, 403);
+  assert.equal((await raw(first.id)).history[0].reviewStatus, "Returned for Rechecking");
   ok(await api("staff", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
   ok(await api("staff", "PATCH", `${route}/resubmit`, form(updated, replacement), replacementKey), 200);
   saved = await raw(first.id); assert.equal(saved.history[0].revisionHistory.length, 4);
@@ -243,7 +248,8 @@ test("official partial observation, count/remarks reuse and replacement retain i
   }
   assert.equal((await api("other", "GET", `/evidence/monitoring/${first.id}/observations/${entry.id}/revisions/1`)).status, 403);
   assert.equal((await api("other", "PATCH", `${route}/resubmit`, form(updated), randomUUID())).status, 403);
-  ok(await api("staff", "PATCH", `${route}/review`, { expectedVersion: 6 }), 200);
+  assert.equal((await api("staff", "PATCH", `${route}/review`, { expectedVersion: 6 })).status, 403);
+  ok(await api("reviewer", "PATCH", `${route}/review`, { expectedVersion: 6 }), 200);
   const approved = ok(await api("admin", "PATCH", `${route}/approve`, { expectedVersion: 7 }), 200);
   assert.equal(approved.history[0].reviewStatus, "Approved"); assert.equal(approved.nextMonitoringDate, null);
   assert.equal(corrected.history[0].revisionNumber, 2);
@@ -459,7 +465,7 @@ test("invalid site GPS cannot be retained on correction and requires a new immut
   assert.equal((await api("participant", "POST", "/monitoring", form(fields, bytes), randomUUID())).status, 403);
   const first = ok(await api("staff", "POST", "/monitoring", form(fields, bytes), randomUUID()));
   const entry = first.history[0], route = `/monitoring/${first.id}/observations/${entry.id}`;
-  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Invalid site GPS" }), 200);
+  ok(await api("reviewer", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Invalid site GPS" }), 200);
   const correction = { ...fields, expectedVersion: 1, retainEvidenceRevision: 1 };
   const invalid = await api("staff", "PATCH", `${route}/resubmit`, form(correction), randomUUID());
   assert.equal(invalid.status, 422); assert.equal(invalid.body.code, "OBSERVATION_EVIDENCE_INVALID");
@@ -589,7 +595,7 @@ test("browser-camera monitoring resubmission after Staff Return atomically repla
   const created = ok(await api("staff", "POST", "/monitoring", form({ ...fields, siteId: report.siteId,
     evidenceManifest: originalCamera.evidenceManifest }, originalBytes), randomUUID()));
   const observation = created.history[0], route = `/monitoring/${created.id}/observations/${observation.id}`;
-  ok(await api("staff", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Retake evidence" }), 200);
+  ok(await api("reviewer", "PATCH", `${route}/return`, { expectedVersion: 0, reason: "Retake evidence" }), 200);
   const replacement = await image(), replacementCamera = await browserCameraEvidence({ workflow: "monitoring-resubmit",
     plantingReportId: fields.plantingReportId, siteId: report.siteId, monitoringId: created.id,
     observationId: observation.id, expectedVersion: 1 }, replacement, "staff"), key = randomUUID();

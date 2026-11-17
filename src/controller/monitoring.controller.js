@@ -118,10 +118,11 @@ async function getMonitoringRecord(req, res) {
 }
 async function updateMonitoring(req, res) {
   try {
-    const data = await updateMonitoringRecord(req.params.id, { ...req.body, updatedBy: req.user.uid });
+    // Identity and role come only from the verified token, never from the request body.
+    const data = await updateMonitoringRecord(req.params.id, { remarks: req.body?.remarks, updatedBy: req.user.uid, actorRole: req.user.role });
     return res.status(200).json({ success: true, message: "Monitoring lifecycle updated.", data });
   } catch (error) {
-    return res.status(error.message === "Monitoring record not found." ? 404 : 400).json({ success: false, message: error.message });
+    return res.status(error.message === "Monitoring record not found." ? 404 : Number(error.status) || 400).json({ success: false, ...(error.code ? { code: error.code } : {}), message: error.message });
   }
 }
 function workflowStatus(error) {
@@ -224,10 +225,10 @@ async function resubmitMonitoring(req, res) {
 }
 async function archiveMonitoring(req, res) {
   try {
-    const data = await archiveMonitoringRecord(req.params.id, req.user.uid);
+    const data = await archiveMonitoringRecord(req.params.id, req.user.uid, req.user.role);
     return res.status(200).json({ success: true, message: "Monitoring lifecycle archived.", data });
   } catch (error) {
-    return res.status(error.message === "Monitoring record not found." ? 404 : 400).json({ success: false, message: error.message });
+    return res.status(error.message === "Monitoring record not found." ? 404 : Number(error.status) || 400).json({ success: false, ...(error.code ? { code: error.code } : {}), message: error.message });
   }
 }
 

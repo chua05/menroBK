@@ -117,7 +117,7 @@ async function main() {
     verifiedPlantedQuantity: formAcceptance ? 20 : 10,
     samplingPlan: { status: "APPROVED", version: 1, selectedSamples: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map(permanentId => ({ permanentId, species: "Narra" })) },
     baseline: { approvalStatus: "APPROVED", sampleUnits: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map((permanentId, index) => ({ permanentId, condition: "Healthy", ...(formAcceptance ? { heightMeters: 1, diameterCentimeters: 5, latitude: 12.662301 + index * 0.00003, longitude: 123.932983, captureDate: visitDate } : {}) })) }, testFixture: prefix });
-  const visit = await visitService.create({ cohortId, actorId: ids.staff, visitDate, testOnly: true });
+  const visit = await visitService.create({actorRole:"staff", cohortId, actorId: ids.staff, visitDate, testOnly: true });
   assert.equal(visit.status, "DRAFT");
   const workflowFixture = combinedWorkflow ? await require("./combinedWorkflowFixture").seed(prefix) : {};
   const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
