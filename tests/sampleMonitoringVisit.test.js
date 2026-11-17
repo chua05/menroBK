@@ -128,3 +128,26 @@ test("a service call without an actor role is refused before any visit write",as
   await assert.rejects(()=>s.save({visitId:v.id,actorId:"staff",expectedVersion:0,submit:true,assessments:[{sampleId:"TREE-001",condition:"Healthy"},{sampleId:"TREE-002",condition:"Healthy"}]}),e=>e.status===403);
   assert.equal(table("sampleMonitoringVisits").get(v.id).status,"DRAFT");assert.equal(table("sampleMonitoringVisits").get(v.id).version,0);
 });
+
+test("Admin list adds only display labels to submitted visits; drafts and Staff lists get no lookups",async()=>{
+ seed();table("verifiedPlantingCohorts").get("c").source.plantingReportId="report";
+ table("sites").set("site",{siteName:"Bical Site",barangay:"Bical",ownerEmail:"site@private.test"});
+ table("plantingReports").set("report",{reportNumber:"RPT-2026-001"});
+ table("users").set("staff-a",{fullName:"Ana Staff",email:"ana@private.test",role:"staff",contactNumber:"0999"});
+ table("sampleMonitoringVisits").set("pending",{createdBy:"staff-a",cohortId:"c",siteId:"site",visitDate:"2030-01-05",dateMonitored:"2026-11-02",status:"PENDING_ADMIN_APPROVAL",version:2,sampleAssessments:[{sampleId:"TREE-001",condition:"Healthy"}]});
+ table("sampleMonitoringVisits").set("returned",{createdBy:"missing-user",cohortId:"gone",siteId:"site",visitDate:"2030-01-04",status:"RETURNED",version:3,sampleAssessments:[]});
+ table("sampleMonitoringVisits").set("draft",{createdBy:"draft-user",cohortId:"c",siteId:"site",visitDate:"2030-01-03",status:"DRAFT",version:1,sampleAssessments:[]});
+ const reads=[];const original=db.collection;db.collection=c=>{const q=original(c);const doc=q.doc;q.doc=id=>{reads.push(c+"/"+id);return doc(id)};return q};
+ let admin;try{admin=await s.list({actorId:"admin",actorRole:"admin",limit:50});}finally{db.collection=original;}
+ const row=id=>admin.visits.find(v=>v.id===id);
+ assert.deepEqual([row("pending").submittedByName,row("pending").reportNumber,row("pending").siteName,row("pending").barangay,row("pending").dateMonitored],["Ana Staff","RPT-2026-001","Bical Site","Bical","2026-11-02"]);
+ assert.equal(row("pending").actions.review,true);assert.equal(row("pending").actions.saveDraft,false);assert.equal(row("pending").actions.submit,false);
+ assert.deepEqual([row("returned").submittedByName,row("returned").reportNumber,row("returned").siteName,row("returned").dateMonitored],["MENRO Staff",null,null,null]);
+ assert.equal("submittedByName" in row("draft"),false);assert.equal(reads.includes("users/draft-user"),false);
+ assert.equal(reads.filter(r=>r==="users/staff-a").length,1);assert.equal(reads.filter(r=>r==="verifiedPlantingCohorts/c").length,1);
+ assert.equal(admin.writesPaused,false);
+ assert.doesNotMatch(JSON.stringify(admin),/ana@private.test|site@private.test|0999|staff-a|missing-user|draft-user|createdBy/);
+ const staff=await s.list({actorId:"staff-a",actorRole:"staff",limit:50});
+ assert.deepEqual(staff.visits.map(v=>v.id),["pending"]);assert.equal("submittedByName" in staff.visits[0],false);assert.equal("siteName" in staff.visits[0],false);assert.equal(staff.visits[0].dateMonitored,"2026-11-02");
+ await assert.rejects(()=>s.list({actorId:"person",actorRole:"participant"}),e=>e.status===403);
+});

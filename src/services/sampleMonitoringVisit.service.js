@@ -183,16 +183,42 @@ async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
     query = query.startAfter(cursorDoc);
   }
   const snapshot = await query.get();
-  const visits = snapshot.docs.slice(0, size).map(doc => {
+  const pageDocs = snapshot.docs.slice(0, size);
+  // Admin Monitoring Records rows only, and only for submitted (non-draft) visits: resolve each distinct
+  // Staff submitter's display name and each distinct cohort's report number/site once per page.
+  // Only display names are returned — never uids, emails or other profile fields.
+  const submitterNames = new Map(), cohortLabels = new Map();
+  const adminRows = actorRole === 'admin' ? pageDocs.filter(doc => doc.data().status !== 'DRAFT') : [];
+  const distinct = field => [...new Set(adminRows.map(doc => doc.data()[field]).filter(id => typeof id === 'string' && id))];
+  const readDoc = async (collection, id) => {
+    if (typeof id !== 'string' || !id) return {};
+    try { const snap = await db.collection(collection).doc(id).get(); return snap.exists ? snap.data() || {} : {}; } catch { return {}; }
+  };
+  await Promise.all([
+    ...distinct('createdBy').map(async id => {
+      const user = await readDoc('users', id);
+      submitterNames.set(id, String(user.fullName || user.name || '').trim() || 'MENRO Staff');
+    }),
+    ...distinct('cohortId').map(async id => {
+      const source = (await readDoc('verifiedPlantingCohorts', id)).source || {};
+      const [site, report] = await Promise.all([readDoc('sites', source.siteId), readDoc('plantingReports', source.plantingReportId)]);
+      cohortLabels.set(id, { reportNumber: report.reportNumber || null, siteName: site.siteName || report.siteName || null,
+        barangay: site.barangay || report.barangay || null });
+    }),
+  ]);
+  const visits = pageDocs.map(doc => {
     const value = doc.data(); const assessments = value.sampleAssessments || [];
     const completed = assessments.filter(item => item.condition).length;
     const editable = !policy.paused && actorRole === 'staff' && value.createdBy === actorId && ['DRAFT', 'RETURNED'].includes(value.status);
     return { id: doc.id, cohortId: value.cohortId, siteId: value.siteId, visitDate: value.visitDate, status: value.status,
       version: value.version, samplingPlanVersion: value.samplingPlanVersion, baselineVersion: value.baselineVersion,
+      dateMonitored: typeof value.dateMonitored === 'string' ? value.dateMonitored : null,
+      ...(actorRole === 'admin' && value.status !== 'DRAFT' ? { submittedByName: submitterNames.get(value.createdBy) || 'MENRO Staff',
+        ...(cohortLabels.get(value.cohortId) || { reportNumber: null, siteName: null, barangay: null }) } : {}),
       progress: { completed, total: assessments.length, rechecking: assessments.filter(item => item.recheckRequired || item.recheckQueued).length },
       actions: { view: true, saveDraft: editable, submit: editable, review: !policy.paused && actorRole === 'admin' && value.status === 'PENDING_ADMIN_APPROVAL' } };
   });
-  return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null };
+  return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null, writesPaused: Boolean(policy.paused) };
 }
 async function save({
   visitId,
