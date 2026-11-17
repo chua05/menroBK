@@ -95,3 +95,11 @@ test("tree information rejects unknown trees, stale revisions and unauthorized a
   for(const change of [{sampleId:"TREE-OTHER",assessmentRevision:1},{sampleId:"TREE-001",assessmentRevision:0},{sampleId:"TREE-001",assessmentRevision:1,actorId:"other"},{sampleId:"TREE-001",assessmentRevision:1,actorId:"requester",actorRole:"participant"}])await assert.rejects(f.service.create({...f.question,...change}));
   assert.equal(f.records("notifications").size,0);assert.equal(f.records("sampleMonitoringInformationRequests").size,0);
 });
+test("Admin cannot create Requester Clarification requests but can still read Staff requests", async () => {
+  const f = setup();
+  await assert.rejects(f.service.create({ ...f.question, actorId: "admin", actorRole: "admin" }), { status: 403 });
+  assert.equal(f.records("sampleMonitoringInformationRequests").size, 0);
+  assert.equal(f.records("notifications").size, 0);
+  const { id } = await f.service.create(f.question);
+  assert.equal((await f.service.get({ requestId: id, actorId: "admin", actorRole: "admin" })).status, "OPEN");
+});

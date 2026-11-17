@@ -71,7 +71,8 @@ function createService({ db, notify, now, enabled }) {
   return {
     async create({ visitId, sampleId, assessmentRevision, question, key, ...actor }) {
       gate(actor);
-      if (!["staff", "admin"].includes(actor.actorRole)) fail(403, "Access denied.");
+      // Requester Clarification is a Staff monitoring action; Admin can view requests but not create them.
+      if (actor.actorRole !== "staff") fail(403, "Only MENRO Staff can request information from the requester.");
       release.assertWrite();
       question = text(question, 2000); key = text(key, 120);
       if (sampleId !== undefined && (!validId(sampleId) || !Number.isSafeInteger(assessmentRevision) || assessmentRevision < 0)) fail(400, "A permanent tree and assessment revision are required.");

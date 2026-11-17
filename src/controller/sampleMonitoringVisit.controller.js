@@ -30,7 +30,7 @@ const send = (res, status, fn) => Promise.resolve().then(fn)
   .catch(error => fail(res, error, "sample-monitoring-visits"));
 
 exports.create = (req, res) => gate(res) || send(res, 201, () => s.create({
-  cohortId: req.params.cohortId, actorId: req.user.uid, visitDate: req.body?.visitDate,
+  cohortId: req.params.cohortId, actorId: req.user.uid, actorRole: req.user.role, visitDate: req.body?.visitDate,
   testOnly: process.env.NODE_ENV === "test" && req.body?.testOnly === true,
 }));
 exports.list = (req, res) => gate(res) || send(res, 200, () => s.list({
@@ -41,7 +41,7 @@ exports.get = (req, res) => gate(res) || send(res, 200, () => s.get(req.params.v
 }));
 exports.save = (req, res) => gate(res) || send(res, 200, () => s.save({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
-  assessments: req.body?.assessments, submit: req.body?.submit, visitRemarks: req.body?.visitRemarks, dateMonitored: req.body?.dateMonitored,
+  assessments: req.body?.assessments, submit: req.body?.submit, visitRemarks: req.body?.visitRemarks, dateMonitored: req.body?.dateMonitored, actorRole: req.user.role,
 }));
 exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,

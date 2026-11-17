@@ -21,7 +21,7 @@ test.before(async()=>{
  await db.collection("seedlingRequests").doc(requestId).set({participantId:ids.participant,testFixture:prefix});
  await db.collection("plantingReports").doc(reportId).set({requestId,reportNumber:"PR-FORM-FIXTURE",quantityPlanted:50,verificationStatus:"Approved",reportingProgress:"Completed",testFixture:prefix});
  await db.collection("verifiedPlantingCohorts").doc(cohortId).set({source:{siteId,requestId,plantingReportId:reportId},verifiedPlantedQuantity:50,baselineVersion:1,samplingPlan:{status:"APPROVED",version:1,selectedSamples:[{permanentId:"TREE-A",species:"Narra"},{permanentId:"TREE-B",species:"Narra"}]},baseline:{approvalStatus:"APPROVED",sampleUnits:[{permanentId:"TREE-A",condition:"Healthy",heightMeters:1,latitude:12.662301,longitude:123.932983},{permanentId:"TREE-B",condition:"Healthy"}]},testFixture:prefix});
- visitId=(await visits.create({cohortId,actorId:ids.staff,visitDate:"2026-11-01",testOnly:true})).id;
+ visitId=(await visits.create({actorRole:"staff",cohortId,actorId:ids.staff,visitDate:"2026-11-01",testOnly:true})).id;
  server=app.listen(0,"127.0.0.1");await new Promise(resolve=>server.once("listening",resolve));base=`http://127.0.0.1:${server.address().port}/api`;
 });
 test.after(async()=>{
@@ -53,5 +53,12 @@ test("real participant/nonowner/unauthenticated access is denied and Admin detai
  const path=`/verified-sample-monitoring/visits/${visitId}`;
  for(const role of ["participant","otherStaff",null])assert.notEqual((await api(path,role)).status,200);
  assert.equal((await api(path,"admin")).status,200);assert.equal((await api(path,"admin","PUT",{expectedVersion:2,assessments,submit:false})).status,403);
+ // Direct Admin API attempts to submit, create a visit, or send a Requester Clarification are refused.
+ assert.equal((await api(path,"admin","PUT",{expectedVersion:2,assessments,submit:true})).status,403);
+ assert.equal((await api(`/verified-sample-monitoring/cohorts/${cohortId}/visits`,"admin","POST",{visitDate:"2026-12-01",testOnly:true})).status,403);
+ const before=(await db.collection("sampleMonitoringInformationRequests").where("visitId","==",visitId).get()).size;
+ assert.equal((await api("/sample-monitoring-information","admin","POST",{visitId,question:"Admin should not ask this."},{"Idempotency-Key":"admin-question-denied"})).status,403);
+ assert.equal((await db.collection("sampleMonitoringInformationRequests").where("visitId","==",visitId).get()).size,before);
+ assert.equal((await api("/sample-monitoring-information?visitId="+encodeURIComponent(visitId),"admin")).status,200);
  const saved=(await db.collection("sampleMonitoringVisits").doc(visitId).get()).data();assert.equal(saved.version,2);assert.equal(saved.visitDate,"2026-11-01");
 });

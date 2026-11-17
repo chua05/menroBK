@@ -41,6 +41,40 @@ function workflowError(code, message, status = 409) {
   return error;
 }
 
+// Every user who reported or resubmitted an observation. Historical observations
+// keep their stored reporter IDs; nothing here rewrites them.
+function observationReporterIds(observation) {
+  return new Set([observation?.originalReporterId, observation?.monitoredBy,
+    ...(observation?.revisionHistory || []).map((revision) => revision?.submittedBy)]
+    .filter((value) => typeof value === "string" && value));
+}
+
+function assertNotOwnObservation(observation, actorId) {
+  if (!actorId || observationReporterIds(observation).has(String(actorId))) {
+    throw workflowError("MONITORING_SELF_REVIEW_FORBIDDEN",
+      "Another MENRO Staff member must review this observation. Staff cannot review or return their own monitoring observation.", 403);
+  }
+}
+
+// Historical observations were submitted by Participants before monitoring became
+// Staff-only. They have no original Staff reporter, so any authorized Staff member may
+// still correct them (existing behavior). Unknown reporters fail closed.
+async function reportedByHistoricalParticipant(observation, read) {
+  const submitted = (observation?.auditHistory || []).find((entry) => entry?.action === "Submitted");
+  if (submitted?.actorRole) return submitted.actorRole === "participant";
+  const reporterId = observation?.originalReporterId;
+  if (typeof reporterId !== "string" || !reporterId) return false;
+  const user = await read(db.collection("users").doc(reporterId));
+  return Boolean(user?.exists) && String(user.data()?.role || "").toLowerCase() === "participant";
+}
+
+async function assertOriginalReporter(observation, actorId, read) {
+  if (actorId && String(observation?.originalReporterId || "") === String(actorId)) return;
+  if (actorId && await reportedByHistoricalParticipant(observation, read)) return;
+  throw workflowError("MONITORING_NOT_ORIGINAL_REPORTER",
+    "Only the original MENRO Staff reporter can correct and resubmit this observation.", 403);
+}
+
 function cleanWorkflowText(value, { required = false, label = "Remarks" } = {}) {
   const text = typeof value === "string" ? value.trim() : "";
   if (required && !text) throw workflowError("INVALID_MONITORING_INPUT", `${label} is required.`, 400);
@@ -656,10 +690,23 @@ async function getRawMonitoringRecordById(id) {
 }
 
 async function updateMonitoringRecord(id, data) {
+  // Lifecycle remarks belong to the Staff who reported observations in it. Admin and
+  // other Staff members cannot modify another Staff member's aggregate monitoring record.
+  if (data.actorRole !== "staff") {
+    throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can edit monitoring records.", 403);
+  }
   const ref = monitoringCollection.doc(id);
-  const doc = await ref.get();
-  if (!doc.exists) throw new Error("Monitoring record not found.");
-  await ref.update({ remarks: data.remarks ?? doc.data().remarks ?? "", updatedBy: data.updatedBy, updatedAt: Timestamp.now() });
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists) throw new Error("Monitoring record not found.");
+    const current = doc.data();
+    const history = Array.isArray(current.history) ? current.history : [];
+    if (!history.some((observation) => String(observation?.originalReporterId || "") === String(data.updatedBy || ""))) {
+      throw workflowError("MONITORING_RECORD_NOT_OWNED",
+        "Only the MENRO Staff member who reported this monitoring record can edit it.", 403);
+    }
+    transaction.update(ref, { remarks: data.remarks ?? current.remarks ?? "", updatedBy: data.updatedBy, updatedAt: Timestamp.now() });
+  });
   return getMonitoringRecordById(id);
 }
 
@@ -688,6 +735,7 @@ async function transitionObservation({
     let updated;
     if (action === "review") {
       if (actorRole !== "staff") throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can review observations.", 403);
+      assertNotOwnObservation(observation, actorId);
       if (observation.reviewStatus !== PHASE_TWO_STATUSES.PENDING) throw workflowError("INVALID_STATUS_TRANSITION", "Only pending observations can be reviewed.");
       const hasEvidence = Boolean(observation.photoUrl || observation.hasEvidence ||
         observation.revisionHistory?.some((revision) => revision.evidenceRef?.photoUrl || revision.evidenceRef?.privateEvidence));
@@ -698,6 +746,7 @@ async function transitionObservation({
         staffReviewedBy: actorId, staffReviewedAt: now, staffReviewRemarks: remarks };
     } else if (action === "return") {
       if (actorRole !== "staff") throw workflowError("MONITORING_ACTION_FORBIDDEN", "Only MENRO Staff can return observations.", 403);
+      assertNotOwnObservation(observation, actorId);
       if (observation.reviewStatus !== PHASE_TWO_STATUSES.PENDING) throw workflowError("INVALID_STATUS_TRANSITION", "Only pending observations can be returned for rechecking.");
       const reason = cleanWorkflowText(text, { required: true, label: "Return reason" });
       updated = { ...observation, reviewStatus: PHASE_TWO_STATUSES.RETURNED,
@@ -806,6 +855,7 @@ async function resubmitMonitoringObservationImpl(data) {
     const history = doc.data()?.history || [];
     const observation = history[uniqueObservationIndex(history, data.observationId)];
     assertVersion(observation, data.expectedVersion);
+    await assertOriginalReporter(observation, data.actorId, (reference) => reference.get());
     if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
     if (data.file) privateEvidence = await require("./evidenceWorkflow.service").workflow().upload(
       operation, 0, data.file, { recordId: data.observationId,
@@ -883,6 +933,7 @@ async function resubmitMonitoringObservationImpl(data) {
       const index = uniqueObservationIndex(history, data.observationId);
       const observation = history[index];
       assertVersion(observation, data.expectedVersion);
+      await assertOriginalReporter(observation, data.actorId, (reference) => transaction.get(reference));
       if (observation.reviewStatus !== PHASE_TWO_STATUSES.RETURNED) {
         throw workflowError("INVALID_STATUS_TRANSITION", "Only observations returned for rechecking can be resubmitted.");
       }
@@ -1019,11 +1070,19 @@ async function resubmitMonitoringObservationImpl(data) {
   }
 }
 
-async function archiveMonitoringRecord(id, archivedBy) {
+async function archiveMonitoringRecord(id, archivedBy, actorRole = null) {
   const ref = monitoringCollection.doc(id);
-  const doc = await ref.get();
-  if (!doc.exists) throw new Error("Monitoring record not found.");
-  await ref.update({ archived: true, archivedAt: Timestamp.now(), archivedBy, updatedAt: Timestamp.now() });
+  await db.runTransaction(async (transaction) => {
+    const doc = await transaction.get(ref);
+    if (!doc.exists) throw new Error("Monitoring record not found.");
+    const current = doc.data();
+    if (current.archived === true) throw workflowError("MONITORING_ALREADY_ARCHIVED", "This monitoring record is already archived.");
+    const now = Timestamp.now();
+    // Archiving hides the record from the active list only; observations and evidence are kept.
+    const archiveHistory = [...(Array.isArray(current.archiveHistory) ? current.archiveHistory : []),
+      { action: "Archived", actorId: archivedBy, actorRole, actedAt: now }];
+    transaction.update(ref, { archived: true, archivedAt: now, archivedBy, archivedByRole: actorRole, archiveHistory, updatedAt: now });
+  });
   return getMonitoringRecordById(id);
 }
 

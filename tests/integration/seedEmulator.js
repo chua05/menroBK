@@ -11,6 +11,8 @@ const USERS = [
   ["phase2-participant", "phase2.participant@example.test", "participant", "Phase 2 Participant"],
   ["phase2-other", "phase2.other@example.test", "participant", "Other Participant"],
   ["phase2-staff", "phase2.staff@example.test", "staff", "MENRO Test Staff"],
+  // A second synthetic Staff account: Staff cannot review their own monitoring observations.
+  ["phase2-reviewer", "phase2.reviewer@example.test", "staff", "MENRO Test Reviewing Staff"],
   ["phase2-admin", "phase2.admin@example.test", "admin", "MENRO Test Admin"],
 ];
 const PASSWORD = "Phase2-Test-Only!2026";

@@ -137,7 +137,7 @@ test("only Admin-approved full coverage advances scheduling; partial and rejecte
   let record = await submit();
   const observationId = record.history[0].id;
   record = await service.reviewMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
-    expectedVersion: 0, actorId: "phase2-staff", actorRole: "staff" });
+    expectedVersion: 0, actorId: "phase2-reviewer", actorRole: "staff" });
   assert.equal(record.nextMonitoringDate, null);
   record = await service.approveMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
     expectedVersion: 1, actorId: "phase2-admin", actorRole: "admin" });
@@ -147,7 +147,7 @@ test("only Admin-approved full coverage advances scheduling; partial and rejecte
   record = await submit("valid-replacement.jpg", { totalMonitored: 5, healthyCount: 3, damagedCount: 1, deadCount: 1 });
   const partialId = record.history[0].id;
   await service.reviewMonitoringObservation({ monitoringId: submittedLifecycleId, observationId: partialId,
-    expectedVersion: 0, actorId: "phase2-staff", actorRole: "staff" });
+    expectedVersion: 0, actorId: "phase2-reviewer", actorRole: "staff" });
   record = await service.rejectMonitoringObservation({ monitoringId: submittedLifecycleId, observationId: partialId,
     expectedVersion: 1, reason: "Synthetic rejection", actorId: "phase2-admin", actorRole: "admin" });
   assert.equal(record.nextMonitoringDate, null);
@@ -160,7 +160,7 @@ test("returned observation preserves ID across partial/full corrections and evid
   let record = await submit();
   const observationId = record.history[0].id;
   record = await service.returnMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
-    expectedVersion: 0, reason: "Recheck coverage", actorId: "phase2-staff", actorRole: "staff" });
+    expectedVersion: 0, reason: "Recheck coverage", actorId: "phase2-reviewer", actorRole: "staff" });
   record = await service.resubmitMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
     expectedVersion: 1, actorId: "phase2-staff", actorRole: "staff", retainEvidenceRevision: 1,
     totalMonitored: 5, healthyCount: 3, damagedCount: 1, deadCount: 1,
@@ -169,7 +169,7 @@ test("returned observation preserves ID across partial/full corrections and evid
   assert.equal(record.history[0].isFullCohortAssessment, false);
   assert.equal(record.history[0].revisionHistory.length, 2);
   record = await service.returnMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
-    expectedVersion: 2, reason: "Check full cohort", actorId: "phase2-staff", actorRole: "staff" });
+    expectedVersion: 2, reason: "Check full cohort", actorId: "phase2-reviewer", actorRole: "staff" });
   const replacement = await fileData("valid-replacement.jpg");
   record = await service.resubmitMonitoringObservation({ monitoringId: submittedLifecycleId, observationId,
     expectedVersion: 3, actorId: "phase2-staff", actorRole: "staff", totalMonitored: 10,

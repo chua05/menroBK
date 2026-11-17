@@ -40,3 +40,45 @@ test("Participant historical monitoring read remains available and management re
   assert.equal(authorize(managementRead, "admin").next, true);
   assert.equal(authorize(managementRead, "participant").next, false);
 });
+
+// Direct API requests: route-level role gates for monitoring writes.
+function routeIn(router, path, method, guardIndex) {
+  const layer = router.stack.find(item => item.route?.path === path && item.route.methods[method]);
+  assert.ok(layer, `${method.toUpperCase()} ${path} is registered`);
+  return layer.route.stack[guardIndex].handle;
+}
+function assertOnly(handler, allowed, label) {
+  for (const role of ["participant", "staff", "admin"]) {
+    const result = authorize(handler, role);
+    assert.equal(result.next, allowed.includes(role), `${label} ${allowed.includes(role) ? "allows" : "denies"} ${role}`);
+    if (!allowed.includes(role)) assert.equal(result.response.statusCode, 403);
+  }
+}
+
+test("aggregate monitoring: Staff review/return/edit, Admin final decision, Staff or Admin archive", () => {
+  for (const [path, method, allowed] of [
+    ["/:monitoringId/observations/:observationId/review", "patch", ["staff"]],
+    ["/:monitoringId/observations/:observationId/return", "patch", ["staff"]],
+    ["/:monitoringId/observations/:observationId/approve", "patch", ["admin"]],
+    ["/:monitoringId/observations/:observationId/reject", "patch", ["admin"]],
+    ["/:id", "patch", ["staff"]],
+    ["/:id/archive", "patch", ["staff", "admin"]],
+  ]) assertOnly(route(path, method), allowed, `${method} ${path}`);
+});
+
+test("permanent-sample visits: only Staff create, save, submit or attach evidence; Admin only reviews", () => {
+  const visits = require("../src/routes/sampleMonitoringVisit.routes");
+  for (const [path, method, allowed] of [
+    ["/cohorts/:cohortId/visits", "post", ["staff"]],
+    ["/visits/:visitId", "put", ["staff"]],
+    ["/visits/:visitId/samples/:sampleId/evidence", "put", ["staff"]],
+    ["/visits/:visitId/review", "post", ["admin"]],
+  ]) assertOnly(routeIn(visits, path, method, 1), allowed, `${method} ${path}`);
+});
+
+test("Requester Clarification requests are created only by Staff; Admin keeps read access", () => {
+  const information = require("../src/routes/sampleMonitoringInformation.routes");
+  assertOnly(routeIn(information, "/", "post", 0), ["staff"], "POST /sample-monitoring-information");
+  assertOnly(routeIn(information, "/:requestId/answer", "post", 0), ["participant"], "POST answer");
+  assert.equal(information.stack.some(item => item.route?.path === "/" && item.route.methods.get), true);
+});

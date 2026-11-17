@@ -104,7 +104,7 @@ test("Staff/Admin approval of early monitoring never advances official schedulin
   let lifecycle = await submitEarly();
   const observationId = lifecycle.history[0].id;
   lifecycle = await monitoring.reviewMonitoringObservation({ monitoringId: lifecycleId,
-    observationId, expectedVersion: 0, actorId: "phase2-staff", actorRole: "staff" });
+    observationId, expectedVersion: 0, actorId: "phase2-reviewer", actorRole: "staff" });
   lifecycle = await monitoring.approveMonitoringObservation({ monitoringId: lifecycleId,
     observationId, expectedVersion: 1, actorId: "phase2-admin", actorRole: "admin" });
   assert.equal(lifecycle.history[0].reviewStatus, "Approved");
@@ -118,7 +118,7 @@ test("returned early correction preserves ID and remains allowed after official 
   let lifecycle = await submitEarly();
   const observationId = lifecycle.history[0].id;
   lifecycle = await monitoring.returnMonitoringObservation({ monitoringId: lifecycleId,
-    observationId, expectedVersion: 0, reason: "Recheck the sample", actorId: "phase2-staff", actorRole: "staff" });
+    observationId, expectedVersion: 0, reason: "Recheck the sample", actorId: "phase2-reviewer", actorRole: "staff" });
   await db.collection("monitoringRecords").doc(lifecycleId).update({
     "earlyMonitoring.officialOpeningDate": shiftCalendarDate(today, -1),
   });

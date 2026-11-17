@@ -22,8 +22,8 @@ test.before(async()=>{
  for(const[role,uid]of Object.entries(ids)){const email=uid+"@example.test";await auth.createUser({uid,email,password:"Local-Proposal-Fixture-2026!",emailVerified:true});await db.collection("users").doc(uid).set({role:role==="otherStaff"?"staff":role,status:"active",testFixture:prefix});const r=await fetch(`http://${topology.auth}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=demo`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({email,password:"Local-Proposal-Fixture-2026!",returnSecureToken:true})});assert.equal(r.status,200);tokens[role]=(await r.json()).idToken;}
  await db.collection("sites").doc(siteId).set({siteName:"Proposal fixture site",latitude:12.662301,longitude:123.932983,coverageRadiusMeters:50,status:"Active",testFixture:prefix});
  await db.collection("verifiedPlantingCohorts").doc(cohortId).set({source:{siteId},baselineVersion:1,samplingPlan:{status:"APPROVED",version:1},baseline:{approvalStatus:"APPROVED",sampleUnits:[{permanentId:"TREE-A"},{permanentId:"TREE-B"}]},testFixture:prefix});
- date=dateOnlyInManila();visitId=(await visits.create({cohortId,actorId:ids.staff,visitDate:date,testOnly:true})).id;
- await visits.save({visitId,actorId:ids.staff,expectedVersion:0,assessments:[{sampleId:"TREE-A",condition:"Healthy"},{sampleId:"TREE-B",condition:"Healthy"}],dateMonitored:date,submit:false});
+ date=dateOnlyInManila();visitId=(await visits.create({actorRole:"staff",cohortId,actorId:ids.staff,visitDate:date,testOnly:true})).id;
+ await visits.save({actorRole:"staff",visitId,actorId:ids.staff,expectedVersion:0,assessments:[{sampleId:"TREE-A",condition:"Healthy"},{sampleId:"TREE-B",condition:"Healthy"}],dateMonitored:date,submit:false});
  bytes=await photo();server=app.listen(0,"127.0.0.1");await new Promise(resolve=>server.once("listening",resolve));base=`http://127.0.0.1:${server.address().port}/api/verified-sample-monitoring`;
 });
 test.after(async()=>{

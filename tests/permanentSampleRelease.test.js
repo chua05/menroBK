@@ -88,8 +88,8 @@ test("paused mutations reject before any writes; authorized visit/history reads 
   const page = await visits.list({ actorId: "owner", actorRole: "staff" });
   assert.equal(page.visits[0].actions.saveDraft, false);
   for (const operation of [
-    () => visits.create({ cohortId: "allowed", actorId: "owner", testOnly: true }),
-    () => visits.save({ visitId: "a", actorId: "owner", expectedVersion: 0, assessments: [] }),
+    () => visits.create({actorRole:"staff", cohortId: "allowed", actorId: "owner", testOnly: true }),
+    () => visits.save({actorRole:"staff", visitId: "a", actorId: "owner", expectedVersion: 0, assessments: [] }),
     () => visits.review({ visitId: "a", actorId: "admin", expectedVersion: 0, approve: true }),
     () => cohorts.saveSamplingPlan({ cohortId: "allowed", actorId: "owner" }),
     () => cohorts.registerBaselineWithEvidence({ cohortId: "allowed", actorId: "owner" }),

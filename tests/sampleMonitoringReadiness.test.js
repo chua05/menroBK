@@ -14,7 +14,7 @@ function setup(status = "DRAFT") {
   require.cache[require.resolve("../src/config/verifiedPlantingCohort")] = { exports: { resolveVerifiedPlantingCohortConfig: () => ({ enabled: true }) } };
   delete require.cache[require.resolve("../src/services/sampleMonitoringVisit.service")];
   return { ...f, visit, cohort, service: require("../src/services/sampleMonitoringVisit.service"),
-    save: { visitId: "visit", actorId: "owner", expectedVersion: 0, assessments: [{ sampleId: "TREE-001", condition: "Healthy" }] } };
+    save: { visitId: "visit", actorId: "owner", actorRole: "staff", expectedVersion: 0, assessments: [{ sampleId: "TREE-001", condition: "Healthy" }] } };
 }
 test("measurement parsing preserves empty/null and nonnegative finite values without inventing biological limits", () => {
   for (const value of [undefined, null, "", "  "]) assert.equal(validation.measurement(value), null);

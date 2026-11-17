@@ -18,6 +18,12 @@ const usesRejectedProvisionalPolicy = cohort => {
   return !config.provisionalSamplingAllowed && (!cohort?.samplingPolicySnapshot || cohort?.samplingPlan?.provisionalPolicy === config.provisionalSamplingPolicy);
 };
 const INVESTIGATION_OUTCOMES = new Set(["Not Located After Rechecking"]);
+// Defense in depth behind the Staff-only routes: every caller must state the actor's
+// role, and any role other than Staff (including Admin, or a missing role) can never
+// create, edit or submit a monitoring visit.
+const assertStaffWriter = actorRole => {
+  if (actorRole !== "staff") throw Object.assign(new Error("Only MENRO Staff can create, edit or submit monitoring visits."), { status: 403, code: "MONITORING_ACTION_FORBIDDEN" });
+};
 const disabled = () => Object.assign(new Error("Verified planting cohort workflow is disabled."), {
   status: 409,
   code: "COHORT_WORKFLOW_DISABLED"
@@ -78,9 +84,11 @@ async function create({
   cohortId,
   actorId,
   visitDate,
+  actorRole,
   testOnly = false
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  assertStaffWriter(actorRole);
   release.writeScope(actorId, cohortId);
   if (!testOnly) throw conflict("Future visit scheduling requires MENRO policy approval.");
   const snap = await db.collection("verifiedPlantingCohorts").doc(cohortId).get(),
@@ -193,9 +201,11 @@ async function save({
   assessments,
   submit = false,
   visitRemarks,
-  dateMonitored
+  dateMonitored,
+  actorRole
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
+  assertStaffWriter(actorRole);
   validation.version(expectedVersion);
   validation.boolean(submit, "submit");
   if (visitRemarks !== undefined && (typeof visitRemarks !== "string" || visitRemarks.trim().length > 1000)) throw validation.invalid("Visit remarks must be at most 1000 characters.");
