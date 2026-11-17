@@ -167,7 +167,7 @@ async function get(visitId, { actorId, actorRole } = {}) {
     visitContext: await require("./sampleMonitoringViewContext").monitoringContext(db, value),
   };
 }
-async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
+async function list({ actorId, actorRole, status, limit = 25, cursor = "", labels = false }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   if (!['staff', 'admin'].includes(actorRole)) throw Object.assign(new Error('Monitoring visits are restricted to MENRO Staff and Admin.'), { status: 403 });
   const policy = release.assertUser(actorId);
@@ -184,26 +184,39 @@ async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
   }
   const snapshot = await query.get();
   const pageDocs = snapshot.docs.slice(0, size);
-  // Admin Monitoring Records rows only, and only for submitted (non-draft) visits: resolve each distinct
-  // Staff submitter's display name and each distinct cohort's report number/site once per page.
-  // Only display names are returned — never uids, emails or other profile fields.
+  // Admin Monitoring Records rows only (requested with labels=1), and only for submitted (non-draft) visits:
+  // resolve each distinct Staff submitter's display name and each distinct cohort/site pair's report number
+  // and site once per page, with the same site rule as the visit form context. Only display names are
+  // returned — never uids, emails or other profile fields. A failed lookup is logged and leaves that label
+  // null (labelsIncomplete), never a guessed name or site.
+  const viewContext = require('./sampleMonitoringViewContext');
   const submitterNames = new Map(), cohortLabels = new Map();
-  const adminRows = actorRole === 'admin' ? pageDocs.filter(doc => doc.data().status !== 'DRAFT') : [];
-  const distinct = field => [...new Set(adminRows.map(doc => doc.data()[field]).filter(id => typeof id === 'string' && id))];
+  let labelsIncomplete = false;
+  const labelRows = actorRole === 'admin' && labels ? pageDocs.filter(doc => doc.data().status !== 'DRAFT') : [];
+  const labelKey = value => `${value.cohortId}|${value.siteId}`;
   const readDoc = async (collection, id) => {
     if (typeof id !== 'string' || !id) return {};
-    try { const snap = await db.collection(collection).doc(id).get(); return snap.exists ? snap.data() || {} : {}; } catch { return {}; }
+    try { const snap = await db.collection(collection).doc(id).get(); return snap.exists ? snap.data() || {} : {}; }
+    catch (error) {
+      labelsIncomplete = true;
+      console.warn(`[sample-monitoring] Admin list label lookup failed (${collection}): ${error.code || error.message}`);
+      return null;
+    }
   };
+  const submitters = [...new Set(labelRows.map(doc => doc.data().createdBy).filter(id => typeof id === 'string' && id))];
+  const pairs = [...new Map(labelRows.map(doc => doc.data()).filter(value => typeof value.cohortId === 'string' && value.cohortId && typeof value.siteId === 'string' && value.siteId)
+    .map(value => [labelKey(value), value])).values()];
   await Promise.all([
-    ...distinct('createdBy').map(async id => {
+    ...submitters.map(async id => {
       const user = await readDoc('users', id);
-      submitterNames.set(id, String(user.fullName || user.name || '').trim() || 'MENRO Staff');
+      submitterNames.set(id, user ? String(user.fullName || user.name || '').trim() || 'MENRO Staff' : null);
     }),
-    ...distinct('cohortId').map(async id => {
-      const source = (await readDoc('verifiedPlantingCohorts', id)).source || {};
-      const [site, report] = await Promise.all([readDoc('sites', source.siteId), readDoc('plantingReports', source.plantingReportId)]);
-      cohortLabels.set(id, { reportNumber: report.reportNumber || null, siteName: site.siteName || report.siteName || null,
-        barangay: site.barangay || report.barangay || null });
+    ...pairs.map(async value => {
+      const cohort = await readDoc('verifiedPlantingCohorts', value.cohortId);
+      if (!cohort || !viewContext.cohortMatchesVisit(cohort, value)) return;
+      const [site, report] = await Promise.all([readDoc('sites', value.siteId), readDoc('plantingReports', (cohort.source || {}).plantingReportId)]);
+      if (!site || !report) return;
+      cohortLabels.set(labelKey(value), viewContext.contextLabels(site, report));
     }),
   ]);
   const visits = pageDocs.map(doc => {
@@ -213,12 +226,13 @@ async function list({ actorId, actorRole, status, limit = 25, cursor = "" }) {
     return { id: doc.id, cohortId: value.cohortId, siteId: value.siteId, visitDate: value.visitDate, status: value.status,
       version: value.version, samplingPlanVersion: value.samplingPlanVersion, baselineVersion: value.baselineVersion,
       dateMonitored: typeof value.dateMonitored === 'string' ? value.dateMonitored : null,
-      ...(actorRole === 'admin' && value.status !== 'DRAFT' ? { submittedByName: submitterNames.get(value.createdBy) || 'MENRO Staff',
-        ...(cohortLabels.get(value.cohortId) || { reportNumber: null, siteName: null, barangay: null }) } : {}),
+      ...(labelRows.includes(doc) ? { submittedByName: submitterNames.has(value.createdBy) ? submitterNames.get(value.createdBy) : 'MENRO Staff',
+        ...(cohortLabels.get(labelKey(value)) || { reportNumber: null, siteName: null, barangay: null }) } : {}),
       progress: { completed, total: assessments.length, rechecking: assessments.filter(item => item.recheckRequired || item.recheckQueued).length },
       actions: { view: true, saveDraft: editable, submit: editable, review: !policy.paused && actorRole === 'admin' && value.status === 'PENDING_ADMIN_APPROVAL' } };
   });
-  return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null, writesPaused: Boolean(policy.paused) };
+  return { visits, nextCursor: snapshot.docs.length > size ? snapshot.docs[size - 1].id : null, writesPaused: Boolean(policy.paused),
+    ...(labelRows.length ? { labelsIncomplete } : {}) };
 }
 async function save({
   visitId,

@@ -138,16 +138,41 @@ test("Admin list adds only display labels to submitted visits; drafts and Staff 
  table("sampleMonitoringVisits").set("returned",{createdBy:"missing-user",cohortId:"gone",siteId:"site",visitDate:"2030-01-04",status:"RETURNED",version:3,sampleAssessments:[]});
  table("sampleMonitoringVisits").set("draft",{createdBy:"draft-user",cohortId:"c",siteId:"site",visitDate:"2030-01-03",status:"DRAFT",version:1,sampleAssessments:[]});
  const reads=[];const original=db.collection;db.collection=c=>{const q=original(c);const doc=q.doc;q.doc=id=>{reads.push(c+"/"+id);return doc(id)};return q};
- let admin;try{admin=await s.list({actorId:"admin",actorRole:"admin",limit:50});}finally{db.collection=original;}
+ let admin,plain;try{admin=await s.list({actorId:"admin",actorRole:"admin",limit:50,labels:true});}finally{db.collection=original;}
+ // Without labels=1 (e.g. the visit picker) the Admin list makes no label lookups and returns no labels.
+ const before=reads.length;db.collection=c=>{const q=original(c);const doc=q.doc;q.doc=id=>{reads.push(c+"/"+id);return doc(id)};return q};
+ try{plain=await s.list({actorId:"admin",actorRole:"admin",limit:50});}finally{db.collection=original;}
+ assert.equal(reads.slice(before).some(r=>/^(users|sites|plantingReports|verifiedPlantingCohorts)\//.test(r)),false);
+ assert.equal(plain.visits.some(v=>"submittedByName" in v||"siteName" in v),false);assert.equal("labelsIncomplete" in plain,false);
  const row=id=>admin.visits.find(v=>v.id===id);
  assert.deepEqual([row("pending").submittedByName,row("pending").reportNumber,row("pending").siteName,row("pending").barangay,row("pending").dateMonitored],["Ana Staff","RPT-2026-001","Bical Site","Bical","2026-11-02"]);
  assert.equal(row("pending").actions.review,true);assert.equal(row("pending").actions.saveDraft,false);assert.equal(row("pending").actions.submit,false);
  assert.deepEqual([row("returned").submittedByName,row("returned").reportNumber,row("returned").siteName,row("returned").dateMonitored],["MENRO Staff",null,null,null]);
  assert.equal("submittedByName" in row("draft"),false);assert.equal(reads.includes("users/draft-user"),false);
  assert.equal(reads.filter(r=>r==="users/staff-a").length,1);assert.equal(reads.filter(r=>r==="verifiedPlantingCohorts/c").length,1);
- assert.equal(admin.writesPaused,false);
+ assert.equal(admin.writesPaused,false);assert.equal(admin.labelsIncomplete,false);
  assert.doesNotMatch(JSON.stringify(admin),/ana@private.test|site@private.test|0999|staff-a|missing-user|draft-user|createdBy/);
  const staff=await s.list({actorId:"staff-a",actorRole:"staff",limit:50});
  assert.deepEqual(staff.visits.map(v=>v.id),["pending"]);assert.equal("submittedByName" in staff.visits[0],false);assert.equal("siteName" in staff.visits[0],false);assert.equal(staff.visits[0].dateMonitored,"2026-11-02");
  await assert.rejects(()=>s.list({actorId:"person",actorRole:"participant"}),e=>e.status===403);
+});
+test("Admin list labels follow the visit form's site rule and never guess after a failed lookup",async()=>{
+ seed();table("verifiedPlantingCohorts").get("c").source.plantingReportId="report";
+ table("sites").set("site",{siteName:"Bical Site",barangay:"Bical"});table("sites").set("other-site",{siteName:"Other Site",barangay:"Other"});
+ table("plantingReports").set("report",{reportNumber:"RPT-2026-001"});
+ table("users").set("staff-a",{fullName:"Ana Staff"});table("users").set("staff-b",{fullName:"Ben Staff"});
+ // Visit site differs from the cohort's source site: the form shows no context, so the row shows no labels.
+ table("sampleMonitoringVisits").set("mismatch",{createdBy:"staff-a",cohortId:"c",siteId:"other-site",visitDate:"2030-01-05",status:"PENDING_ADMIN_APPROVAL",version:2,sampleAssessments:[]});
+ table("sampleMonitoringVisits").set("ok",{createdBy:"staff-b",cohortId:"c",siteId:"site",visitDate:"2030-01-04",status:"APPROVED",version:3,sampleAssessments:[]});
+ const mismatchContext=await require("../src/services/sampleMonitoringViewContext").monitoringContext(db,table("sampleMonitoringVisits").get("mismatch"));
+ assert.equal(mismatchContext,null);
+ const warnings=[],warn=console.warn;console.warn=message=>warnings.push(String(message));
+ const original=db.collection;db.collection=c=>{const q=original(c);if(c!=="users")return q;const doc=q.doc;q.doc=id=>{const ref=doc(id);return id==="staff-b"?{...ref,get:async()=>{throw Object.assign(new Error("denied"),{code:"permission-denied"});}}:ref;};return q;};
+ let admin;try{admin=await s.list({actorId:"admin",actorRole:"admin",limit:50,labels:true});}finally{db.collection=original;console.warn=warn;}
+ const row=id=>admin.visits.find(v=>v.id===id);
+ assert.deepEqual([row("mismatch").submittedByName,row("mismatch").reportNumber,row("mismatch").siteName,row("mismatch").barangay],["Ana Staff",null,null,null]);
+ assert.deepEqual([row("ok").submittedByName,row("ok").reportNumber,row("ok").siteName],[null,"RPT-2026-001","Bical Site"]);
+ assert.equal(admin.labelsIncomplete,true);
+ assert.deepEqual(warnings,["[sample-monitoring] Admin list label lookup failed (users): permission-denied"]);
+ assert.doesNotMatch(warnings.join(" "),/staff-b|Ben/);
 });

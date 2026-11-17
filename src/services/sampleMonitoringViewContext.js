@@ -1,10 +1,15 @@
 // Authorized visit display context only. No scheduling or sampling decisions.
+// A visit belongs to its cohort's source site only; any mismatch yields no context or labels.
+const cohortMatchesVisit = (cohort, visit) => Boolean(cohort && visit?.siteId && (cohort.source || {}).siteId === visit.siteId);
+// Shared report/site display labels (Admin Monitoring Records rows and the visit form context).
+const contextLabels = (site = {}, report = {}) => ({ reportNumber: report.reportNumber || null,
+  siteName: site.siteName || report.siteName || null, barangay: site.barangay || report.barangay || null });
 async function monitoringContext(db, visit) {
   if (!visit.cohortId || !visit.siteId) return null;
   const cohortDoc = await db.collection("verifiedPlantingCohorts").doc(visit.cohortId).get();
   if (!cohortDoc.exists) return null;
   const cohort = cohortDoc.data(), source = cohort.source || {};
-  if (source.siteId !== visit.siteId) return null;
+  if (!cohortMatchesVisit(cohort, visit)) return null;
   const [siteDoc, reportDoc, priorDoc] = await Promise.all([
     db.collection("sites").doc(visit.siteId).get(),
     source.plantingReportId ? db.collection("plantingReports").doc(source.plantingReportId).get() : null,
@@ -17,8 +22,7 @@ async function monitoringContext(db, visit) {
   const units = Array.isArray(baseline.sampleUnits) ? baseline.sampleUnits : null;
   const selectedSamples = Array.isArray(plan.selectedSamples) ? plan.selectedSamples : [];
   return {
-    plantingReportId: source.plantingReportId || null, reportNumber: report.reportNumber || null,
-    siteName: site.siteName || report.siteName || null, barangay: site.barangay || report.barangay || null,
+    plantingReportId: source.plantingReportId || null, ...contextLabels(site, report),
     plantingDate: report.plantingDate || report.eventDate || source.plantingDate || null,
     reportStatus: report.reportingProgress || report.verificationStatus || null,
     verifiedPlantedQuantity: cohort.verifiedPlantedQuantity ?? null,
@@ -50,4 +54,4 @@ async function monitoringContext(db, visit) {
     }),
   };
 }
-module.exports = { monitoringContext };
+module.exports = { monitoringContext, contextLabels, cohortMatchesVisit };
