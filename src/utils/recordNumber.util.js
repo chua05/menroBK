@@ -23,7 +23,10 @@ function formatRecordNumber(prefix, year, sequence) {
   return `${normalizedPrefix}-${normalizedYear}-${String(normalizedSequence).padStart(3, "0")}`;
 }
 
-async function nextRecordNumber(transaction, { prefix, counterKey, date = new Date(), timestamp }) {
+// Read phase only: reserves the next year-based sequence inside a transaction without writing, so callers
+// can finish every transaction read before any write. The counter read makes Firestore retry the whole
+// transaction if another transaction takes the same number first, so two records never share a number.
+async function reserveRecordNumber(transaction, { prefix, counterKey, date = new Date() }) {
   const year = yearInManila(date);
   const counterRef = db.collection(COUNTERS_COLLECTION).doc(`${counterKey}_${year}`);
   const counterDoc = await transaction.get(counterRef);
@@ -32,22 +35,31 @@ async function nextRecordNumber(transaction, { prefix, counterKey, date = new Da
   if (!Number.isSafeInteger(nextSequence) || nextSequence <= 0) {
     throw new Error("Unable to generate the next record number.");
   }
+  return { counterRef, exists: counterDoc.exists, year, nextSequence, number: formatRecordNumber(prefix, year, nextSequence), date };
+}
 
+// Write phase: records the reserved sequence on the counter.
+function commitRecordNumber(transaction, reservation, timestamp) {
   const counterData = {
-    year,
-    lastNumber: nextSequence,
-    updatedAt: timestamp || date,
+    year: reservation.year,
+    lastNumber: reservation.nextSequence,
+    updatedAt: timestamp || reservation.date,
   };
+  if (reservation.exists) transaction.update(reservation.counterRef, counterData);
+  else transaction.create(reservation.counterRef, counterData);
+  return reservation.number;
+}
 
-  if (counterDoc.exists) transaction.update(counterRef, counterData);
-  else transaction.create(counterRef, counterData);
-
-  return formatRecordNumber(prefix, year, nextSequence);
+async function nextRecordNumber(transaction, { prefix, counterKey, date = new Date(), timestamp }) {
+  const reservation = await reserveRecordNumber(transaction, { prefix, counterKey, date });
+  return commitRecordNumber(transaction, reservation, timestamp);
 }
 
 module.exports = {
+  commitRecordNumber,
   formatRecordNumber,
   nextRecordNumber,
+  reserveRecordNumber,
   yearInManila,
 };
 
