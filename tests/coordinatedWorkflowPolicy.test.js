@@ -59,13 +59,42 @@ test("future versions do not become effective before their effective date", asyn
 async function snapshot(request, decision) {
   return memory.db.runTransaction(transaction => policy.approvalSnapshot(transaction, { ...request, purposePolicyManaged: true }, admin.uid, decision));
 }
-test("organization precedence and Other require a final explicit Admin decision, not just a Staff proposal", async () => {
+test("unresolved Other/organization policies no longer block approval: recorded as PENDING_MENRO_POLICY, never a Staff proposal", async () => {
   const other = { purpose: "Other", workflow: { sector: "Resident / Individual", purpose: "Other" }, staffPolicyProposal: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Staff recommendation" } };
-  await assert.rejects(snapshot(other), error => error.status === 409);
+  const pending = await snapshot(other);
+  assert.equal(pending.policyStatus, "PENDING_MENRO_POLICY"); assert.deepEqual(pending.pendingReasons, ["OTHER_PURPOSE", "CONDITIONAL_THRESHOLD_PENDING"]);
+  assert.equal(pending.definition.reporting, "PENDING_MENRO_POLICY"); assert.equal(pending.definition.monitoring, "PENDING_MENRO_POLICY");
+  assert.equal(pending.override, null); assert.equal(pending.staffProposal.reason, "Staff recommendation", "the Staff proposal is kept for reference only");
+  assert.equal(pending.source, "ADMIN_APPROVED_REQUEST_POLICY_PENDING"); assert.equal(pending.approvedBy, admin.uid);
   const approved = await snapshot(other, { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Admin confirms documented purpose", expectedPolicyVersion: 0 });
   assert.equal(approved.approvedBy, admin.uid); assert.equal(approved.staffProposal.reason, "Staff recommendation");
+  assert.equal(approved.policyStatus, "RESOLVED"); assert.equal(approved.definition.reporting, "REQUIRED"); assert.equal(approved.definition.monitoring, "PERMANENT_SAMPLE");
+  for (const sector of ["Government Agency", "Barangay Official"]) {
+    const organization = await snapshot({ purpose: "Reforestation / Mangrove / Riverbank / Slope", workflow: { sector } });
+    assert.equal(organization.requesterType, "organization"); assert.equal(organization.policyStatus, "PENDING_MENRO_POLICY");
+    assert.deepEqual(organization.pendingReasons, ["ORGANIZATION_POLICY_PENDING"]);
+    assert.equal(organization.definition.reporting, "PENDING_MENRO_POLICY", "the individual REQUIRED/PERMANENT_SAMPLE template is not applied to an organization");
+    assert.equal(organization.definition.monitoring, "PENDING_MENRO_POLICY");
+  }
+  const conditional = await snapshot({ purpose: "Agroforestry / Fruit Tree", workflow: { sector: "Resident / Individual" } });
+  assert.deepEqual(conditional.pendingReasons, ["CONDITIONAL_THRESHOLD_PENDING"]);
+});
+test("explicit Admin decisions are still validated, and policy version conflicts still fail", async () => {
   const organization = { purpose: "Household / Backyard", workflow: { sector: "Government Agency" } };
-  await assert.rejects(snapshot(organization), error => error.status === 409);
+  for (const invalid of [{}, { reporting: "REQUIRED", monitoring: "STAFF_SPOT_CHECK" }, { reporting: "CONDITIONAL", monitoring: "NONE", reason: "x" },
+    { reporting: "PENDING_MENRO_POLICY", monitoring: "NONE", reason: "x" }, { reporting: "REQUIRED", monitoring: "PENDING_MENRO_POLICY", reason: "x" }, { reporting: "REQUIRED", monitoring: "NONE", reason: " " }])
+    await assert.rejects(snapshot(organization, invalid), error => error.status === 400 && Boolean(error.fieldErrors?.policyReason));
+  await assert.rejects(snapshot(organization, { reporting: "REQUIRED", monitoring: "NONE", reason: "Admin decision", expectedPolicyVersion: 7 }), error => error.status === 409);
+  const decided = await snapshot(organization, { reporting: "OPTIONAL", monitoring: "STAFF_SPOT_CHECK", reason: "Admin decision", expectedPolicyVersion: 0 });
+  assert.equal(decided.policyStatus, "RESOLVED"); assert.deepEqual([decided.definition.reporting, decided.definition.monitoring, decided.override.reason], ["OPTIONAL", "STAFF_SPOT_CHECK", "Admin decision"]);
+  const individual = await snapshot({ purpose: "Household / Backyard", workflow: { sector: "Resident / Individual" } });
+  assert.equal(individual.policyStatus, "RESOLVED"); assert.equal(individual.definition.reporting, "NOT_REQUIRED"); assert.equal(individual.pendingReasons, undefined);
+});
+test("a pending policy is never released as a reporting exemption, requirement or monitoring authorization", () => {
+  const pending = { policyStatus: "PENDING_MENRO_POLICY", definition: { reporting: "PENDING_MENRO_POLICY", monitoring: "PENDING_MENRO_POLICY", quantityThreshold: null } };
+  const released = policy.releasePolicy(pending, 40);
+  assert.equal(released.reporting, "PENDING_POLICY"); assert.equal(released.reportingStatus, "Reporting Policy Pending");
+  assert.equal(released.reportingOverdueApplicable, false); assert.equal(released.monitoring, "PENDING_MENRO_POLICY"); assert.equal(released.requesterMonitoringTasks, false);
 });
 test("approved snapshots remain unchanged after Admin changes the current configuration", async () => {
   const approved = await snapshot({ purpose: "Household / Backyard", workflow: { sector: "Resident / Individual" } });

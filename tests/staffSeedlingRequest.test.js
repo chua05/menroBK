@@ -192,7 +192,7 @@ test("Staff requester proposes late-release rescheduling; another officer decide
   assert.equal(memory.records("events").get(approved.data.eventId).sourceRequestId, request.id);
 });
 
-test("Other purpose requires a reasoned Staff proposal and explicit Admin decision; approved policy is snapshotted", async () => {
+async function reviewedOtherRequest() {
   const body = payload(); body.purpose = "Community special planting";
   body.workflow = { ...body.workflow, requestContractVersion: 2, purpose: "Other", purposeOther: body.purpose };
   const request = await submit("staff", body);
@@ -200,12 +200,26 @@ test("Other purpose requires a reasoned Staff proposal and explicit Admin decisi
     policyProposal: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Documented reforestation activity" } };
   const reviewed = await http(`/seedling-requests/${request.id}/review`, "officer", "PATCH", review); assert.equal(reviewed.status, 200, JSON.stringify(reviewed));
   assert.equal(reviewed.data.staffPolicyProposal.actorId, identities.officer.uid);
+  return request;
+}
+test("Other purpose without an Admin decision is approved with its policy recorded as pending MENRO policy", async () => {
+  const request = await reviewedOtherRequest();
   assert.equal((await http(`/seedling-requests/${request.id}/approve`, "staff", "PATCH", { expectedVersion: 1 })).status, 403);
-  assert.equal((await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1 })).status, 409);
+  const result = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1 });
+  assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.status, "Approved");
+  const snapshot = result.data.approvedPurposePolicy;
+  assert.equal(snapshot.approvedBy, identities.admin.uid); assert.equal(snapshot.policyStatus, "PENDING_MENRO_POLICY");
+  assert.equal(snapshot.definition.reporting, "PENDING_MENRO_POLICY"); assert.equal(snapshot.definition.monitoring, "PENDING_MENRO_POLICY");
+  assert.equal(snapshot.override, null); assert.equal(snapshot.staffProposal.reporting, "REQUIRED", "the Staff proposal is kept but not adopted");
+});
+test("Other purpose with an explicit Admin decision is validated and snapshotted as resolved", async () => {
+  const request = await reviewedOtherRequest();
+  const invalid = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1, policyDecision: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE" } });
+  assert.equal(invalid.status, 400, JSON.stringify(invalid));
   const result = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 1,
     policyDecision: { reporting: "REQUIRED", monitoring: "PERMANENT_SAMPLE", reason: "Admin confirms the applicable reporting and sampling requirement", expectedPolicyVersion: 0 } });
   assert.equal(result.status, 200, JSON.stringify(result)); assert.equal(result.data.approvedPurposePolicy.approvedBy, identities.admin.uid);
-  assert.equal(result.data.approvedPurposePolicy.definition.reporting, "REQUIRED");
+  assert.equal(result.data.approvedPurposePolicy.definition.reporting, "REQUIRED"); assert.equal(result.data.approvedPurposePolicy.policyStatus, "RESOLVED");
 });
 
 test("walk-in multipart encoding separates citizen and Staff, links a private signed acknowledgement and preserves release approval", async t => {
