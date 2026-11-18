@@ -35,6 +35,7 @@ exports.create = (req, res) => gate(res) || send(res, 201, () => s.create({
 }));
 exports.list = (req, res) => gate(res) || send(res, 200, () => s.list({
   actorId: req.user.uid, actorRole: req.user.role, status: req.query.status, limit: req.query.limit, cursor: req.query.cursor,
+  labels: req.query.labels === "1",
 }));
 exports.get = (req, res) => gate(res) || send(res, 200, () => s.get(req.params.visitId, {
   actorId: req.user.uid, actorRole: req.user.role,

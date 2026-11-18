@@ -62,3 +62,18 @@ test("real participant/nonowner/unauthenticated access is denied and Admin detai
  assert.equal((await api("/sample-monitoring-information?visitId="+encodeURIComponent(visitId),"admin")).status,200);
  const saved=(await db.collection("sampleMonitoringVisits").doc(visitId).get()).data();assert.equal(saved.version,2);assert.equal(saved.visitDate,"2026-11-01");
 });
+test("real Admin visit list omits draft labels, then shows only display labels once the visit awaits review",async()=>{
+ const adminRow=async()=>{const list=await api("/verified-sample-monitoring/visits?labels=1","admin");assert.equal(list.status,200);return list.body.data.visits.find(v=>v.id===visitId);};
+ const draft=await adminRow();assert.equal(draft.status,"DRAFT");assert.equal("submittedByName" in draft,false);assert.equal("siteName" in draft,false);
+ await db.collection("users").doc(ids.staff).set({fullName:"Emulator Staff",email:"private@example.test"},{merge:true});
+ await db.collection("sampleMonitoringVisits").doc(visitId).update({status:"PENDING_ADMIN_APPROVAL"});
+ const pending=await adminRow();
+ assert.deepEqual([pending.submittedByName,pending.reportNumber,pending.siteName,pending.dateMonitored,pending.actions.review,pending.actions.saveDraft],["Emulator Staff","PR-FORM-FIXTURE","Authorized emulator site","2026-11-01",true,false]);
+ const labelled=await api("/verified-sample-monitoring/visits?labels=1","admin");assert.equal(labelled.body.data.labelsIncomplete,false);
+ const raw=JSON.stringify(labelled);assert.doesNotMatch(raw,new RegExp(`private@example\.test|${ids.staff}|createdBy`));
+ // Without labels=1 (the visit picker) the Admin list carries no labels.
+ const plain=(await api("/verified-sample-monitoring/visits","admin")).body.data.visits.find(v=>v.id===visitId);assert.equal("submittedByName" in plain,false);assert.equal("siteName" in plain,false);
+ // labels=1 never widens access: Staff still get no labels and Participants are still refused.
+ const staff=(await api("/verified-sample-monitoring/visits?labels=1","staff")).body.data.visits.find(v=>v.id===visitId);assert.equal("submittedByName" in staff,false);assert.equal("siteName" in staff,false);
+ assert.equal((await api("/verified-sample-monitoring/visits?labels=1","participant")).status,403);
+});
