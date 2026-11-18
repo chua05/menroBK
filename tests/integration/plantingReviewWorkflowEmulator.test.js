@@ -21,8 +21,9 @@ const staffReturn = (id, reason) => reports.returnPlantingReport(id, STAFF.uid, 
 const approve = (id) => reports.approvePlantingReport(id, ADMIN.uid, "Confirmed", ADMIN.name, ADMIN.role);
 const reject = (id, reason) => reports.rejectPlantingReport(id, ADMIN.uid, reason, ADMIN.name, ADMIN.role);
 
-async function seedParticipantReport() {
-  const eventId = `${PREFIX}-event`, reportId = `event_${eventId}`;
+async function seedParticipantReport(suffix = "") {
+  const scope = `${PREFIX}${suffix}`;
+  const eventId = `${scope}-event`, reportId = `event_${eventId}`;
   created.events.push(eventId); created.reports.push(reportId);
   await db.collection("events").doc(eventId).set({ seedlingTotalQuantity: 30, recordedSeedlingQuantity: 30, remainingSeedlingQuantity: 0,
     recordedSeedlingsByInventory: { narra: 30 }, seedlingItems: [{ inventoryId: "narra", quantity: 30, species: "Narra" }] });
@@ -31,7 +32,7 @@ async function seedParticipantReport() {
     acceptedQuantity: 0, pendingReviewQuantity: 30, rejectedQuantity: 0, remainingAvailableQuantity: 0,
     reportingProgress: "Fully Reported — Awaiting Review", verificationStatus: "Fully Reported — Awaiting Review", createdAt: new Date() });
   for (const suffix of ["approve", "return", "reject"]) {
-    const id = `${PREFIX}-${suffix}`; created.contributions.push(id);
+    const id = `${scope}-${suffix}`; created.contributions.push(id);
     // Legacy-shaped pending submission (no workflowStatus field) must enter the new Staff stage.
     await db.collection("plantingContributions").doc(id).set({ reportId, eventId, participantId: PARTICIPANT, contributorId: PARTICIPANT,
       inventoryId: "narra", quantity: 10, verificationStatus: "Verified", staffReviewStatus: "Pending Review", staffApprovalRequired: true,
@@ -58,6 +59,7 @@ test.after(async () => {
   await deleteWhere("verificationLogs", "plantingReportId", reportIds);
   await deleteWhere("plantingContributions", "reportId", reportIds);
   await deleteWhere("officialPlantingOperations", "reportId", reportIds);
+  await deleteWhere("monitoringRecords", "plantingReportId", reportIds);
   await deleteWhere("verifiedPlantingCohorts", "source.plantingReportId", reportIds);
   const remove = (collection, ids) => Promise.all([...new Set(ids)].map((id) => db.collection(collection).doc(id).delete()));
   await remove("plantingReports", reportIds);
@@ -135,8 +137,10 @@ test("participant report: Staff forward then Admin approval completes; return an
   assert.deepEqual(actionsFor(rejectId), ["Staff Review — Forwarded to Admin", "Admin Rejection"]);
 });
 
-test("official Staff report: direct to Admin; rejection is final; a return is corrected and approved", async () => {
-  const requestId = `${PREFIX}-official-request`, eventId = `${PREFIX}-official-event`, reportId = `event_${eventId}`;
+for (const policyShape of ["legacy", "nested"]) test(`official Staff report (${policyShape} policy): direct to Admin; return/correction and automatic lifecycle registration`, async () => {
+  const scope = `${PREFIX}-official-${policyShape}`;
+  const requestId = `${scope}-request`, eventId = `${scope}-event`, reportId = `event_${eventId}`;
+  const policy = policyShape === "nested" ? { definition: { monitoring: "STAFF_SPOT_CHECK", reporting: "REQUIRED" }, policyVersion: 0 } : null;
   created.requests.push(requestId); created.events.push(eventId); created.reports.push(reportId);
   await db.collection("seedlingRequests").doc(requestId).set({ status: "Released", eventId, participantId: PARTICIPANT, participantName: "Emulator requester",
     requestType: "individual", workflow: { sector: "Resident / Individual" } });
@@ -144,7 +148,8 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   await db.collection("events").doc(eventId).set({ sourceRequestId: requestId, allocationReleasedAt: "2026-01-01", date: "2026-01-01", startTime: "08:00",
     plantingSiteId: `${PREFIX}-site`, seedlingItems: [{ inventoryId: "narra", species: "Narra", quantity: 10 }], seedlingTotalQuantity: 10 });
   await db.collection("plantingReports").doc(reportId).set({ reportType: "parent", requestId, eventId, participantId: PARTICIPANT, quantityReleased: 10,
-    quantityPlanted: 0, acceptedQuantity: 0, activeSubmittedQuantity: 0, pendingReviewQuantity: 0, reportingProgress: "Awaiting Submission", plantingDate: "2026-01-01" });
+    quantityPlanted: 0, acceptedQuantity: 0, activeSubmittedQuantity: 0, pendingReviewQuantity: 0, reportingProgress: "Awaiting Submission", plantingDate: "2026-01-01",
+    ...(policy ? { reportingPolicy: policy } : {}) });
   const staff = { uid: STAFF.uid, fullName: STAFF.name, role: "staff" }, admin = { uid: ADMIN.uid, fullName: ADMIN.name, role: "admin" };
   const submit = (version, extra = {}) => official.submitOfficialReport(staff, { requestId, confirmationBasis: "release-based",
     items: [{ inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Seedlings damaged in transport" }], remarks: "Emulator official report", clientSubmissionId: randomUUID(), expectedVersion: version, ...extra });
@@ -180,8 +185,8 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   await assert.rejects(reports.approvePlantingReport(correctedId, ADMIN.uid, "", ADMIN.name, ADMIN.role), (error) => error.status === 409, "verification cannot be repeated");
   if (process.env.VERIFIED_PLANTING_COHORT_ENABLED === "true") {
     const cohorts = await cohortsFor();
-    assert.equal(cohorts.length, 1, "Admin verification records exactly one verified cohort; a repeat never duplicates it");
-    assert.equal((await db.collection("sampleMonitoringVisits").where("cohortId", "==", cohorts[0].id).get()).size, 0, "verification never creates a monitoring visit");
+    assert.equal(cohorts.length, policy ? 0 : 1, "a Staff spot-check policy never becomes a permanent-sample cohort");
+    if (cohorts.length) assert.equal((await db.collection("sampleMonitoringVisits").where("cohortId", "==", cohorts[0].id).get()).size, 0, "verification never creates a monitoring visit");
   }
   assert.equal(approved.acceptedQuantity, 8);
   // Admin verification registers exactly one monitoring lifecycle with a sequential MON number and no observations.
@@ -189,6 +194,35 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   assert.equal(lifecycles.length, 1, "one lifecycle per verified report; a repeated verification never duplicates it");
   const lifecycle = lifecycles[0].data();
   assert.match(lifecycle.monitoringNumber, /^MON-\d{4}-\d{3,}$/);
-  assert.deepEqual([lifecycle.history, lifecycle.registrationSource, lifecycle.monitoringMethod, lifecycle.startMonitoringDate], [[], "PLANTING_REPORT_VERIFICATION", "LEGACY", "2026-01-15"]);
+  assert.deepEqual([lifecycle.history, lifecycle.registrationSource, lifecycle.monitoringMethod, lifecycle.startMonitoringDate],
+    [[], "PLANTING_REPORT_VERIFICATION", policy ? "STAFF_SPOT_CHECK" : "LEGACY", policy ? null : "2026-01-15"]);
+  if (policy) {
+    assert.equal(lifecycle.scheduleStatus, "AWAITING_MONITORING_POLICY");
+    assert.equal(lifecycle.nextMonitoringDate, null);
+    assert.equal(lifecycle.monitoringEndDate, null);
+    assert.deepEqual((await db.collection("plantingReports").doc(reportId).get()).data().reportingPolicy, policy);
+  }
   await Promise.all(lifecycles.map((doc) => doc.ref.delete()));
+});
+
+test("Participant final report registers the nested Staff spot-check policy only after Admin completes verification", async () => {
+  const suffix = "-nested-participant";
+  const { reportId } = await seedParticipantReport(suffix);
+  const policy = { definition: { monitoring: "STAFF_SPOT_CHECK", reporting: "REQUIRED" }, policyVersion: 0 };
+  await db.collection("plantingReports").doc(reportId).update({ participantId: PARTICIPANT, reportingPolicy: policy });
+  const lifecyclesFor = () => db.collection("monitoringRecords").where("plantingReportId", "==", reportId).get();
+  for (const [index, ending] of ["approve", "return", "reject"].entries()) {
+    const submission = `${PREFIX}${suffix}-${ending}`;
+    await forward(submission);
+    assert.equal((await lifecyclesFor()).size, 0, "Staff review never registers a lifecycle");
+    await approve(submission);
+    assert.equal((await lifecyclesFor()).size, index === 2 ? 1 : 0, "only the completed Admin verification is eligible");
+  }
+  const [doc] = (await lifecyclesFor()).docs;
+  const record = doc.data();
+  assert.equal(record.monitoringMethod, "STAFF_SPOT_CHECK");
+  assert.match(record.monitoringNumber, /^MON-\d{4}-\d{3,}$/);
+  assert.deepEqual([record.startMonitoringDate, record.nextMonitoringDate, record.monitoringEndDate, record.history], [null, null, null, []]);
+  assert.equal(record.scheduleStatus, "AWAITING_MONITORING_POLICY");
+  assert.deepEqual((await db.collection("plantingReports").doc(reportId).get()).data().reportingPolicy, policy);
 });
