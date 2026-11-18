@@ -4,6 +4,8 @@ const { Timestamp } = require("firebase-admin/firestore");
 const { contract, canonicalPurpose, classifyRequest } = require("../utils/requestClassification.util");
 const REPORTING = ["REQUIRED", "OPTIONAL", "NOT_REQUIRED", "CONDITIONAL"];
 const MONITORING = ["NONE", "STAFF_SPOT_CHECK", "PERMANENT_SAMPLE"];
+// Recorded on an approved request whose purpose/organization policy MENRO has not set yet. Never a selectable decision.
+const PENDING_MENRO_POLICY = "PENDING_MENRO_POLICY";
 const fail = (status, message, fieldErrors) => Object.assign(new Error(message), { status, code: "PURPOSE_POLICY_INVALID", fieldErrors });
 const currentRef = () => db.collection("purposePolicies").doc("current");
 function initialPolicy() {
@@ -83,17 +85,30 @@ async function approvalSnapshot(transaction, request, actorId, decision) {
   const organization = candidate.requesterType === "organization";
   const organizationUnresolved = organization && !definition.organizationCondition;
   if (organization && definition.organizationCondition) definition = { ...definition, ...definition.organizationCondition };
-  const unresolved = candidate.purpose === "Other" || definition.reporting === "CONDITIONAL" && definition.quantityThreshold === null || organizationUnresolved;
+  const pendingReasons = [
+    ...(candidate.purpose === "Other" ? ["OTHER_PURPOSE"] : []),
+    ...(definition.reporting === "CONDITIONAL" && definition.quantityThreshold === null ? ["CONDITIONAL_THRESHOLD_PENDING"] : []),
+    ...(organizationUnresolved ? ["ORGANIZATION_POLICY_PENDING"] : []),
+  ];
   const override = decision ? validateDecision(decision) : null;
-  if (unresolved && !override) throw fail(409, "An explicit Admin reporting/monitoring policy decision is required before approval.", { policyReason: "Resolve the pending purpose/organization policy." });
-  return { ...candidate, definition: { ...definition, ...(override ? { reporting: override.reporting, monitoring: override.monitoring } : {}) },
-    staffProposal: request.staffPolicyProposal || null, override, approvedBy: actorId, approvedAt: Timestamp.now(), source: "ADMIN_APPROVED_PURPOSE_POLICY" };
+  const base = { ...candidate, staffProposal: request.staffPolicyProposal || null, override, approvedBy: actorId, approvedAt: Timestamp.now() };
+  // An unresolved purpose/organization policy no longer blocks request approval. It is recorded explicitly as
+  // pending MENRO policy: no reporting requirement, exemption or monitoring type is invented, and a Staff
+  // proposal is kept for reference only. An explicit, validated Admin decision still resolves it now.
+  if (pendingReasons.length && !override) {
+    return { ...base, definition: { ...definition, reporting: PENDING_MENRO_POLICY, monitoring: PENDING_MENRO_POLICY },
+      policyStatus: PENDING_MENRO_POLICY, pendingReasons, source: "ADMIN_APPROVED_REQUEST_POLICY_PENDING" };
+  }
+  return { ...base, definition: { ...definition, ...(override ? { reporting: override.reporting, monitoring: override.monitoring } : {}) },
+    policyStatus: "RESOLVED", source: "ADMIN_APPROVED_PURPOSE_POLICY" };
 }
 function releasePolicy(snapshot, releasedQuantity) {
   if (!snapshot) return null;
   const definition = snapshot.definition;
   let reporting = definition.reporting;
-  if (reporting === "CONDITIONAL") reporting = definition.quantityThreshold === null ? "PENDING_POLICY" : releasedQuantity > definition.quantityThreshold ? "REQUIRED" : "OPTIONAL";
+  // A pending MENRO policy is neither a reporting requirement nor an exemption: it stays "Reporting Policy Pending".
+  if (snapshot.policyStatus === PENDING_MENRO_POLICY || reporting === PENDING_MENRO_POLICY) reporting = "PENDING_POLICY";
+  else if (reporting === "CONDITIONAL") reporting = definition.quantityThreshold === null ? "PENDING_POLICY" : releasedQuantity > definition.quantityThreshold ? "REQUIRED" : "OPTIONAL";
   return { ...snapshot, reporting, releasedQuantity, monitoring: definition.monitoring,
     reportingStatus: reporting === "NOT_REQUIRED" ? "Released – No Report Required" : reporting === "REQUIRED" ? "Awaiting Planting Confirmation" : reporting === "OPTIONAL" ? "Released – Optional Planting Confirmation" : "Reporting Policy Pending",
     reportingOverdueApplicable: reporting === "REQUIRED", requesterMonitoringTasks: false };
@@ -113,4 +128,4 @@ function samplingReadiness(confirmed, sampling = {}, plantingDate, now = new Dat
     status: pending.length || !due ? "POLICY_PENDING" : due <= dateOnlyInManila(now) ? "Pending First Visit" : "Scheduled First Visit",
     intervalMonths: sampling.intervalMonths ?? 12, automaticCreationEnabled: false };
 }
-module.exports = { REPORTING, MONITORING, initialPolicy, validatePolicy, currentPolicy, readSettings, saveSettings, candidateFor, validateDecision, approvalSnapshot, releasePolicy, samplingReadiness };
+module.exports = { REPORTING, MONITORING, PENDING_MENRO_POLICY, initialPolicy, validatePolicy, currentPolicy, readSettings, saveSettings, candidateFor, validateDecision, approvalSnapshot, releasePolicy, samplingReadiness };
