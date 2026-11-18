@@ -144,7 +144,7 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   await db.collection("events").doc(eventId).set({ sourceRequestId: requestId, allocationReleasedAt: "2026-01-01", date: "2026-01-01", startTime: "08:00",
     plantingSiteId: `${PREFIX}-site`, seedlingItems: [{ inventoryId: "narra", species: "Narra", quantity: 10 }], seedlingTotalQuantity: 10 });
   await db.collection("plantingReports").doc(reportId).set({ reportType: "parent", requestId, eventId, participantId: PARTICIPANT, quantityReleased: 10,
-    quantityPlanted: 0, acceptedQuantity: 0, activeSubmittedQuantity: 0, pendingReviewQuantity: 0, reportingProgress: "Awaiting Submission" });
+    quantityPlanted: 0, acceptedQuantity: 0, activeSubmittedQuantity: 0, pendingReviewQuantity: 0, reportingProgress: "Awaiting Submission", plantingDate: "2026-01-01" });
   const staff = { uid: STAFF.uid, fullName: STAFF.name, role: "staff" }, admin = { uid: ADMIN.uid, fullName: ADMIN.name, role: "admin" };
   const submit = (version, extra = {}) => official.submitOfficialReport(staff, { requestId, confirmationBasis: "release-based",
     items: [{ inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Seedlings damaged in transport" }], remarks: "Emulator official report", clientSubmissionId: randomUUID(), expectedVersion: version, ...extra });
@@ -171,6 +171,8 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
   // Monitoring eligibility starts only at Admin verification: nothing exists for a submitted/returned report.
   const cohortsFor = async () => (await db.collection("verifiedPlantingCohorts").where("source.plantingReportId", "==", reportId).get()).docs;
   assert.equal((await cohortsFor()).length, 0, "no monitoring cohort before Admin verification");
+  const lifecyclesFor = async () => (await db.collection("monitoringRecords").where("plantingReportId", "==", reportId).get()).docs;
+  assert.equal((await lifecyclesFor()).length, 0, "no monitoring lifecycle before Admin verification");
   assert.equal(corrected.submissions.find((row) => row.id === correctedId).revision, 1);
   const approved = await reports.approvePlantingReport(correctedId, ADMIN.uid, "", ADMIN.name, ADMIN.role);
   assert.equal(approved.submissions.find((row) => row.id === correctedId).workflowStatus, "Completed");
@@ -182,4 +184,11 @@ test("official Staff report: direct to Admin; rejection is final; a return is co
     assert.equal((await db.collection("sampleMonitoringVisits").where("cohortId", "==", cohorts[0].id).get()).size, 0, "verification never creates a monitoring visit");
   }
   assert.equal(approved.acceptedQuantity, 8);
+  // Admin verification registers exactly one monitoring lifecycle with a sequential MON number and no observations.
+  const lifecycles = await lifecyclesFor();
+  assert.equal(lifecycles.length, 1, "one lifecycle per verified report; a repeated verification never duplicates it");
+  const lifecycle = lifecycles[0].data();
+  assert.match(lifecycle.monitoringNumber, /^MON-\d{4}-\d{3,}$/);
+  assert.deepEqual([lifecycle.history, lifecycle.registrationSource, lifecycle.monitoringMethod, lifecycle.startMonitoringDate], [[], "PLANTING_REPORT_VERIFICATION", "LEGACY", "2026-01-15"]);
+  await Promise.all(lifecycles.map((doc) => doc.ref.delete()));
 });

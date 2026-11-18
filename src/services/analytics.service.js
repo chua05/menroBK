@@ -128,6 +128,7 @@ function monthBuckets(filters) {
 }
 
 function lifecycleStatus(record, today) {
+  if (record.scheduleStatus === "AWAITING_MONITORING_POLICY") return "Awaiting Monitoring Setup";
   if (record.monitoringEndDate && today >= record.monitoringEndDate) return "Monitoring Completed";
   const fullHistory = validatedMonitoringHistory(record)
     .filter((entry) => isFullCohortObservation(entry, record));
@@ -233,6 +234,16 @@ async function getDashboard(rawFilters = {}) {
   for (const report of records.plantingReports) {
     if (report.archived === true || (report.verificationStatus !== "Approved" && report.reportingProgress !== "Completed") || lifecycleReportIds.has(report.id)) continue;
     const baseDate = dateOnly(report.plantingDate || report.eventDate);
+    // Purpose-policy reports have no approved lifecycle schedule: never invent the legacy +14-day dates.
+    if (report.reportingPolicy) {
+      if (report.reportingPolicy.monitoring === "NONE") continue;
+      monitoringLifecycles.push({
+        id: `eligible-${report.id}`, plantingReportId: report.id, ...reportContext(report),
+        authoritativePlantingDate: baseDate || null, startMonitoringDate: null, nextMonitoringDate: null,
+        monitoringEndDate: null, scheduleStatus: "AWAITING_MONITORING_POLICY", history: [],
+      });
+      continue;
+    }
     if (!baseDate) continue;
     monitoringLifecycles.push({
       id: `eligible-${report.id}`, plantingReportId: report.id, ...reportContext(report),
@@ -343,10 +354,11 @@ async function getDashboard(rawFilters = {}) {
   const filteredLifecycles = monitoringLifecycles.filter((lifecycle) => matches({
     ...lifecycle, date: lifecycle.authoritativePlantingDate || lifecycle.plantingDate || lifecycle.eventDate,
   }, filters));
-  const lifecycleCounts = { monitoringEligible: 0, monitoringNotYetEligible: 0, monitoringCompleted: 0 };
+  const lifecycleCounts = { monitoringEligible: 0, monitoringNotYetEligible: 0, monitoringCompleted: 0, monitoringAwaitingSetup: 0 };
   for (const lifecycle of filteredLifecycles) {
     const status = lifecycleStatus(lifecycle, today);
-    if (status === "Monitoring Completed") lifecycleCounts.monitoringCompleted += 1;
+    if (status === "Awaiting Monitoring Setup") lifecycleCounts.monitoringAwaitingSetup += 1;
+    else if (status === "Monitoring Completed") lifecycleCounts.monitoringCompleted += 1;
     else if (status === "Not Yet Available" || status === "Next Monitoring Scheduled") lifecycleCounts.monitoringNotYetEligible += 1;
     else lifecycleCounts.monitoringEligible += 1;
   }

@@ -319,7 +319,11 @@ async function reviewOfficialSubmission(user, id, decisionInput, reasonInput = "
       pendingReviewLeftoverQuantity: pendingLeftovers, remainingAvailableQuantity: Math.max(0, Number(parent.quantityReleased) - active - declaredLeftovers), reportingProgress: progress, verificationStatus: progress, updatedAt: now,
       ...(earlyMonitoring ? { earlyMonitoring, earlyMonitoringVerifiedAt: now } : {}) };
     // Cohort reads must finish before any writes; immutable cohorts are never rewritten.
+    const lifecycleRegistration = require("./monitoringLifecycleRegistration.service");
+    // Monitoring lifecycle registration reads before any write; it records tracking only, never observations.
+    const lifecyclePlan = approve ? await lifecycleRegistration.prepareLifecycleRegistrationInTransaction(transaction, { reportId: parentId, report: nextParent, now }) : null;
     if (approve) await require("./verifiedPlantingCohort.service").ensureCohortForAuthoritativeReportInTransaction(transaction, { reportId: parentId, report: nextParent, now });
+    if (approve) lifecycleRegistration.commitLifecycleRegistration(transaction, lifecyclePlan);
     if (!approve) {
       const recorded = { ...(event.recordedSeedlingsByInventory || {}) }, leftovers = { ...(event.leftoverSeedlingsByInventory || {}) };
       for (const row of rows) {

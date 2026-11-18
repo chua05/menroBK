@@ -7,6 +7,7 @@ const {
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails, normalizeSubmission } = require("./parentPlantingReport.service");
 const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
+const lifecycleRegistration = require("./monitoringLifecycleRegistration.service");
 const { availableForReporting, progressFor, wholeQuantity } = require("../utils/plantingBalance.util");
 const {
   FINAL_REPORT_VERSION, finalReportIdFor, isFinalReportRow, parseFinalItems, finalRowsFor,
@@ -2603,17 +2604,21 @@ const approvePlantingReport =
         // the official Admin decision does (all reads happen before any write).
         const perSpecies = parent.officialPlantingWorkflow === true
           ? await acceptedTotalsInTransaction(transaction, parentId, rows.map((row) => row.current.id), accepted) : null;
+        const verifiedParent = {
+          ...parent,
+          acceptedQuantity: accepted,
+          ...(perSpecies || {}),
+          reportingProgress,
+          verificationStatus: reportingProgress,
+        };
+        // Monitoring lifecycle registration reads first (all reads before writes); idempotent, no observations.
+        const lifecyclePlan = await lifecycleRegistration.prepareLifecycleRegistrationInTransaction(transaction, { reportId: parentId, report: verifiedParent, now });
         await ensureCohortForAuthoritativeReportInTransaction(transaction, {
           reportId: parentId,
-          report: {
-            ...parent,
-            acceptedQuantity: accepted,
-            ...(perSpecies || {}),
-            reportingProgress,
-            verificationStatus: reportingProgress,
-          },
+          report: verifiedParent,
           now,
         });
+        lifecycleRegistration.commitLifecycleRegistration(transaction, lifecyclePlan);
         rows.forEach((row) => transaction.update(row.ref, {
           staffReviewStatus: "Accepted", workflowStatus: WORKFLOW_STATUS.COMPLETED,
           reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,
@@ -2675,11 +2680,13 @@ const approvePlantingReport =
       });
       const monitoringRecipients = earlyMonitoring?.applicable
         ? await getRoleRecipientsInTransaction(transaction, ["staff", "admin"]) : [];
+      const lifecyclePlan = await lifecycleRegistration.prepareLifecycleRegistrationInTransaction(transaction, { reportId: id, report: { ...currentReport, verificationStatus: "Approved" }, now });
       await ensureCohortForAuthoritativeReportInTransaction(transaction, {
         reportId: id,
         report: { ...currentReport, verificationStatus: "Approved" },
         now,
       });
+      lifecycleRegistration.commitLifecycleRegistration(transaction, lifecyclePlan);
       transaction.update(reportRef, {
         verificationStatus: "Approved", workflowStatus: WORKFLOW_STATUS.COMPLETED,
         reviewedBy: actor.uid, reviewedByName: actor.fullName, reviewedAt: now,

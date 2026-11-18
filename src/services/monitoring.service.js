@@ -217,6 +217,9 @@ function hasOutstandingObservation(history = [], observationType = "official") {
     OUTSTANDING_OBSERVATION_STATUSES.has(entry.reviewStatus));
 }
 function lifecycleStatus(record, today = todayInBulan()) {
+  // A registered lifecycle without an approved monitoring schedule (e.g. Staff spot-check pending MENRO
+  // policy) is not available for monitoring and is not "Not Yet Available" either.
+  if (record.scheduleStatus === "AWAITING_MONITORING_POLICY") return "Awaiting Monitoring Setup";
   if (today >= record.monitoringEndDate) return "Monitoring Completed";
   const history = Array.isArray(record.history) ? record.history : [];
   const fullHistory = officialFullHistory(history, record);
@@ -1094,5 +1097,6 @@ module.exports = {
   approveMonitoringObservation, rejectMonitoringObservation,
   resubmitMonitoringObservation, archiveMonitoringRecord,
   addDays, addCalendarMonth, addYears, lifecycleStatus, nextMonitoringDateForObservation,
+  lifecycleId, baseLifecycle,
   officialNextMonitoringDate, hasOutstandingObservation,
 };
