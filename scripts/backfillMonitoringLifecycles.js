@@ -1,50 +1,37 @@
-// Controlled, idempotent backfill: registers a Survival Monitoring lifecycle (with a MON-YYYY-NNN number)
-// for Admin-verified Planting Reports that were verified before automatic registration existed.
-//
-// Safety:
-// - DRY RUN by default: lists what would be registered and writes nothing.
-// - Writing requires BOTH --apply and --confirm-project=<projectId> matching the connected project.
-// - Each report is registered in its own transaction through the same idempotent registration used at
-//   verification: re-running never duplicates a lifecycle or a number, and existing numbers are kept.
-// - No observation, visit, evidence, approval, schedule or monitoring policy is created or changed.
-//
-// Usage (only after separate approval for any non-emulator project):
-//   node scripts/backfillMonitoringLifecycles.js                       # dry run
-//   node scripts/backfillMonitoringLifecycles.js --apply --confirm-project=<projectId>
-const { db } = require("../src/config/firebase");
-const registration = require("../src/services/monitoringLifecycleRegistration.service");
-const { lifecycleId } = require("../src/services/monitoring.service");
+// Target-scoped READ-ONLY preflight for RPT-2026-020 and RPT-2026-024.
+// No apply path is exposed. Use only an existing authorized operational context.
+// node scripts/backfillMonitoringLifecycles.js --expected-project=menrosystem-ddfac
+const { PRODUCTION_PROJECT, createMonitoringLifecycleBackfill } = require("../src/services/monitoringLifecycleBackfill.service");
 
-async function planBackfill() {
-  const [reports, lifecycles] = await Promise.all([db.collection("plantingReports").get(), db.collection("monitoringRecords").get()]);
-  const numbered = new Map(lifecycles.docs.map((doc) => [doc.id, doc.data() || {}]));
-  return reports.docs.filter((doc) => registration.eligible(doc.data())).map((doc) => {
-    const report = doc.data();
-    const id = lifecycleId(report.participantId || "", doc.id, report.eventId || "", report.siteId || "");
-    const existing = numbered.get(id);
-    return { reportId: doc.id, reportNumber: report.reportNumber || null, monitoringMethod: registration.monitoringMethodOf(report),
-      lifecycleId: id, action: existing?.monitoringNumber ? "KEEP" : existing ? "ASSIGN_NUMBER" : "REGISTER", monitoringNumber: existing?.monitoringNumber || null };
-  });
-}
-
-async function runBackfill({ apply = false, confirmProject = "" } = {}) {
-  const plan = await planBackfill();
-  if (!apply) return { mode: "dry-run", projectId: db.projectId, plan };
-  if (!confirmProject || confirmProject !== db.projectId) throw new Error(`Refusing to write: --confirm-project must equal the connected project (${db.projectId}).`);
-  const results = [];
-  for (const row of plan) {
-    if (row.action === "KEEP") { results.push({ reportId: row.reportId, status: "NO_CHANGE", monitoringNumber: row.monitoringNumber }); continue; }
-    results.push(await registration.registerMonitoringLifecycle({ reportId: row.reportId }));
+async function runBackfill(options = {}) {
+  if (options.apply !== undefined && options.apply !== false || options.confirmProject !== undefined) throw new Error("This preflight is read-only; apply and write confirmation options are not supported.");
+  if (!options.expectedProject) throw new Error("An explicit expectedProject is required before Firebase initialization or reads.");
+  if (options.expectedProject === PRODUCTION_PROJECT && (process.env.NODE_ENV !== "production" || process.env.FIREBASE_PROJECT_ID !== PRODUCTION_PROJECT ||
+      ["FIRESTORE_EMULATOR_HOST", "FIREBASE_AUTH_EMULATOR_HOST", "FIREBASE_STORAGE_EMULATOR_HOST", "MENRO_UNIT_TEST_FIREBASE"].some(key => process.env[key] !== undefined))) {
+    throw new Error("The production preflight requires verified production mode and the explicit matching project before Firebase initialization.");
   }
-  return { mode: "apply", projectId: db.projectId, results };
+  if (options.expectedProject !== PRODUCTION_PROJECT) {
+    const integration = require("../src/config/integrationEnvironment").validateIntegrationEnvironment();
+    if (!integration.integration || !(integration.phase3cIsolated || integration.legacyMonitoringIsolated) || integration.projectId !== options.expectedProject) {
+      throw new Error("Custom preflight projects require the verified isolated test environment before Firebase initialization.");
+    }
+  }
+  const { db, app } = require("../src/config/firebase");
+  return createMonitoringLifecycleBackfill({ db, app,
+    registration: require("../src/services/monitoringLifecycleRegistration.service"),
+    lifecycleId: require("../src/services/monitoring.service").lifecycleId,
+  }).plan(options);
 }
-
-module.exports = { planBackfill, runBackfill };
-
+async function planBackfill(options) { return (await runBackfill(options)).plan; }
+function parseArguments(args) {
+  if (args.length !== 1 || args[0] !== `--expected-project=${PRODUCTION_PROJECT}`) {
+    throw new Error(`Read-only production preflight requires exactly --expected-project=${PRODUCTION_PROJECT}; global, target override and write options are rejected.`);
+  }
+  return { expectedProject: PRODUCTION_PROJECT, expectedDatabaseId: "(default)" };
+}
+module.exports = { planBackfill, runBackfill, parseArguments };
 if (require.main === module) {
-  const apply = process.argv.includes("--apply");
-  const confirmProject = (process.argv.find((arg) => arg.startsWith("--confirm-project=")) || "").split("=")[1] || "";
-  runBackfill({ apply, confirmProject })
-    .then((result) => { console.log(JSON.stringify(result, null, 2)); process.exit(0); })
-    .catch((error) => { console.error(error.message); process.exit(1); });
+  Promise.resolve().then(() => runBackfill(parseArguments(process.argv.slice(2))))
+    .then(result => { console.log(JSON.stringify(result, null, 2)); process.exit(0); })
+    .catch(error => { console.error(error.message); process.exit(1); });
 }
