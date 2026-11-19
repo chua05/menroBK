@@ -79,7 +79,17 @@ async function readJson(request, step, method, url, options) {
 async function runCloudShellPreflight({ argv, env, auth, request, initFirestore, now = () => new Date() }) {
   const { expectedProject, expectedPrincipal } = parseCloudShellArguments(argv);
   assertEnvironment(env, expectedProject);
+  const verification = await verifyCloudShellAccess({ expectedProject, expectedPrincipal, auth, request });
 
+  const { db, app } = await initFirestore({ projectId: expectedProject });
+  const preflight = await createMonitoringLifecycleBackfill({ db, app, registration: policy, lifecycleId, now, env })
+    .plan({ expectedProject, expectedDatabaseId: DATABASE_ID });
+  return { verification, preflight };
+}
+
+// Steps 3-5, shared with the target-scoped registration tool. requiredPermissions defaults to read-only;
+// the registration tool's --execute mode additionally requires the write permissions.
+async function verifyCloudShellAccess({ expectedProject, expectedPrincipal, auth, request, requiredPermissions = REQUIRED_READ_PERMISSIONS }) {
   let adcProject, token;
   try { adcProject = await auth.getProjectId(); token = await auth.getAccessToken(); }
   catch (error) { throw new PreflightStop("identity", `Application Default Credentials are unavailable (${error.message}). In Cloud Shell, sign in as yourself; never use a key file.`); }
@@ -93,26 +103,22 @@ async function runCloudShellPreflight({ argv, env, auth, request, initFirestore,
 
   const permissions = new Set((await readJson(request, "permissions", "POST",
     `https://cloudresourcemanager.googleapis.com/v1/projects/${expectedProject}:testIamPermissions`,
-    { token, json: { permissions: [...REQUIRED_READ_PERMISSIONS, ...WRITE_PERMISSIONS] } })).permissions || []);
-  const missing = REQUIRED_READ_PERMISSIONS.filter(permission => !permissions.has(permission));
-  if (missing.length) throw new PreflightStop("permissions", `Principal lacks required read permissions: ${missing.join(", ")}.`);
+    { token, json: { permissions: [...new Set([...REQUIRED_READ_PERMISSIONS, ...WRITE_PERMISSIONS, ...requiredPermissions])] } })).permissions || []);
+  const missing = requiredPermissions.filter(permission => !permissions.has(permission));
+  if (missing.length) throw new PreflightStop("permissions", `Principal lacks required permissions: ${missing.join(", ")}.`);
 
   const database = await readJson(request, "database", "GET",
     `https://firestore.googleapis.com/v1/projects/${expectedProject}/databases/${encodeURIComponent(DATABASE_ID)}`, { token });
   if (database.name !== `projects/${expectedProject}/databases/${DATABASE_ID}`) throw new PreflightStop("database", "The (default) database name did not match.");
   if (database.type !== "FIRESTORE_NATIVE") throw new PreflightStop("database", `Database type is ${database.type || "unknown"}, not FIRESTORE_NATIVE.`);
 
-  const verification = {
+  return {
     project: expectedProject, adcProject, databaseId: DATABASE_ID, databaseType: database.type, databaseLocation: database.locationId || null,
     principal, principalType: principal.endsWith(".gserviceaccount.com") ? "serviceAccount" : "user",
-    readPermissions: REQUIRED_READ_PERMISSIONS, principalAlsoHoldsWritePermissions: WRITE_PERMISSIONS.filter(permission => permissions.has(permission)),
+    readPermissions: REQUIRED_READ_PERMISSIONS, verifiedPermissions: requiredPermissions,
+    principalAlsoHoldsWritePermissions: WRITE_PERMISSIONS.filter(permission => permissions.has(permission)),
     emulatorConfiguration: "none", credentialSource: "application-default-credentials (no key file)",
   };
-
-  const { db, app } = await initFirestore({ projectId: expectedProject });
-  const preflight = await createMonitoringLifecycleBackfill({ db, app, registration: policy, lifecycleId, now, env })
-    .plan({ expectedProject, expectedDatabaseId: DATABASE_ID });
-  return { verification, preflight };
 }
 
 function defaultRequest(method, url, { token, json, form } = {}) {
@@ -138,7 +144,8 @@ function defaultInitFirestore({ projectId }) {
   return { app, db: getFirestore(app) };
 }
 
-module.exports = { PreflightStop, REQUIRED_READ_PERMISSIONS, assertEnvironment, parseCloudShellArguments, runCloudShellPreflight };
+module.exports = { DATABASE_ID, EMAIL, PreflightStop, REQUIRED_READ_PERMISSIONS, WRITE_PERMISSIONS, assertEnvironment, defaultAuth, defaultInitFirestore, defaultRequest,
+  parseCloudShellArguments, runCloudShellPreflight, verifyCloudShellAccess };
 
 if (require.main === module) {
   Promise.resolve()

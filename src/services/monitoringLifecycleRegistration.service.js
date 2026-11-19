@@ -16,7 +16,9 @@
 // days, end = + 2 years). Purpose-policy reports (e.g. STAFF_SPOT_CHECK, PERMANENT_SAMPLE) have no approved
 // lifecycle schedule here, so their dates stay empty and scheduleStatus is AWAITING_MONITORING_POLICY.
 const { Timestamp } = require("firebase-admin/firestore");
-const { db } = require("../config/firebase");
+const { lifecycleId } = require("../utils/monitoringLifecycleId.util");
+// Default Firestore resolved lazily; the Cloud Shell ADC registration tool supplies its own db.
+const firebaseDb = () => require("../config/firebase").db;
 const { commitRecordNumber, reserveRecordNumber } = require("../utils/recordNumber.util");
 
 const AWAITING_MONITORING_POLICY = "AWAITING_MONITORING_POLICY";
@@ -70,10 +72,9 @@ function lifecycleDocument(id, reportId, report, number, now) {
  * lifecycle already carries a MON number. Never throws for ineligible or incomplete reports, so
  * registration can never block Planting Report verification.
  */
-async function prepareLifecycleRegistrationInTransaction(transaction, { reportId, report, now = Timestamp.now() }) {
+async function prepareLifecycleRegistrationInTransaction(transaction, { reportId, report, now = Timestamp.now(), db = firebaseDb() }) {
   if (typeof reportId !== "string" || !reportId || reportId.includes("/") || !eligible(report)) return null;
-  const monitoring = require("./monitoring.service");
-  const id = monitoring.lifecycleId(report.participantId || "", reportId, report.eventId || "", report.siteId || "");
+  const id = lifecycleId(report.participantId || "", reportId, report.eventId || "", report.siteId || "");
   const ref = db.collection("monitoringRecords").doc(id);
   const existing = await transaction.get(ref);
   if (existing.exists) {
@@ -84,7 +85,7 @@ async function prepareLifecycleRegistrationInTransaction(transaction, { reportId
   let candidate;
   try { candidate = existing.exists ? null : lifecycleDocument(id, reportId, report, "pending", now); }
   catch { return null; }
-  const reservation = await reserveRecordNumber(transaction, { prefix: "MON", counterKey: "monitoringRecords", date: now.toDate() });
+  const reservation = await reserveRecordNumber(transaction, { prefix: "MON", counterKey: "monitoringRecords", date: now.toDate(), db });
   return { ref, id, exists: existing.exists, candidate, reservation, now };
 }
 
@@ -101,11 +102,11 @@ function commitLifecycleRegistration(transaction, plan) {
   return number;
 }
 
-async function registerMonitoringLifecycle({ reportId }) {
+async function registerMonitoringLifecycle({ reportId, db = firebaseDb() }) {
   return db.runTransaction(async (transaction) => {
     const reportDoc = await transaction.get(db.collection("plantingReports").doc(reportId));
     if (!reportDoc.exists) return { reportId, status: "REPORT_NOT_FOUND" };
-    const plan = await prepareLifecycleRegistrationInTransaction(transaction, { reportId, report: reportDoc.data() });
+    const plan = await prepareLifecycleRegistrationInTransaction(transaction, { reportId, report: reportDoc.data(), db });
     if (!plan) return { reportId, status: "NO_CHANGE" };
     const number = commitLifecycleRegistration(transaction, plan);
     return { reportId, status: plan.exists ? "NUMBER_ASSIGNED" : "REGISTERED", lifecycleId: plan.id, monitoringNumber: number };
