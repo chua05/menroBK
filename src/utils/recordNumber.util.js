@@ -1,4 +1,6 @@
-const { db } = require("../config/firebase");
+// The default Firestore is resolved lazily so callers that supply their own (e.g. the Cloud Shell ADC
+// registration tool) never initialize the backend's key-based production app.
+const firebaseDb = () => require("../config/firebase").db;
 
 const COUNTERS_COLLECTION = "counters";
 
@@ -26,7 +28,7 @@ function formatRecordNumber(prefix, year, sequence) {
 // Read phase only: reserves the next year-based sequence inside a transaction without writing, so callers
 // can finish every transaction read before any write. The counter read makes Firestore retry the whole
 // transaction if another transaction takes the same number first, so two records never share a number.
-async function reserveRecordNumber(transaction, { prefix, counterKey, date = new Date() }) {
+async function reserveRecordNumber(transaction, { prefix, counterKey, date = new Date(), db = firebaseDb() }) {
   const year = yearInManila(date);
   const counterRef = db.collection(COUNTERS_COLLECTION).doc(`${counterKey}_${year}`);
   const counterDoc = await transaction.get(counterRef);

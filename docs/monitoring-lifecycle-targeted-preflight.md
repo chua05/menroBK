@@ -102,3 +102,15 @@ Before any Firestore access it verifies, in order: exact arguments; `NODE_ENV=pr
 Counter classification: a missing `monitoringRecords_<year>` counter is `ABSENT_FIRST_ALLOCATION` (safe) only when the full `monitoringRecords` scan finds no current-year, malformed or duplicate MON number; otherwise it is `ABSENT_WITH_EXISTING_NUMBERS` and both targets are blocked. `writeScopeIfApproved` lists the exact counts a separately approved registration would write; no MON ID is allocated or shown.
 
 Local acceptance: 7/7 Cloud Shell wrapper unit tests (fakes; no network), 997/997 backend unit tests, isolated legacy-monitoring Firestore Emulator 4/4 (counter classification, zero writes, server-side read-only rejection) and lifecycle registration regression 9/9. Not executed against production.
+
+## Target-scoped historical registration (prepared 19 November 2026; not executed)
+
+The authorized Cloud Shell read-only preflight reported both targets as `REGISTER` (Staff Spot-Check, `monitoringRecords` empty, `monitoringRecords_2026` absent and safe for first allocation, not blocked). `scripts/cloudShellMonitoringRegistration.js` registers only `event_EVT-2026-025` and `event_EVT-2026-029`, with the same ADC verification as the preflight and no service-account key.
+
+- Default mode is a read-only dry run that prints the preflight, blockers and a 16-hex plan digest.
+- Writing requires `--execute --confirm-project=menrosystem-ddfac --confirm-reports=event_EVT-2026-025,event_EVT-2026-029 --confirm-plan=<digest>` plus `datastore.entities.create` and `datastore.entities.update`. A changed state changes the digest and stops execution.
+- Each report is one Firestore transaction (`src/services/monitoringLifecycleTargetedRegistration.service.js`) that revalidates the report number, eligibility and stored `STAFF_SPOT_CHECK` policy, all linked lifecycles (canonical only, matching relationship/method, not archived) and current-year numbering (no malformed or duplicate number, counter not behind or missing with existing numbers), then uses the existing `prepareLifecycleRegistrationInTransaction` / `commitLifecycleRegistration`. Lifecycles are `AWAITING_MONITORING_POLICY` with null dates and no history. Reports, policies, observations and visits are not written.
+- A failed report has no lifecycle and consumes no number. Recovery is a fresh dry run (completed reports show `KEEP`) and a re-execution with the new digest; repeats return `NO_CHANGE`.
+- `prepareLifecycleRegistrationInTransaction`, `registerMonitoringLifecycle` and `reserveRecordNumber` accept an optional `db`; existing callers keep the lazily resolved backend Firestore.
+
+Local acceptance: 1004/1004 backend unit tests (including 7 registration CLI tests with fakes); isolated emulator: targeted registration 6/6, lifecycle registration regression 9/9, counter preflight 4/4, planting review approval regression 4/4.
