@@ -22,13 +22,17 @@ const firebaseDb = () => require("../config/firebase").db;
 const { commitRecordNumber, reserveRecordNumber } = require("../utils/recordNumber.util");
 
 const AWAITING_MONITORING_POLICY = "AWAITING_MONITORING_POLICY";
+
+// Raised only in strict mode; keeps the original error as cause for sanitized operator reporting.
+class LifecycleRegistrationError extends Error {
+  constructor(code, message, cause) { super(message, cause ? { cause } : undefined); this.code = code; }
+}
 const REGISTRATION_SOURCE = "PLANTING_REPORT_VERIFICATION";
 
 // Eligibility and policy resolution live in a Firebase-free module shared with the read-only preflights.
 const { eligible, monitoringMethodOf, monitoringPolicyResolution } = require("./monitoringLifecyclePolicy");
 
 function lifecycleDocument(id, reportId, report, number, now) {
-  const monitoring = require("./monitoring.service");
   const method = monitoringMethodOf(report);
   const registration = {
     monitoringNumber: number,
@@ -40,6 +44,9 @@ function lifecycleDocument(id, reportId, report, number, now) {
   };
   if (method === "LEGACY") {
     // Same seed the first aggregate observation would create; throws when no valid planting date exists.
+    // Loaded only here: monitoring.service imports the backend Firebase app, which purpose-policy lifecycles
+    // (e.g. STAFF_SPOT_CHECK, registered with an injected ADC Firestore) must never require.
+    const monitoring = require("./monitoring.service");
     return { ...monitoring.baseLifecycle(id, { ...report, id: reportId }), ...registration };
   }
   return {
@@ -69,10 +76,12 @@ function lifecycleDocument(id, reportId, report, number, now) {
 
 /**
  * Read phase. Call before any transaction write. Returns null when the report is not eligible or its
- * lifecycle already carries a MON number. Never throws for ineligible or incomplete reports, so
- * registration can never block Planting Report verification.
+ * lifecycle already carries a MON number. By default it never throws for ineligible or incomplete reports,
+ * so registration can never block Planting Report verification. With strict: true (operator tools), a
+ * lifecycle that cannot be built raises a LifecycleRegistrationError instead of returning null, so an
+ * operational failure is never misreported as "not applicable".
  */
-async function prepareLifecycleRegistrationInTransaction(transaction, { reportId, report, now = Timestamp.now(), db = firebaseDb() }) {
+async function prepareLifecycleRegistrationInTransaction(transaction, { reportId, report, now = Timestamp.now(), db = firebaseDb(), strict = false }) {
   if (typeof reportId !== "string" || !reportId || reportId.includes("/") || !eligible(report)) return null;
   const id = lifecycleId(report.participantId || "", reportId, report.eventId || "", report.siteId || "");
   const ref = db.collection("monitoringRecords").doc(id);
@@ -84,7 +93,10 @@ async function prepareLifecycleRegistrationInTransaction(transaction, { reportId
   }
   let candidate;
   try { candidate = existing.exists ? null : lifecycleDocument(id, reportId, report, "pending", now); }
-  catch { return null; }
+  catch (error) {
+    if (!strict) return null;
+    throw new LifecycleRegistrationError("LIFECYCLE_DOCUMENT_UNAVAILABLE", "The monitoring lifecycle document could not be prepared.", error);
+  }
   const reservation = await reserveRecordNumber(transaction, { prefix: "MON", counterKey: "monitoringRecords", date: now.toDate(), db });
   return { ref, id, exists: existing.exists, candidate, reservation, now };
 }
@@ -115,6 +127,7 @@ async function registerMonitoringLifecycle({ reportId, db = firebaseDb() }) {
 
 module.exports = {
   AWAITING_MONITORING_POLICY,
+  LifecycleRegistrationError,
   REGISTRATION_SOURCE,
   commitLifecycleRegistration,
   eligible,
