@@ -180,9 +180,8 @@ function todayInBulan() {
   }).formatToParts(new Date()).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
-function lifecycleId(participantId, plantingReportId, eventId, siteId) {
-  return `MON-${crypto.createHash("sha256").update([participantId, plantingReportId, eventId, siteId].join("|")).digest("hex").slice(0, 20)}`;
-}
+// Deterministic lifecycle ID, shared (Firebase-free) with the read-only preflights.
+const { lifecycleId } = require("../utils/monitoringLifecycleId.util");
 function calculateSurvivalRate(healthy, damaged, quantity) {
   return quantity > 0 ? Number((((healthy + damaged) / quantity) * 100).toFixed(2)) : 0;
 }

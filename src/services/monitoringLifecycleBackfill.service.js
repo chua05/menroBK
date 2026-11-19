@@ -74,7 +74,7 @@ function createMonitoringLifecycleBackfill({ db, app, registration, lifecycleId,
       const humanMatches = [];
       for (const target of targets) humanMatches.push(await transaction.get(reportsCollection.where("reportNumber", "==", target.reportNumber).select("reportNumber").limit(2)));
 
-      const numberCounts = new Map(); let malformedNumbers = 0, unnumbered = 0, maximumSequence = 0;
+      const numberCounts = new Map(); let malformedNumbers = 0, unnumbered = 0, maximumSequence = 0, currentYearNumbered = 0, otherYearNumbered = 0;
       for (const doc of allNumbers.docs) {
         const value = doc.data().monitoringNumber;
         if (value === undefined || value === null || value === "") { unnumbered++; continue; }
@@ -82,7 +82,8 @@ function createMonitoringLifecycleBackfill({ db, app, registration, lifecycleId,
         if (!parsed) { malformedNumbers++; continue; }
         const sequenceKey = `${parsed.year}:${parsed.sequence}`;
         numberCounts.set(sequenceKey, (numberCounts.get(sequenceKey) || 0) + 1);
-        if (parsed.year === year) maximumSequence = Math.max(maximumSequence, parsed.sequence);
+        if (parsed.year === year) { currentYearNumbered++; maximumSequence = Math.max(maximumSequence, parsed.sequence); }
+        else otherYearNumbered++;
       }
       const duplicateNumbers = [...numberCounts.values()].filter(count => count > 1).length;
       const counterData = counter.exists ? counter.data() : null;
@@ -93,6 +94,15 @@ function createMonitoringLifecycleBackfill({ db, app, registration, lifecycleId,
       if (counter.exists && (typeof counterData.lastNumber !== "number" || !Number.isSafeInteger(counterData.lastNumber) || counterData.lastNumber < 0 || counterData.year !== year)) integrityReasons.push("INVALID_COUNTER");
       else if (counter.exists && counterData.lastNumber < maximumSequence) integrityReasons.push("COUNTER_BEHIND_EXISTING_NUMBERS");
       if (counter.exists && counterData.lastNumber > Number.MAX_SAFE_INTEGER - targets.length) integrityReasons.push("COUNTER_EXHAUSTED");
+      // A missing counter alone proves nothing: it is a legitimate first allocation only when the full scan of
+      // monitoringRecords finds no current-year MON number (and no malformed/duplicate numbers). Registration
+      // then starts the year's sequence at 1 (reserveRecordNumber treats a missing counter as lastNumber 0).
+      const counterState = counter.exists
+        ? integrityReasons.includes("INVALID_COUNTER") ? "INVALID"
+          : integrityReasons.includes("COUNTER_BEHIND_EXISTING_NUMBERS") ? "BEHIND_EXISTING_NUMBERS"
+            : integrityReasons.includes("COUNTER_EXHAUSTED") ? "EXHAUSTED" : "CONSISTENT"
+        : currentYearNumbered > 0 ? "ABSENT_WITH_EXISTING_NUMBERS" : "ABSENT_FIRST_ALLOCATION";
+      const firstAllocationSafe = counterState === "ABSENT_FIRST_ALLOCATION" && !malformedNumbers && !duplicateNumbers;
 
       const rows = pairs.map((row, index) => {
         const reasons = [...integrityReasons], report = row.report, canonicalId = canonicalIds[index];
@@ -125,12 +135,21 @@ function createMonitoringLifecycleBackfill({ db, app, registration, lifecycleId,
             startMonitoringDate: value.startMonitoringDate || null, nextMonitoringDate: value.nextMonitoringDate || null, monitoringEndDate: value.monitoringEndDate || null })),
           action, reasons: [...new Set(reasons)], scheduleEffect: current ? "EXISTING_SCHEDULE_UNCHANGED" : resolution?.method === "LEGACY" ? "EXISTING_LEGACY_RULES_ON_REGISTRATION" : "AWAITING_MONITORING_POLICY_NO_DATES" };
       });
+      const registerCount = rows.filter(row => row.action === "REGISTER").length, assignCount = rows.filter(row => row.action === "ASSIGN_NUMBER").length;
+      const blocked = rows.some(row => row.action === "BLOCKED");
       return { mode: "dry-run", readOnly: true, projectId: options.expectedProject, databaseId: "(default)",
         targetCount: targets.length, monitoringRecordsScanned: allNumbers.docs.length, otherReportsPlanned: 0,
-        proposedChangeCount: rows.filter(row => ["REGISTER", "ASSIGN_NUMBER"].includes(row.action)).length,
-        blocked: rows.some(row => row.action === "BLOCKED"), numberIntegrity: { year, counterExists: counter.exists,
-          counterLastNumber: Number.isSafeInteger(counterData?.lastNumber) ? counterData.lastNumber : null, maximumExistingSequence: maximumSequence, malformedNumberCount: malformedNumbers,
-          duplicateNumberCount: duplicateNumbers, unnumberedRecordCount: unnumbered, reasons: integrityReasons }, plan: rows };
+        proposedChangeCount: registerCount + assignCount,
+        blocked, numberIntegrity: { year, counterId: `monitoringRecords_${year}`, counterExists: counter.exists, counterState, firstAllocationSafe,
+          counterLastNumber: Number.isSafeInteger(counterData?.lastNumber) ? counterData.lastNumber : null, maximumExistingSequence: maximumSequence,
+          currentYearNumberedCount: currentYearNumbered, otherYearNumberedCount: otherYearNumbered, malformedNumberCount: malformedNumbers,
+          duplicateNumberCount: duplicateNumbers, unnumberedRecordCount: unnumbered, reasons: integrityReasons },
+        // Exact effect a separately approved registration would have (counts only; no MON IDs are allocated or shown).
+        writeScopeIfApproved: blocked || !(registerCount + assignCount) ? null : {
+          monitoringRecordsCreated: registerCount, monitoringNumbersAssignedToExisting: assignCount,
+          counterDocument: counter.exists ? "UPDATE_LAST_NUMBER" : "CREATE", counterId: `monitoringRecords_${year}`,
+          plantingReportsChanged: 0, monitoringPoliciesChanged: 0, observationsOrVisitsCreated: 0 },
+        plan: rows };
     }, { readOnly: true });
   }
   return { plan };

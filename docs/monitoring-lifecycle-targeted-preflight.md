@@ -92,3 +92,13 @@ Frontend:
 - tests/e2e/phase3c-routing.spec.js
 
 Other modified/untracked files that predated this task remain excluded and unchanged. Test coordinators, logs, and the build output are local artifacts beneath the dedicated temporary evidence directory, not application or deployment configuration.
+
+## Cloud Shell ADC read-only preflight (19 November 2026 preparation)
+
+The Render service has no usable Shell, so `scripts/cloudShellMonitoringPreflight.js` provides a separate read-only path using the operator's own Google Application Default Credentials in Cloud Shell. It never loads `src/config/firebase.js` and never uses a service-account key. Production backend initialization is unchanged; the pure eligibility/policy rules (`src/services/monitoringLifecyclePolicy.js`) and lifecycle ID (`src/utils/monitoringLifecycleId.util.js`) were extracted without behavior change and are re-exported by the existing services.
+
+Before any Firestore access it verifies, in order: exact arguments; `NODE_ENV=production` and `FIREBASE_PROJECT_ID=menrosystem-ddfac`; no emulator, `MENRO_*`, key-file or service-account-key variables; matching ambient project; ADC project and principal (tokeninfo, verified email equal to `--expected-principal`); `datastore.databases.getMetadata`, `datastore.entities.get` and `datastore.entities.list` (testIamPermissions; write permissions are only reported); and that `(default)` exists as `FIRESTORE_NATIVE`. It then runs the approved two-report plan in a Firestore read-only transaction.
+
+Counter classification: a missing `monitoringRecords_<year>` counter is `ABSENT_FIRST_ALLOCATION` (safe) only when the full `monitoringRecords` scan finds no current-year, malformed or duplicate MON number; otherwise it is `ABSENT_WITH_EXISTING_NUMBERS` and both targets are blocked. `writeScopeIfApproved` lists the exact counts a separately approved registration would write; no MON ID is allocated or shown.
+
+Local acceptance: 7/7 Cloud Shell wrapper unit tests (fakes; no network), 997/997 backend unit tests, isolated legacy-monitoring Firestore Emulator 4/4 (counter classification, zero writes, server-side read-only rejection) and lifecycle registration regression 9/9. Not executed against production.
