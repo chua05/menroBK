@@ -22,33 +22,8 @@ const { commitRecordNumber, reserveRecordNumber } = require("../utils/recordNumb
 const AWAITING_MONITORING_POLICY = "AWAITING_MONITORING_POLICY";
 const REGISTRATION_SOURCE = "PLANTING_REPORT_VERIFICATION";
 
-function isVerifiedReport(report = {}) {
-  const verification = String(report.verificationStatus || "").trim().toLowerCase();
-  return report.archived !== true &&
-    (["approved", "verified", "completed"].includes(verification) || String(report.reportingProgress || "").trim().toLowerCase() === "completed");
-}
-
-// Released policy snapshots can have a flattened method, the original approved
-// definition, or both. Read either shape without rewriting the stored snapshot.
-// Contradictory snapshots require review; neither value grants a workflow.
-function monitoringPolicyResolution(report = {}) {
-  if (!report.reportingPolicy) return { method: "LEGACY", conflict: false, source: "legacy" };
-  const policy = report.reportingPolicy;
-  const flat = String(policy.monitoring || "").trim();
-  const nested = String(policy.definition?.monitoring || "").trim();
-  if (flat && nested && flat !== nested) return { method: "UNSPECIFIED", conflict: true, source: "conflict" };
-  return { method: flat || nested || "UNSPECIFIED", conflict: false,
-    source: flat ? "reportingPolicy.monitoring" : nested ? "reportingPolicy.definition.monitoring" : "unspecified" };
-}
-
-function monitoringMethodOf(report = {}) {
-  return monitoringPolicyResolution(report).method;
-}
-
-function eligible(report) {
-  const policy = monitoringPolicyResolution(report);
-  return isVerifiedReport(report) && !policy.conflict && policy.method !== "NONE";
-}
+// Eligibility and policy resolution live in a Firebase-free module shared with the read-only preflights.
+const { eligible, monitoringMethodOf, monitoringPolicyResolution } = require("./monitoringLifecyclePolicy");
 
 function lifecycleDocument(id, reportId, report, number, now) {
   const monitoring = require("./monitoring.service");
