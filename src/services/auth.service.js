@@ -3,6 +3,8 @@ const { validateParticipantProfile, isParticipantProfileComplete } = require("..
 const { nextRecordNumber } = require("../utils/recordNumber.util");
 const { sendRegistrationEmails, sendVerificationEmail } = require("./email.service");
 
+const { MUNICIPALITY, PROVINCE } = require("../config/municipality");
+
 const users = db.collection("users");
 const clean = (value) => typeof value === "string" ? value.trim() : "";
 const withCompleteness = (profile) => ({
@@ -94,8 +96,22 @@ async function updateUserProfile(uid, data = {}) {
   return withCompleteness((await ref.get()).data());
 }
 
-async function registerUser({ fullName, username, email, contactNumber, password, userType, userTypeDetail, barangay }) {
+function resolveRegistrationLocation({ province, municipality } = {}) {
+  const matches = (value, canonical) => {
+    if (value === undefined || value === null) return true;
+    if (typeof value !== "string") return false;
+    const trimmed = value.trim();
+    return !trimmed || trimmed.toLowerCase() === canonical.toLowerCase();
+  };
+  if (!matches(province, PROVINCE) || !matches(municipality, MUNICIPALITY)) {
+    throw new Error(`Please select ${MUNICIPALITY}, ${PROVINCE} as your registration location.`);
+  }
+  return { province: PROVINCE, municipality: MUNICIPALITY };
+}
+
+async function registerUser({ fullName, username, email, contactNumber, password, userType, userTypeDetail, barangay, province, municipality }) {
   const participantProfile = validateParticipantProfile({ userType, userTypeDetail, barangay });
+  const registrationLocation = resolveRegistrationLocation({ province, municipality });
   const firebaseUser = await auth.createUser({ email, password, displayName: fullName });
   const now = new Date();
   const profile = {
@@ -105,6 +121,7 @@ async function registerUser({ fullName, username, email, contactNumber, password
     email,
     role: "participant",
     ...participantProfile,
+    ...registrationLocation,
     contactNumber: contactNumber || "",
     profileComplete: true,
     status: "active",
@@ -151,4 +168,4 @@ async function resendVerificationEmail(uid) {
   });
 }
 
-module.exports = { registerUser, createUserProfile, getUserProfile, updateUserProfile, resendVerificationEmail };
+module.exports = { registerUser, resolveRegistrationLocation, createUserProfile, getUserProfile, updateUserProfile, resendVerificationEmail };

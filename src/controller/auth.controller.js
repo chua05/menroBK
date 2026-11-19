@@ -135,7 +135,9 @@ const register = async (req, res) => {
       password,
       userType,
       userTypeDetail,
-      barangay
+      barangay,
+      province,
+      municipality
 
     } = req.body || {};
 
@@ -194,7 +196,9 @@ const register = async (req, res) => {
       password,
       userType,
       userTypeDetail,
-      barangay
+      barangay,
+      province,
+      municipality
     });
     return sendSuccess(
 
