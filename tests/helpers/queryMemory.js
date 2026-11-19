@@ -25,7 +25,8 @@ function queryMemory() {
           return 0;
         };
         let rows = [...memory.records(name)].map(([id, row]) => ({ id, row }))
-          .filter(({ row }) => filters.every(([field, value]) => row[field] === value)).sort(compare);
+          // Like Firestore, a dotted field path ("walkIn.encodedBy") matches a nested field.
+          .filter(({ row }) => filters.every(([field, value]) => (field in row ? row[field] : field.split(".").reduce((node, key) => node?.[key], row)) === value)).sort(compare);
         if (cursor) rows = rows.filter(row => compare(row, { id: cursor.id, row: cursor.data() }) > 0);
         return { docs: rows.slice(0, max).map(({ id, row }) => snapshot(id, fields ? Object.fromEntries(fields.map(field => [field, row[field]])) : row)) };
       },

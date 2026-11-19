@@ -881,7 +881,8 @@ const getMySeedlingRequests =
     try {
       const requests =
         await getSeedlingRequestsByParticipantId(
-          req.user.uid
+          req.user.uid,
+          { includeCreatedByStaff: req.user.role === "staff" }
         );
 
       return res.status(200).json({
@@ -981,7 +982,7 @@ const markRequestReviewed =
     } catch (error) {
       if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
       const notFound = error.message === "Seedling request not found.";
-      const conflict = error.message === "Only pending requests can be reviewed.";
+      const conflict = error.message === "Only pending requests can be reviewed." || error.code === "STAFF_REVIEW_NOT_REQUIRED";
       const invalid = [
         "At least one seedling must be selected.",
         "A maximum of 10 seedling types may be requested at a time.",
@@ -994,6 +995,7 @@ const markRequestReviewed =
       return res.status(statusCode).json({
         success: false,
         message: statusCode === 500 ? "Failed to review request." : error.message,
+        ...(error.code === "STAFF_REVIEW_NOT_REQUIRED" ? { code: error.code } : {}),
         ...(error.fieldErrors ? { fieldErrors: error.fieldErrors } : {}),
       });
     }
@@ -1069,7 +1071,7 @@ const resubmitRequest = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Request resubmitted successfully for MENRO Staff review.",
+      message: request.status === "Reviewed" ? "Request resubmitted successfully for Admin approval." : "Request resubmitted successfully for MENRO Staff review.",
       data: request,
     });
   } catch (error) {
@@ -1109,7 +1111,7 @@ const approveRequest = async (
 
   try {
     // Approval does not require a reason.
-    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason, requireExpectedVersion(req.body), req.body?.policyDecision);
+    const request = await approveSeedlingRequest(req.params.id, req.user.uid, req.body?.reason, requireExpectedVersion(req.body), req.body?.policyDecision, req.body?.siteVerification);
 
     return res.status(200).json({
       success: true,
@@ -1125,6 +1127,8 @@ const approveRequest = async (
     );
 
     if (error.code === "PURPOSE_POLICY_INVALID") return res.status(error.status || 400).json({ success: false, message: error.message, fieldErrors: error.fieldErrors });
+    // Validation of Admin-recorded proposed site verification (Staff-submitted requests only).
+    if (error.status === 400) return res.status(400).json({ success: false, message: error.message, fieldErrors: error.fieldErrors });
     const publicMessages = [
       "Seedling request not found.",
       "Only reviewed requests can be approved.",

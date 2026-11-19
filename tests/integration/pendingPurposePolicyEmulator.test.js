@@ -58,12 +58,12 @@ test('unresolved purpose policy: approval, scheduled event and single release pr
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const request = created.body.data;
   assert.equal(request.purposePolicyManaged, true);
-  const premature = await api(`/seedling-requests/${request.id}/approve`, 'admin', 'PATCH', { expectedVersion: request.requestVersion });
-  assert.notEqual(premature.status, 200, 'Admin approval still requires Staff review');
-  assert.equal((await db.collection('seedlingRequests').doc(request.id).get()).data().status, 'Pending');
+  // A Staff submission goes directly to Admin approval (Awaiting Approval); Staff review is refused.
+  assert.deepEqual([request.status, request.submissionPath, request.reviewStatus], ['Reviewed', 'STAFF_DIRECT_TO_ADMIN', 'Not Required']);
 
-  const reviewed = await api(`/seedling-requests/${request.id}/review`, 'officer', 'PATCH', { expectedVersion: request.requestVersion, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
-  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+  const refusedReview = await api(`/seedling-requests/${request.id}/review`, 'officer', 'PATCH', { expectedVersion: request.requestVersion, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
+  assert.equal(refusedReview.status, 409, JSON.stringify(refusedReview.body));
+  const reviewed = { body: { data: request } };
   // RBAC and version guards are unchanged.
   assert.equal((await api(`/seedling-requests/${request.id}/approve`, 'officer', 'PATCH', { expectedVersion: reviewed.body.data.requestVersion })).status, 403);
   assert.equal((await api(`/seedling-requests/${request.id}/approve`, 'admin', 'PATCH', { expectedVersion: reviewed.body.data.requestVersion + 5 })).status, 409);
