@@ -4,6 +4,7 @@ const {
 } = require("../config/firebase");
 const crypto = require("crypto");
 const { assertIndependentRequestAction } = require("../utils/requestSeparation.util");
+const submissionPath = require("../utils/requestSubmissionPath.util");
 const { plantingArea, normalizeRequestPlantingArea, applyRegisteredSiteArea } = require("../utils/plantingArea.util");
 
 const {
@@ -174,6 +175,8 @@ const getReadableSequenceFloors = (docs) => {
   return { request, review };
 };
 
+// A Staff-submitted request goes directly to Admin approval and is never Staff-reviewed, so its status alone
+// is not evidence of a review: only an actual recorded review counts (no review ID or reviewer is invented).
 const hasSavedStaffReview = (data) => Boolean(
   data?.reviewedAt ||
   data?.reviewedByUid ||
@@ -181,7 +184,7 @@ const hasSavedStaffReview = (data) => Boolean(
   data?.reviewedByName ||
   (Array.isArray(data?.reviewHistory) &&
     data.reviewHistory.some((entry) => entry?.action === "reviewed")) ||
-  ["Reviewed", "Approved", "Rejected", "Released"].includes(data?.status)
+  (!submissionPath.isStaffDirectRequest(data) && ["Reviewed", "Approved", "Rejected", "Released"].includes(data?.status))
 );
 
 const getReadableReviewerName = async (data) => {
@@ -551,6 +554,8 @@ const createSeedlingRequest =
       throw Object.assign(new Error("Seedling requests must be submitted by the authenticated requester."), { status: 403 });
     }
     const requesterRole = requester?.role || "participant";
+    // Approval path from the authenticated requester only (requester.role comes from the server-side profile).
+    const staffDirect = submissionPath.isStaffActor(requester);
     if (data.workflow) data = { ...data, workflow: normalizeRequestPlantingArea(data.workflow) };
     const submittedItems =
       normalizeRequestItems(
@@ -614,6 +619,8 @@ const createSeedlingRequest =
       ...data,
       ...(authorizedWalkIn ? { walkIn: { ...data.walkIn, acknowledgement: require("./requestLetterStorage.service").publicMetadata(data.walkIn.acknowledgement) } } : {}),
       ...(authorizedWalkIn ? { requesterRole: "walk-in", createdByRole: "staff" } : requesterRole === "staff" ? { requesterRole: "staff", createdByRole: "staff" } : {}),
+      // Staff submissions (own or walk-in) go directly to Admin approval; participants go to Staff review.
+      ...(staffDirect ? submissionPath.staffDirectSubmissionFields(requester, now) : submissionPath.participantSubmissionFields()),
 
       // Canonical multi-tree data.
       items:
@@ -633,8 +640,9 @@ const createSeedlingRequest =
           action: "submitted",
           actorId: authorizedWalkIn ? requester.uid : cleanString(data.participantId),
           actorName: authorizedWalkIn ? requester.fullName : cleanString(data.participantName),
-          ...(authorizedWalkIn ? { citizenRequesterId: data.participantId, actionBasis: "STAFF_ENCODED_WALK_IN" } : {}),
+          ...(authorizedWalkIn ? { citizenRequesterId: data.participantId, actionBasis: "STAFF_ENCODED_WALK_IN" } : staffDirect ? { actionBasis: "STAFF_SUBMITTED" } : {}),
           actorRole: requesterRole,
+          routedTo: staffDirect ? "ADMIN_APPROVAL" : "STAFF_REVIEW",
           at: now,
         },
       ],
@@ -716,7 +724,9 @@ const createSeedlingRequest =
         }
       }
       const counterDoc = await transaction.get(counterRef);
-      const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+      // All reads before writes: Staff submissions notify Admins; participant submissions notify Staff.
+      const staffRecipients = staffDirect ? [] : await getRoleRecipientsInTransaction(transaction, ["staff"]);
+      const adminRecipients = staffDirect ? await getRoleRecipientsInTransaction(transaction, ["admin"]) : [];
       let acknowledgementRef;
       if (authorizedWalkIn && data.walkIn.acknowledgement) {
         acknowledgementRef = db.collection("requestLetterUploadIntents").doc(data.walkIn.acknowledgement.uploadIntentId);
@@ -761,6 +771,18 @@ const createSeedlingRequest =
         createdAt: now,
         details: { processingEstimate: requestData.processingEstimate },
       });
+      adminRecipients.filter(recipient => recipient.id !== requester?.uid && recipient.id !== data.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
+        notificationId: `request_submitted_admin_${docRef.id}_${recipient.id}`,
+        recipientUserId: recipient.id,
+        type: "request_awaiting_admin_approval",
+        title: "Staff-Submitted Seedling Request",
+        message: `${requestNumber} was submitted by MENRO Staff${authorizedWalkIn ? ` for walk-in requester ${cleanString(data.participantName) || "a citizen"}` : ""} and is awaiting your final decision.`,
+        relatedRecordType: "seedlingRequest",
+        relatedRecordId: docRef.id,
+        requestNumber,
+        createdAt: now,
+        details: { requesterName: cleanString(data.participantName), submittedByName: requestData.submittedByName || "", submissionPath: submissionPath.STAFF_DIRECT_TO_ADMIN, submittedAt: now },
+      }));
       staffRecipients.filter(recipient => recipient.id !== data.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
         notificationId: `request_submitted_staff_${docRef.id}_${recipient.id}`,
         recipientUserId: recipient.id,
@@ -887,15 +909,27 @@ const getSeedlingRequestsByStatus =
 
 const getSeedlingRequestsByParticipantId =
   async (
-    participantId
+    participantId,
+    { includeCreatedByStaff = false } = {}
   ) => {
-    const [snapshot, allRequestsSnapshot, distributions] = await Promise.all([
-      db.collection(COLLECTION).where("participantId", "==", participantId).get(),
+    // Staff "My Requests" also lists requests they created as Staff: encoded walk-ins (the citizen stays the
+    // requester) and their direct Staff submissions. Each query matches only this user's own UID.
+    const queries = [db.collection(COLLECTION).where("participantId", "==", participantId).get()];
+    if (includeCreatedByStaff) {
+      queries.push(db.collection(COLLECTION).where("walkIn.encodedBy", "==", participantId).get());
+      queries.push(db.collection(COLLECTION).where("submittedByUid", "==", participantId).get());
+    }
+    const [snapshots, allRequestsSnapshot, distributions] = await Promise.all([
+      Promise.all(queries),
       db.collection(COLLECTION).get(),
       releasedDistributionMap(),
     ]);
+    const unique = new Map();
+    for (const snapshot of snapshots) for (const doc of snapshot.docs) {
+      if (submissionPath.isCreatedByUser({ id: doc.id, ...doc.data() }, participantId)) unique.set(doc.id, doc);
+    }
     const readableDocs = await ensureReadableRequestDocuments(
-      snapshot.docs,
+      [...unique.values()],
       allRequestsSnapshot.docs
     );
 
@@ -957,6 +991,9 @@ const reviewSeedlingRequest =
 
       const currentRequest = doc.data();
       assertIndependentRequestAction(currentRequest, reviewData.reviewedBy);
+      if (submissionPath.isStaffDirectRequest(currentRequest)) {
+        throw Object.assign(new Error("Staff-submitted requests go directly to Admin approval and are not Staff-reviewed."), { status: 409, code: "STAFF_REVIEW_NOT_REQUIRED" });
+      }
 
       assertMutationVersion(currentRequest, reviewData.expectedVersion);
 
@@ -1277,7 +1314,10 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
       0
     );
     const nextVersion = requestVersion(request) + 1;
-    const staffRecipients = await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    // A correction resubmitted by authenticated Staff (own request or encoded walk-in) goes directly to Admin.
+    const staffDirect = submissionPath.isStaffActor(actor);
+    const staffRecipients = staffDirect ? [] : await getRoleRecipientsInTransaction(transaction, ["staff"]);
+    const adminRecipients = staffDirect ? await getRoleRecipientsInTransaction(transaction, ["admin"]) : [];
     let acknowledgementRef, priorAcknowledgement;
     if (data.walkIn) {
       if (actor?.role !== "staff" || actor.uid !== request.walkIn?.encodedBy || data.walkIn.requesterId !== request.participantId) throw Object.assign(new Error("Only the authorized encoder may correct this walk-in request."), { status: 403 });
@@ -1344,7 +1384,6 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
         description: cleanString(proposal.description),
         status: "Proposed",
       },
-      status: "Pending",
       requestVersion: nextVersion,
       resubmissionProcessingEstimate: buildProcessingEstimate(now.toDate()),
       returnReason: "",
@@ -1358,6 +1397,7 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
       reviewedByName: "",
       reviewedAt: null,
       reviewRemarks: "",
+      ...(staffDirect ? submissionPath.staffDirectSubmissionFields(actor, now) : submissionPath.participantSubmissionFields()),
       resubmittedAt: now,
       updatedAt: now,
       reviewHistory: [
@@ -1367,10 +1407,23 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
           actorId: data.walkIn ? actor.uid : participantId,
           actorName: data.walkIn ? cleanString(actor.fullName) : cleanString(request.participantName),
           actorRole: data.walkIn || request.requesterRole === "staff" ? "staff" : "participant",
+          routedTo: staffDirect ? "ADMIN_APPROVAL" : "STAFF_REVIEW",
           at: now,
         },
       ],
     });
+    adminRecipients.filter(recipient => recipient.id !== actor?.uid && recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
+      notificationId: `request_resubmitted_admin_${id}_${nextVersion}_${recipient.id}`,
+      recipientUserId: recipient.id,
+      type: "request_awaiting_admin_approval",
+      title: "Staff-Corrected Seedling Request",
+      message: `${request.requestNumber || id} was corrected and resubmitted by MENRO Staff and is awaiting your final decision.`,
+      relatedRecordType: "seedlingRequest",
+      relatedRecordId: id,
+      requestNumber: request.requestNumber || "",
+      createdAt: now,
+      details: { status: "Reviewed", submissionPath: submissionPath.STAFF_DIRECT_TO_ADMIN, requestVersion: nextVersion, resubmittedAt: now },
+    }));
     staffRecipients.filter(recipient => recipient.id !== request.participantId).forEach((recipient) => createNotificationInTransaction(transaction, {
       notificationId: `request_resubmitted_staff_${id}_${nextVersion}_${recipient.id}`,
       recipientUserId: recipient.id,
@@ -1527,7 +1580,8 @@ const approveSeedlingRequest =
     approvedBy,
     reason,
     expectedVersion,
-    policyDecision
+    policyDecision,
+    siteVerificationInput = undefined
   ) => {
     const adminUid = cleanString(approvedBy);
     if (!adminUid) {
@@ -1552,13 +1606,24 @@ const approveSeedlingRequest =
       if (approvalRequest.status !== "Reviewed" && !alreadyApproved) {
         throw new Error("Only reviewed requests can be approved.");
       }
+      // Staff-submitted requests have no Staff review stage, so the Admin records the proposed site's verified
+      // area and capacity with the approval. Participant requests keep Staff-review verification only.
+      const staffDirect = submissionPath.isStaffDirectRequest(approvalRequest);
+      if (siteVerificationInput != null && !staffDirect) {
+        throw Object.assign(new Error("Proposed site verification for this request is recorded during MENRO Staff review."), { status: 400 });
+      }
       const workflow = approvalRequest.workflow || {};
       if (workflow.siteMode === "proposed" && !workflow.officialSiteId) {
         if (approvalRequest.purposePolicyManaged) await db.runTransaction(transaction => purposePolicy.approvalSnapshot(transaction, approvalRequest, adminUid, policyDecision));
         const area = plantingArea(workflow.areaChoice, workflow.exactArea, { optional: true });
         if (area.error) throw Object.assign(new Error(area.error), { status: 400, fieldErrors: { [area.field]: area.error } });
-        const verified = approvalRequest.proposedSiteVerification;
-        if ((workflow.siteReviewRequired === true || area.hectares === null) && !verified) throw Object.assign(new Error("MENRO must verify the proposed site's area and capacity before registering it. The request may be submitted without an area."), {
+        const adminVerified = !approvalRequest.proposedSiteVerification && staffDirect && siteVerificationInput != null
+          ? { ...require("../utils/plantingArea.util").verifiedProposedSite(siteVerificationInput, adminUid), reviewedAt: Timestamp.now(), verifiedByRole: "admin" }
+          : null;
+        const verified = approvalRequest.proposedSiteVerification || adminVerified;
+        if ((workflow.siteReviewRequired === true || area.hectares === null) && !verified) throw Object.assign(new Error(staffDirect
+          ? "Enter the verified proposed site area and capacity to approve this Staff-submitted request."
+          : "MENRO must verify the proposed site's area and capacity before registering it. The request may be submitted without an area."), {
           status: 409, code: "PROPOSED_SITE_AREA_VERIFICATION_REQUIRED",
         });
         const reviewedSite = verified ? require("../utils/plantingArea.util").verifiedProposedSite(verified, verified.reviewedBy) : null;
@@ -1579,6 +1644,7 @@ const approveSeedlingRequest =
           sourceRequestId: id,
         });
         await requestRef.update({
+          ...(adminVerified ? { proposedSiteVerification: adminVerified } : {}),
           "workflow.officialSiteId": site.id,
           "workflow.officialSiteNumber": site.siteId,
           "eventProposal.plantingSiteId": site.id,

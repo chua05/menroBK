@@ -26,7 +26,7 @@ const cleanup = require('../helpers/emulatorCreatedResources').trackEmulatorCrea
 const tokens = {}, siteId = `${prefix}-site`, inventoryId = `${prefix}-inventory`;
 let server, base, firstApprovedRequest;
 test.before(async () => {
-  assert.equal(db.projectId, 'demo-menro-phase3c-isolated');
+  assert.equal(db.projectId, topology.project);
   for (const [role, uid] of Object.entries(users)) {
     const email = `${uid}@example.test`, password = 'Disposable-Workflow-2026!';
     await auth.createUser({ uid, email, password, emailVerified: true });
@@ -45,15 +45,24 @@ async function api(endpoint, role, method = 'GET', body) {
 }
 function request() {
   return { clientSubmissionId: randomUUID(), items: [{ inventoryId, quantity: 2 }], purpose: 'Household / Backyard', plantingLocation: 'Bical, Bulan', preferredReleaseDate: '2099-01-01',
-    workflow: { requestContractVersion: 2, sector: 'Student (Individual)', purpose: 'Household / Backyard', addressProvince: 'Sorsogon', addressMunicipality: 'Bulan', addressBarangay: 'Bical', street: 'Fixture street', siteBarangay: 'Bical', siteMode: 'existing', existingSiteId: siteId, areaChoice: 'Other / Exact Area', exactArea: '0.5', releaseMethod: 'Pick-up', caretaker: 'Requester', carePlan: 'Water and protect seedlings', monitoringFrequency: 'Weekly' },
+    workflow: { requestContractVersion: 2, sector: 'Student (Individual)', schoolName: 'Disposable Fixture School', purpose: 'Household / Backyard', addressProvince: 'Sorsogon', addressMunicipality: 'Bulan', addressBarangay: 'Bical', street: 'Fixture street', siteBarangay: 'Bical', siteMode: 'existing', existingSiteId: siteId, areaChoice: 'Other / Exact Area', exactArea: '0.5', releaseMethod: 'Pick-up', caretaker: 'Requester', carePlan: 'Water and protect seedlings', monitoringFrequency: 'Weekly' },
     identification: { identificationType: 'national_id', idNumber: '1234-5678-9012-3456', confirmed: true },
     eventProposal: { eventName: 'Individual planting schedule', barangay: 'Bical', plantingSiteId: siteId, proposedDate: '2099-01-02', proposedStartTime: '08:00', proposedEndTime: '', eventLocation: 'Bical, Bulan', latitude: 12.662301, longitude: 123.932983, expectedParticipants: 1 } };
 }
 async function processRequest(created) {
   const request = created.body.data;
-  const reviewed = await api(`/seedling-requests/${request.id}/review`, 'officer', 'PATCH', { expectedVersion: request.requestVersion, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
-  assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
-  const approved = await api(`/seedling-requests/${request.id}/approve`, 'admin', 'PATCH', { expectedVersion: reviewed.body.data.requestVersion });
+  let version = request.requestVersion;
+  if (request.submissionPath === 'STAFF_DIRECT_TO_ADMIN') {
+    // Staff-submitted (own or walk-in): Awaiting Approval directly; Staff review is refused, nothing is written.
+    assert.equal(request.status, 'Reviewed'); assert.equal(request.reviewStatus, 'Not Required');
+    const refused = await api(`/seedling-requests/${request.id}/review`, 'officer', 'PATCH', { expectedVersion: request.requestVersion, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
+    assert.equal(refused.status, 409, JSON.stringify(refused.body)); assert.equal(refused.body.code, 'STAFF_REVIEW_NOT_REQUIRED');
+  } else {
+    const reviewed = await api(`/seedling-requests/${request.id}/review`, 'officer', 'PATCH', { expectedVersion: request.requestVersion, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.body));
+    version = reviewed.body.data.requestVersion;
+  }
+  const approved = await api(`/seedling-requests/${request.id}/approve`, 'admin', 'PATCH', { expectedVersion: version });
   assert.equal(approved.status, 200, JSON.stringify(approved.body));
   const released = await api(`/seedling-requests/${request.id}/release`, 'officer', 'PATCH', { expectedVersion: approved.body.data.requestVersion, availableReleaseDate: '2099-01-01', items: [{ inventoryId, releasedQuantity: 2 }] });
   assert.equal(released.status, 200, JSON.stringify(released.body));
@@ -70,7 +79,7 @@ test('real Auth/Firestore Student request snapshots policy, releases inventory o
   assert.equal((await db.collection('sampleMonitoringVisits').where('sourceRequestId', '==', released.id).get()).empty, true);
 });
 test('real Staff walk-in stores private signed acknowledgement, separates citizen and encoder, and follows Admin approval/release', async () => {
-  const body = request(); body.citizen = { fullName: 'Actual Disposable Citizen', contactNumber: '', receiptReference: `${prefix}-receipt` };
+  const body = request(); body.citizen = { fullName: 'Actual Disposable Citizen', contactNumber: '09171234567', assistedByName: 'Fixture Assistant', receiptReference: `${prefix}-receipt` };
   const subject = `walkin_${createHash('sha256').update(`${users.staff}:${body.clientSubmissionId}`).digest('hex').slice(0, 32)}`;
   ownedRequestSubjects.set(require('../../src/services/seedlingRequest.service').deriveSeedlingRequestDocumentId(subject, body.clientSubmissionId), subject);
   const form = new FormData(); form.append('request', JSON.stringify(body));
@@ -83,15 +92,17 @@ test('real Staff walk-in stores private signed acknowledgement, separates citize
   assert.equal(JSON.stringify(created.body).includes('request-letters/v1/'), false);
   assert.equal((await api(`/seedling-requests/${record.id}/acknowledgement`, 'participant')).status, 403);
   const retrieval = await api(`/seedling-requests/${record.id}/acknowledgement`, 'admin'); assert.equal(retrieval.status, 200); assert.ok(retrieval.body.bytes > 0);
-  const coordinated = await api(`/seedling-requests/${record.id}/pre-approval-schedule`, 'officer', 'PATCH', { expectedVersion: record.requestVersion, plantingDate: '2099-01-03', startTime: '09:00', adjustmentReason: 'Signed citizen schedule coordination' });
-  assert.equal(coordinated.status, 200, JSON.stringify(coordinated.body));
-  const scheduleForm = new FormData(); scheduleForm.append('request', JSON.stringify({ clientSubmissionId: randomUUID(), action: 'confirm', expectedVersion: coordinated.body.data.requestVersion,
-    proposalVersion: coordinated.body.data.preApprovalSchedule.proposalVersion, plantingDate: '2099-01-03', startTime: '09:00', receiptReference: `${prefix}-schedule-receipt` }));
-  scheduleForm.append('acknowledgement', new Blob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWQkAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' }), 'signed-schedule.png');
-  const confirmed = await api(`/seedling-requests/walk-in/${record.id}/schedule`, 'staff', 'PATCH', scheduleForm);
-  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body)); assert.equal(confirmed.body.data.preApprovalSchedule.confirmedBy, users.staff);
-  assert.equal((await db.collection('walkInAcknowledgements').doc(record.id).get()).data().history.length, 1);
-  await processRequest(confirmed);
+  // Staff-encoded walk-in: Awaiting Approval directly (citizen stays the requester; encoder is the submitter).
+  assert.deepEqual([record.status, record.submissionPath, record.submittedByUid, record.participantName], ['Reviewed', 'STAFF_DIRECT_TO_ADMIN', users.staff, 'Actual Disposable Citizen']);
+  const mine = await api('/seedling-requests/my', 'staff'); assert.equal(mine.status, 200);
+  assert.ok(mine.body.data.some(row => row.id === record.id), "the encoder's My Requests lists the walk-in (real nested query)");
+  assert.ok(!(await api('/seedling-requests/my', 'officer')).body.data.some(row => row.id === record.id));
+  const listed = (await api('/seedling-requests', 'admin')).body.data.find(row => row.id === record.id);
+  assert.equal(listed.reviewId || '', ''); assert.equal(listed.reviewedByName || '', '', 'a list read never invents a Staff review');
+  const stored = (await db.collection('seedlingRequests').doc(record.id).get()).data();
+  assert.equal(stored.reviewId || '', ''); assert.equal(stored.reviewStatus, 'Not Required');
+  assert.equal((await db.collection('notifications').where('relatedRecordId', '==', record.id).where('type', '==', 'request_awaiting_admin_approval').get()).size, 1);
+  await processRequest(created);
 });
 test('real Admin policy versions do not retroactively change a released request snapshot', async () => {
   assert.equal((await api('/purpose-policies', 'staff')).status, 403);
