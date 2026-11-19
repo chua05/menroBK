@@ -114,3 +114,11 @@ The authorized Cloud Shell read-only preflight reported both targets as `REGISTE
 - `prepareLifecycleRegistrationInTransaction`, `registerMonitoringLifecycle` and `reserveRecordNumber` accept an optional `db`; existing callers keep the lazily resolved backend Firestore.
 
 Local acceptance: 1004/1004 backend unit tests (including 7 registration CLI tests with fakes); isolated emulator: targeted registration 6/6, lifecycle registration regression 9/9, counter preflight 4/4, planting review approval regression 4/4.
+
+## Failed production execution and fix (19 November 2026)
+
+The approved `--execute` run stopped safely: `status: FAILED`, `completed: []`, `failedReportId: event_EVT-2026-025`, `[revalidate] event_EVT-2026-025: registration was not applicable after revalidation.` No lifecycle, counter or MON number was written.
+
+Confirmed root cause (credential-free reproduction against commit f54cef2 with `NODE_ENV=production`, no `FIREBASE_CLIENT_EMAIL`/`FIREBASE_PRIVATE_KEY`, injected Firestore): `lifecycleDocument()` loaded `monitoring.service` for every method; that module imports the key-based `src/config/firebase.js`, which throws `Missing Firebase environment variables`. The surrounding `catch { return null; }` turned the error into `null`, which the tool reported as "not applicable". Emulator tests did not reveal it because emulator mode initializes Firebase without keys.
+
+Fix: `monitoring.service` is loaded only in the LEGACY branch that uses `baseLifecycle`; Staff Spot-Check and other purpose-policy lifecycles have no Firebase-app dependency. `prepareLifecycleRegistrationInTransaction` accepts `strict: true` (used only by the targeted tool) to raise `LifecycleRegistrationError` instead of returning `null`; the default stays non-throwing so Admin verification is never blocked. The tool reports sanitized operational errors with their cause (`[registration]`/`[transaction]`), never as ineligibility. `tests/cloudShellRegistrationCredentialFree.test.js` reproduces the exact Cloud Shell conditions in a child process.

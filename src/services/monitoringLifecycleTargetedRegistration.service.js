@@ -30,6 +30,19 @@ class RegistrationStop extends Error {
   constructor(step, message, details = {}) { super(`[${step}] ${message}`); this.step = step; this.details = details; }
 }
 
+// Operator-facing error text: first line only, no key material, bounded length. Includes the cause chain
+// (e.g. a module failing to load) so an operational failure is actionable instead of "not applicable".
+function sanitizeError(error) {
+  const parts = [];
+  for (let current = error, depth = 0; current && depth < 3; current = current.cause, depth++) {
+    const text = String(current.message || current).split(/\r?\n/)[0]
+      .replace(/-----BEGIN[\s\S]*?(-----END[^-]*-----|$)/g, "[redacted key]")
+      .replace(/\b(ya29\.|eyJ)[\w.-]+/g, "[redacted token]").trim();
+    if (text && !parts.includes(text)) parts.push(text);
+  }
+  return parts.join(" <- ").slice(0, 400) || "Unknown error";
+}
+
 const manilaYear = (date) => Number(new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Manila", year: "numeric" }).format(date));
 function parseNumber(value) {
   const match = MON_NUMBER.exec(String(value || "").trim().toUpperCase());
@@ -124,8 +137,12 @@ function createTargetedRegistration({ db, app, env = process.env, targets, expec
       }
 
       // Existing reviewed registration: reserve from the transactional counter, then create/assign.
-      const plan = await registration.prepareLifecycleRegistrationInTransaction(transaction, { reportId: target.reportId, report, now: timestamp, db });
-      if (!plan) throw new RegistrationStop("revalidate", `${target.reportId}: registration was not applicable after revalidation.`);
+      let plan;
+      try { plan = await registration.prepareLifecycleRegistrationInTransaction(transaction, { reportId: target.reportId, report, now: timestamp, db, strict: true }); }
+      catch (error) { throw new RegistrationStop("registration", `${target.reportId}: ${sanitizeError(error)}`); }
+      // Revalidation above established an eligible report with no numbered lifecycle, so null here is an
+      // internal inconsistency, not ineligibility.
+      if (!plan) throw new RegistrationStop("registration", `${target.reportId}: registration returned no plan after successful revalidation; nothing was written. Review before retrying.`);
       const monitoringNumber = registration.commitLifecycleRegistration(transaction, plan);
       return { reportId: target.reportId, reportNumber: target.reportNumber, status: plan.exists ? "NUMBER_ASSIGNED" : "REGISTERED", lifecycleId: plan.id, monitoringNumber };
     });
@@ -154,7 +171,8 @@ function createTargetedRegistration({ db, app, env = process.env, targets, expec
     const results = [];
     for (const target of targets) {
       try { results.push(await registerTarget(target)); }
-      catch (error) {
+      catch (caught) {
+        const error = caught instanceof RegistrationStop ? caught : new RegistrationStop("transaction", `${target.reportId}: ${sanitizeError(caught)}`);
         const pending = targets.slice(results.length).map(row => row.reportId);
         return { status: results.some(row => row.status !== "NO_CHANGE") ? "PARTIAL" : "FAILED", completed: results, failedReportId: target.reportId, notCompleted: pending,
           error: error.message,
@@ -170,4 +188,4 @@ function createTargetedRegistration({ db, app, env = process.env, targets, expec
   return { dryRun, execute, registerTarget, verifyAfter };
 }
 
-module.exports = { RegistrationStop, assessPlan, createTargetedRegistration, planDigest };
+module.exports = { RegistrationStop, assessPlan, createTargetedRegistration, planDigest, sanitizeError };
