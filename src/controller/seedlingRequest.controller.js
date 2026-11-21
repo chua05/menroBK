@@ -201,6 +201,11 @@ const validateDecisionReason = (
 // HELPER — VALIDATE REQUEST ITEMS
 // ========================================
 
+// A single seedling type may be fulfilled from multiple source batches. Keep a
+// loose batch-item safety cap here; the service enforces the 10-type limit after
+// resolving each inventory record to its canonical species.
+const MAX_REQUEST_BATCH_ITEMS = 50;
+
 const validateRequestItems = (
   items
 ) => {
@@ -213,9 +218,9 @@ const validateRequestItems = (
     );
   }
 
-  if (items.length > 10) {
+  if (items.length > MAX_REQUEST_BATCH_ITEMS) {
     throw new Error(
-      "A maximum of 10 seedling types may be requested at a time."
+      `A maximum of ${MAX_REQUEST_BATCH_ITEMS} seedling batch items may be requested at a time.`
     );
   }
 

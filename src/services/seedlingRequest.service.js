@@ -543,6 +543,35 @@ const validateItemStructure = (
 // CREATE SEEDLING REQUEST
 // ========================================
 
+const assertRequestedQuantityWithinStock = (inventoryData, quantity) => {
+  const rawAvailable = Number(
+    inventoryData.currentQuantity ?? inventoryData.availableQuantity ?? 0
+  );
+  const available = Number.isFinite(rawAvailable) ? rawAvailable : 0;
+
+  if (quantity > available) {
+    throw new Error(
+      `Requested quantity for ${
+        cleanString(inventoryData.species) || "the selected seedling"
+      } exceeds the available stock (${available.toLocaleString("en-US")} available).`
+    );
+  }
+};
+
+const MAX_REQUEST_SEEDLING_TYPES = 10;
+
+const seedlingTypeKey = (species) =>
+  String(species ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+
+const assertSeedlingTypeLimit = (canonicalItems) => {
+  const typeKeys = new Set(canonicalItems.map((item) => seedlingTypeKey(item.species)));
+  if (typeKeys.size > MAX_REQUEST_SEEDLING_TYPES) {
+    throw new Error(
+      `A maximum of ${MAX_REQUEST_SEEDLING_TYPES} seedling types may be requested at a time.`
+    );
+  }
+};
+
 const createSeedlingRequest =
   async (data, identification = null, requester = null) => {
     const authorizedWalkIn = requester?.role === "staff" && data.walkIn?.encodedBy === requester.uid && data.participantId === requester.walkInRequesterId && data.walkIn.citizenHasAccount === false;
@@ -585,8 +614,7 @@ const createSeedlingRequest =
 
       const inventoryData = inventoryDoc.data();
 
-      // Do NOT reject requests where requested quantity exceeds available stock.
-      // Preserve requested quantity as provided.
+      assertRequestedQuantityWithinStock(inventoryData, item.quantity);
 
       canonicalItems.push({
         inventoryId: inventoryDoc.id,
@@ -600,6 +628,8 @@ const createSeedlingRequest =
         quantity: item.quantity,
       });
     }
+
+    assertSeedlingTypeLimit(canonicalItems);
 
     const totalQuantity =
       canonicalItems.reduce(
@@ -1273,6 +1303,7 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
       }
 
       const inventory = inventoryDoc.data();
+      assertRequestedQuantityWithinStock(inventory, item.quantity);
       canonicalItems.push({
         inventoryId: inventoryDoc.id,
         species: cleanString(inventory.species),
@@ -1281,6 +1312,8 @@ const resubmitSeedlingRequest = async (id, participantId, data, actor = null) =>
         quantity: item.quantity,
       });
     }
+
+    assertSeedlingTypeLimit(canonicalItems);
 
     const proposal = data.eventProposal || {};
     const isProposedSite = data.workflow?.siteMode === "proposed";
