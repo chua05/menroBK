@@ -234,7 +234,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
 
 test("Staff review confirmation requires no findings or observation", async () => {
   records.seedlingRequests.set("request-frontend", { status: "Pending", preferredReleaseDate: validPreferredReleaseDate, eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" } });
-  records.seedlingInventory.set("inventory-1", { species: "Narra", currentQuantity: 10 });
+  records.seedlingInventory.set("inventory-1", { species: "Narra", currentQuantity: 10, availableQuantity: 10 });
   const res = response();
   await seedlingController.markRequestReviewed({
     params: { id: "request-frontend" },
@@ -604,7 +604,7 @@ test("request submission rejects a real site in a different barangay", async () 
   records.sites.set("site-2", {
     status: "active", barangay: "Bical", maximumCapacity: 100, planted: 0,
   });
-  records.seedlingInventory.set("inventory-1", { species: "Narra" });
+  records.seedlingInventory.set("inventory-1", { species: "Narra", currentQuantity: 10 });
   const payload = {
     items: [{ inventoryId: "inventory-1", quantity: 2 }],
     eventProposal: { plantingSiteId: "site-2", barangay: "Different" },
