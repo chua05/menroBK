@@ -27,6 +27,8 @@ const { auth, db, getStorageBucket } = require("../../src/config/firebase");
 const app = require("../../src/app");
 const PASSWORD = "Request-Letter-Test!2026";
 const prefix = `request-letter-http-${Date.now()}`;
+// Release and event dates must remain valid whenever this acceptance test runs.
+const futureDate = (days) => new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
 const users = Object.fromEntries(["participant", "other", "staff", "admin"].map(role =>
   [role, { uid: `${prefix}-${role}`, email: `${prefix}.${role}@example.test` }]));
 let server, baseUrl, tokens = {}, inventoryId;
@@ -67,8 +69,8 @@ async function files() {
 }
 function payload(id = crypto.randomUUID(), individual = false) {
   return { items: [{ inventoryId, quantity: 2 }], purpose: "Private document acceptance",
-    plantingLocation: "Synthetic Site", preferredReleaseDate: "2026-11-10", clientSubmissionId: id,
-    identification: { identificationType: "national_id", idNumber: "1234-5678-9012-3456", confirmed: true },
+    plantingLocation: "Synthetic Site", preferredReleaseDate: futureDate(30), clientSubmissionId: id,
+    identification: { identificationType: "national_id", idNumber: `TEST-${id.slice(0, 8)}`, confirmed: true },
     workflow: { sector: individual ? "Resident / Individual" : "Civic Organization / NGO",
       requestingAs: individual ? "individual" : "group", siteMode: "existing",
       addressProvince: "Sorsogon", addressMunicipality: "Bulan", addressBarangay: "Bical", street: "Purok 1",
@@ -77,7 +79,7 @@ function payload(id = crypto.randomUUID(), individual = false) {
       monitoringFrequency: "Weekly", existingSiteId: `${prefix}-site`,
       ...(individual ? {} : { eventName: "Synthetic planting" }) },
     eventProposal: { eventName: "Synthetic planting", barangay: "Bical", plantingSiteId: `${prefix}-site`,
-      proposedDate: "2026-11-12", startTime: "09:00", endTime: "11:00", eventLocation: "Synthetic Site",
+      proposedDate: futureDate(32), startTime: "09:00", endTime: "11:00", eventLocation: "Synthetic Site",
       latitude: 12.671, longitude: 123.875, expectedParticipants: 5, eventDescription: "Synthetic only" } };
 }
 function multipart(data, file) {
