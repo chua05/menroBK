@@ -234,7 +234,7 @@ test("Staff review advances Pending once and retains server-owned inventory deta
 
 test("Staff review confirmation requires no findings or observation", async () => {
   records.seedlingRequests.set("request-frontend", { status: "Pending", preferredReleaseDate: validPreferredReleaseDate, eventProposal: { proposedDate: validPreferredReleaseDate, proposedStartTime: "23:59", proposedEndTime: "" } });
-  records.seedlingInventory.set("inventory-1", { species: "Narra" });
+  records.seedlingInventory.set("inventory-1", { species: "Narra", currentQuantity: 10 });
   const res = response();
   await seedlingController.markRequestReviewed({
     params: { id: "request-frontend" },
@@ -716,7 +716,7 @@ test("submission rejects unsupported root-level sensitive fields", async () => {
 });
 
 test("submission reports unavailable secure identification storage as a service error", async () => {
-  records.seedlingInventory.set("inventory-secure", { species: "Narra" });
+  records.seedlingInventory.set("inventory-secure", { species: "Narra", currentQuantity: 10 });
   const previousKey = process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
   delete process.env.REQUEST_IDENTIFICATION_ENCRYPTION_KEY;
   const res = response();
