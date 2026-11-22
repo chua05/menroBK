@@ -8,6 +8,7 @@ const {
 const {
   EVIDENCE_UPLOAD_MAINTENANCE_MESSAGE,
   evidenceUploadMaintenanceGate,
+  evidenceUploadMaintenanceGateWhenFilesPresent,
 } = require("../src/middleware/evidenceUploadMaintenance.middleware");
 const {
   resolveEvidenceStorageConfig,
@@ -95,6 +96,32 @@ test("disabled gate preserves upload behavior", async () => {
       assert.deepEqual(await response.json(), { success: true, bytes: 9 });
     }));
   }
+});
+
+test("conditional maintenance gate allows file-free requests and blocks parsed uploads", async () => {
+  await withMaintenance("true", () => withServer((app) => {
+    app.post("/walk-in", express.json(), (req, res, next) => {
+      req.files = req.body.withFile ? { requestLetter: [{ originalname: "letter.docx" }] } : {};
+      next();
+    }, evidenceUploadMaintenanceGateWhenFilesPresent, (req, res) => {
+      res.status(201).json({ success: true });
+    });
+  }, async (url) => {
+    const withoutFile = await fetch(`${url}/walk-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ withFile: false }),
+    });
+    assert.equal(withoutFile.status, 201);
+
+    const withFile = await fetch(`${url}/walk-in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ withFile: true }),
+    });
+    assert.equal(withFile.status, 503);
+    assert.equal((await withFile.json()).message, EVIDENCE_UPLOAD_MAINTENANCE_MESSAGE);
+  }));
 });
 
 test("authorization runs before maintenance and retrieval remains available", async () => {

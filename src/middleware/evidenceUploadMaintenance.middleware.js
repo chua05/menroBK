@@ -11,7 +11,16 @@ function evidenceUploadMaintenanceGate(req, res, next) {
   return sendError(res, 503, EVIDENCE_UPLOAD_MAINTENANCE_MESSAGE);
 }
 
+function evidenceUploadMaintenanceGateWhenFilesPresent(req, res, next) {
+  const hasFiles = Object.values(req.files || {}).some(
+    (files) => Array.isArray(files) && files.length > 0,
+  );
+  if (!hasFiles) return next();
+  return evidenceUploadMaintenanceGate(req, res, next);
+}
+
 module.exports = {
   EVIDENCE_UPLOAD_MAINTENANCE_MESSAGE,
   evidenceUploadMaintenanceGate,
+  evidenceUploadMaintenanceGateWhenFilesPresent,
 };
