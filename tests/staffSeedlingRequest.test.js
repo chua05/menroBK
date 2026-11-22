@@ -437,7 +437,16 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
 
   // Plain walk-in without an acknowledgement.
   useBody({ citizen: { ...citizen } });
-  const plain = await send("staff", false); assert.equal(plain.status, 201, JSON.stringify(plain));
+  const previousMaintenance = process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED;
+  let plain;
+  try {
+    process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED = "true";
+    plain = await send("staff", false); assert.equal(plain.status, 201, JSON.stringify(plain));
+    const blockedUpload = await send("staff", true); assert.equal(blockedUpload.status, 503, JSON.stringify(blockedUpload));
+  } finally {
+    if (previousMaintenance === undefined) delete process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED;
+    else process.env.EVIDENCE_UPLOAD_MAINTENANCE_ENABLED = previousMaintenance;
+  }
   assert.equal(plain.data.walkIn.acknowledgement, null); assert.equal(plain.data.walkIn.receiptReference, ""); assert.equal(plain.data.status, "Reviewed");
   assert.equal(memory.records("walkInAcknowledgements").get(plain.data.id).descriptor, null);
   assert.equal((await http(`/seedling-requests/${plain.data.id}/acknowledgement`, "officer")).status, 404);
