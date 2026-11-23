@@ -1168,9 +1168,10 @@ const reviewSeedlingRequest =
   };
 
 // ========================================
-// STAFF RETURN FOR REVISION
+// STAFF / ADMIN RETURN FOR REVISION
 //
-// Pending -> Returned
+// Participant path: Pending -> Returned by Staff.
+// Staff-direct path: Reviewed -> Returned by Admin.
 // No inventory or event mutation occurs here.
 // ========================================
 
@@ -1179,7 +1180,8 @@ const returnSeedlingRequest = async (
   returnedBy,
   returnedByName,
   reason,
-  expectedVersion
+  expectedVersion,
+  actorRole = "staff"
 ) => {
   const requestRef = db.collection(COLLECTION).doc(id);
   const returnReason = cleanString(reason);
@@ -1198,8 +1200,24 @@ const returnSeedlingRequest = async (
     const request = requestDoc.data();
     assertIndependentRequestAction(request, returnedBy);
     assertMutationVersion(request, expectedVersion);
-    if (request.status !== "Pending") {
-      throw new Error("Only pending requests can be returned for revision.");
+    const isAdminReturn = actorRole === "admin";
+    const isEligibleAdminReturn = isAdminReturn
+      && request.status === "Reviewed"
+      && submissionPath.isStaffDirectRequest(request)
+      && request.staffReviewRequired === false
+      && request.archived !== true;
+    const isEligibleStaffReturn = actorRole === "staff"
+      && request.status === "Pending"
+      && !submissionPath.isStaffDirectRequest(request);
+
+    if (!isEligibleAdminReturn && !isEligibleStaffReturn) {
+      if (actorRole === "staff") {
+        throw new Error("Only pending requests can be returned for revision.");
+      }
+      throw Object.assign(
+        new Error("Only Staff-direct requests awaiting Admin approval can be returned for revision."),
+        { code: "REQUEST_RETURN_NOT_ELIGIBLE" }
+      );
     }
 
     const now = Timestamp.now();
@@ -1215,6 +1233,7 @@ const returnSeedlingRequest = async (
       returnReason,
       returnedBy,
       returnedByName: cleanString(returnedByName),
+      returnedByRole: isAdminReturn ? "admin" : "staff",
       returnedAt: now,
       updatedAt: now,
       requestVersion: requestVersion(request) + 1,
@@ -1224,19 +1243,22 @@ const returnSeedlingRequest = async (
           action: "returned",
           actorId: returnedBy,
           actorName: cleanString(returnedByName),
-          actorRole: "staff",
+          actorRole: isAdminReturn ? "admin" : "staff",
           reason: returnReason,
           at: now,
         },
       ],
     });
 
-    if (!request.walkIn) createNotificationInTransaction(transaction, {
+    const correctionRecipient = isAdminReturn
+      ? request.walkIn?.encodedBy || request.submittedByUid
+      : request.walkIn ? "" : request.participantId;
+    if (correctionRecipient) createNotificationInTransaction(transaction, {
       notificationId: `request_returned_${id}_${revisionNumber}`,
-      recipientUserId: request.walkIn?.encodedBy || request.participantId,
+      recipientUserId: correctionRecipient,
       type: "request_returned",
       title: "Request Returned for Revision",
-      message: `Your request ${request.requestNumber || id} was returned by MENRO Staff. Please review the reason, make the necessary corrections, and resubmit your request.`,
+      message: `Your request ${request.requestNumber || id} was returned by ${isAdminReturn ? "the Admin" : "MENRO Staff"}. Please review the reason, make the necessary corrections, and resubmit your request.`,
       relatedRecordType: "seedlingRequest",
       relatedRecordId: id,
       requestNumber: request.requestNumber || "",
@@ -1245,6 +1267,7 @@ const returnSeedlingRequest = async (
       details: {
         returnedAt: now,
         returnedByName: cleanString(returnedByName),
+        returnedByRole: isAdminReturn ? "admin" : "staff",
       },
       createdAt: now,
     });

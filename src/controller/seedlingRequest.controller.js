@@ -1029,18 +1029,22 @@ const returnRequestForRevision = async (req, res) => {
       req.user.uid,
       req.user.fullName || req.user.name || "",
       reason,
-      requireExpectedVersion(req.body)
+      requireExpectedVersion(req.body),
+      req.user.role
     );
 
     return res.status(200).json({
       success: true,
-      message: "Request returned to the participant for revision.",
+      message: req.user.role === "admin"
+        ? "Request returned to the Staff creator for revision."
+        : "Request returned to the participant for revision.",
       data: request,
     });
   } catch (error) {
     if (error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN") return res.status(403).json({ success: false, code: error.code, message: error.message });
     const notFound = error.message === "Seedling request not found.";
-    const conflict = error.message === "Only pending requests can be returned for revision.";
+    const conflict = error.message === "Only pending requests can be returned for revision."
+      || error.code === "REQUEST_RETURN_NOT_ELIGIBLE";
     const statusCode = notFound ? 404 : conflict || error.code === "STALE_REQUEST_VERSION" ? 409 : 400;
     return res.status(statusCode).json({
       success: false,

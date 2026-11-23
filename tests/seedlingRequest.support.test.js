@@ -824,7 +824,7 @@ test("review and decision roles remain separate", () => {
     assert.ok(layer);
     return layer.route.stack[1].handle;
   }
-  for (const [path, roles] of [["/:id/review", ["staff"]], ["/:id/return", ["staff"]], ["/:id/resubmit", ["participant", "staff"]], ["/:id/approve", ["admin"]], ["/:id/reject", ["admin"]]]) {
+  for (const [path, roles] of [["/:id/review", ["staff"]], ["/:id/return", ["staff", "admin"]], ["/:id/resubmit", ["participant", "staff"]], ["/:id/approve", ["admin"]], ["/:id/reject", ["admin"]]]) {
     for (const role of ["participant", "staff", "admin"]) {
       const res = response();
       let nextCalled = false;

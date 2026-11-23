@@ -134,6 +134,10 @@ test("Participant path: Staff reviews, then Admin approves; Staff cannot approve
   assert.equal((await http(`/seedling-requests/${request.id}/approve`, "staff", "PATCH", { expectedVersion: 0 })).status, 403);
   const reviewed = await http(`/seedling-requests/${request.id}/review`, "officer", "PATCH", { expectedVersion: 0, items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate });
   assert.equal(reviewed.status, 200, JSON.stringify(reviewed)); assert.equal(reviewed.data.status, "Reviewed"); assert.match(reviewed.data.reviewId, /^REV-\d{4}-\d{3,}$/);
+  assert.equal((await http(`/seedling-requests/${request.id}/return`, "admin", "PATCH", {
+    expectedVersion: reviewed.data.requestVersion,
+    reason: "Admin return is limited to Staff-direct requests",
+  })).status, 409);
   const approved = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: reviewed.data.requestVersion });
   assert.equal(approved.status, 200, JSON.stringify(approved)); assert.equal(approved.data.status, "Approved");
   const before = unchangedSnapshot();
@@ -237,6 +241,70 @@ test("Staff My Requests lists only their own and Staff-created requests; a histo
   assert.equal(updated.data.resubmissionProcessingEstimate.workingDaysMinimum, 5); noFabricatedReview(updated.data);
   assert.equal((await http(`/seedling-requests/${request.id}/resubmit`, "staff", "PATCH", body)).status, 409);
   assert.ok([...memory.records("notifications").values()].some(n => n.type === "request_awaiting_admin_approval" && n.relatedRecordId === request.id && /corrected/.test(n.message)));
+});
+
+test("Admin returns only Staff-direct requests and the Staff creator can correct the same request through repeated cycles", async () => {
+  const request = await submit("staff");
+  const inventoryBefore = JSON.stringify(memory.records("seedlingInventory").get("narra"));
+  const eventsBefore = JSON.stringify([...memory.records("events")]);
+
+  const staffDenied = await http(`/seedling-requests/${request.id}/return`, "officer", "PATCH", {
+    expectedVersion: request.requestVersion,
+    reason: "Staff must not return a direct request",
+  });
+  assert.notEqual(staffDenied.status, 200);
+
+  const returned = await http(`/seedling-requests/${request.id}/return`, "admin", "PATCH", {
+    expectedVersion: request.requestVersion,
+    reason: "Please clarify the care plan.",
+  });
+  assert.equal(returned.status, 200, JSON.stringify(returned));
+  assert.deepEqual(
+    [returned.data.status, returned.data.id, returned.data.participantId, returned.data.submittedByUid, returned.data.returnedByRole],
+    ["Returned", request.id, identities.staff.uid, identities.staff.uid, "admin"],
+  );
+  assert.equal(returned.data.reviewHistory.at(-1).actorRole, "admin");
+  assert.equal(returned.data.reviewHistory.some(entry => entry.action === "reviewed"), false);
+  assert.equal(JSON.stringify(memory.records("seedlingInventory").get("narra")), inventoryBefore);
+  assert.equal(JSON.stringify([...memory.records("events")]), eventsBefore);
+  assert.ok([...memory.records("notifications").values()].some(notification =>
+    notification.relatedRecordId === request.id
+    && notification.type === "request_returned"
+    && notification.recipientUserId === identities.staff.uid
+    && notification.reason === "Please clarify the care plan."
+  ));
+
+  const correction = { ...payload(), expectedVersion: returned.data.requestVersion };
+  correction.workflow.carePlan = "Water daily and protect seedlings from animals";
+  const resubmitted = await http(`/seedling-requests/${request.id}/resubmit`, "staff", "PATCH", correction);
+  assert.equal(resubmitted.status, 200, JSON.stringify(resubmitted));
+  assert.deepEqual(
+    [resubmitted.data.id, resubmitted.data.status, resubmitted.data.submissionPath, resubmitted.data.reviewStatus],
+    [request.id, "Reviewed", "STAFF_DIRECT_TO_ADMIN", "Not Required"],
+  );
+  noFabricatedReview(resubmitted.data);
+
+  const returnedAgain = await http(`/seedling-requests/${request.id}/return`, "admin", "PATCH", {
+    expectedVersion: resubmitted.data.requestVersion,
+    reason: "Please add watering frequency.",
+  });
+  assert.equal(returnedAgain.status, 200, JSON.stringify(returnedAgain));
+  assert.equal(returnedAgain.data.id, request.id);
+  assert.equal(returnedAgain.data.reviewHistory.filter(entry => entry.action === "returned").length, 2);
+  assert.equal((await http(`/seedling-requests/${request.id}/return`, "admin", "PATCH", {
+    expectedVersion: returnedAgain.data.requestVersion,
+    reason: "Duplicate return",
+  })).status, 409);
+
+  const archived = await submit("officer");
+  memory.records("seedlingRequests").set(archived.id, {
+    ...memory.records("seedlingRequests").get(archived.id),
+    archived: true,
+  });
+  assert.equal((await http(`/seedling-requests/${archived.id}/return`, "admin", "PATCH", {
+    expectedVersion: archived.requestVersion,
+    reason: "Archived requests stay read-only",
+  })).status, 409);
 });
 
 test("pre-approval schedule coordination is not offered on direct-to-Admin requests; historical Pending Staff requests keep it", async () => {

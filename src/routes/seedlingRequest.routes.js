@@ -108,11 +108,12 @@ router.patch(
 router.patch("/:id/pre-approval-schedule", verifyToken, authorizeRoles("staff"), savePreApprovalSchedule);
 router.patch("/:id/pre-approval-schedule/confirm", verifyToken, authorizeRoles("participant", "staff"), confirmPreApproval);
 
-// Staff may return only a currently pending request for participant revision.
+// Staff may return a participant request awaiting review. Admin may return only
+// a Staff-direct request awaiting the final decision.
 router.patch(
   "/:id/return",
   verifyToken,
-  authorizeRoles("staff"),
+  authorizeRoles("staff", "admin"),
   returnRequestForRevision
 );
 
