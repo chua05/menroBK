@@ -81,7 +81,7 @@ async function verifyOriginal({actorId,actorRole,visitId,sampleId,input={},files
   if (!["DRAFT","RETURNED"].includes(visit.status) || visit.version!==expectedVersion || Number(row.assessmentRevision||0)!==revision) throw fail(409,"ORIGINAL_BINDING_STALE","The visit status, version or tree revision changed. Refresh the authoritative visit.");
   const [cohortDoc,siteDoc]=await Promise.all([db.collection("verifiedPlantingCohorts").doc(visit.cohortId).get(),db.collection("sites").doc(visit.siteId).get()]);
   const cohort=cohortDoc.data();validation.cohortBinding(cohort,visit);
-  if (!siteDoc.exists || !cohort?.baseline?.sampleUnits?.some(u=>u.permanentId===sampleId)) throw fail(409,"ORIGINAL_BINDING_STALE","The approved site or permanent sample registration changed.");
+  if (!siteDoc.exists || !validation.samplesFor(cohort,visit).some(u=>u?.permanentId===sampleId)) throw fail(409,"ORIGINAL_BINDING_STALE","The approved site or permanent sample registration changed.");
   if (String(siteDoc.data().status||"").toLowerCase()==="inactive") throw fail(422,"ORIGINAL_SITE_INACTIVE","The assigned planting site is inactive.");
   const date=visit.dateMonitored;
   if (typeof date!=="string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0,10)!==date || date>dateOnlyInManila()) throw fail(409,"ORIGINAL_MONITORING_DATE_REQUIRED","Save a valid actual Date Monitored before verifying an original photo.");

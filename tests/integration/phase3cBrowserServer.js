@@ -22,6 +22,18 @@ if (releaseAcceptance) for (const name of ["PERMANENT_SAMPLE_WRITE_PAUSED", "PER
 if (evidenceReadOnly && (!extended || !isolated)) throw new Error("Read-only evidence acceptance requires isolated Phase 3D/4 mode.");
 if (extended && !isolated) throw new Error("Phase 3D/4 acceptance requires isolated emulators.");
 if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true", PERMANENT_SAMPLE_ANALYTICS_ENABLED: "true" });
+// Opt-in first-visit fixture (Plan v2 E1): an unsampled cohort whose visit 1 registers the 10% baseline.
+// The default mode is unchanged; the two permanent-sample flags are enabled only inside this process.
+const fixtureMode = process.env.MENRO_BROWSER_FIXTURE_MODE;
+if (fixtureMode !== undefined && fixtureMode !== "first-visit") throw new Error("Unknown browser fixture mode.");
+const firstVisitMode = fixtureMode === "first-visit";
+if (firstVisitMode) {
+  if (!formAcceptance || combinedWorkflow || evidenceReadOnly || releaseAcceptance !== undefined) throw new Error("First-visit fixture mode requires the isolated sample-monitoring form acceptance topology only.");
+  for (const name of ["PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED", "PERMANENT_SAMPLE_SCHEDULE_ENABLED"]) {
+    if (process.env[name] !== undefined) throw new Error("First-visit fixture mode owns its process-local permanent-sample flags.");
+  }
+  Object.assign(process.env, { PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED: "true", PERMANENT_SAMPLE_SCHEDULE_ENABLED: "true" });
+}
 const topology = formAcceptance ? { project: "demo-menro-legacy-monitoring-20261106", firestore: "127.0.0.1:8381", auth: "127.0.0.1:9399", storage: "127.0.0.1:9398", bucket: "demo-menro-legacy-monitoring-20261106.firebasestorage.app" } : isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
 Object.assign(process.env, {
   NODE_ENV: "test", MENRO_INTEGRATION_TEST: "true", MENRO_REQUEST_LETTER_ACCEPTANCE: "true",
@@ -101,7 +113,7 @@ async function main() {
   diagnosticReady = true;
   const visitDate = formAcceptance ? new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()) : "2099-01-01";
   const visitId = visitService._test.id(cohortId, visitDate);
-  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId, visitDate, formAcceptance, combinedWorkflow }), { encoding: "utf8", flag: "wx" });
+  await fs.writeFile(manifestPath(prefix), JSON.stringify({ prefix, project: topology.project, visitId, visitDate, formAcceptance, combinedWorkflow, ...(firstVisitMode ? { mode: fixtureMode } : {}) }), { encoding: "utf8", flag: "wx" });
   for (const [role, uid] of Object.entries(ids)) {
     const email = `${role}.${prefix}@example.test`;
     await auth.createUser({ uid, email, password, emailVerified: true });
@@ -109,16 +121,33 @@ async function main() {
       ...(extended || combinedWorkflow ? { fullName: "Isolated acceptance user", username: `${role}-${prefix}`, contactNumber: "09123456789", userType: "Other", userTypeDetail: "Disposable emulator fixture" } : {}) });
   }
   await db.collection("sites").doc(siteId).set({ siteName: "Phase 3C browser fixture", latitude: 12.662301, longitude: 123.932983, coverageRadiusMeters: 50, status: "Active", testFixture: prefix });
+  // First-visit mode: an Admin-verified single-species report of 25 trees under the PERMANENT_SAMPLE policy,
+  // and a cohort with NO sampling plan and NO baseline. No visit is created; Staff start visit 1 in the browser.
+  const reportNumber = `PR-FV-${prefix.slice("phase3c-browser-".length, "phase3c-browser-".length + 8)}`;
   if (extended) {
     await db.collection("seedlingRequests").doc(`${prefix}-source`).set({ participantId: ids.participant, testFixture: prefix });
-    await db.collection("plantingReports").doc(`${prefix}-report`).set({ requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: formAcceptance ? 20 : 10, testFixture: prefix });
+    await db.collection("plantingReports").doc(`${prefix}-report`).set(firstVisitMode
+      ? { requestId: `${prefix}-source`, reportNumber, verificationStatus: "Approved", quantityPlanted: 25, siteId, plantingDate: visitDate,
+        reportingPolicy: { monitoring: "PERMANENT_SAMPLE" }, testFixture: prefix }
+      : { requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: formAcceptance ? 20 : 10, testFixture: prefix });
   }
-  await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, ...(extended ? { requestId: `${prefix}-source` } : {}) }, baselineVersion: 1,
+  if (firstVisitMode) await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, requestId: `${prefix}-source`,
+    plantingDate: visitDate, species: [{ species: "Narra", verifiedPlantedQuantity: 25 }] }, verifiedPlantedQuantity: 25,
+    baselineVersion: 0, baselineStatus: "NOT_STARTED", baseline: null, testFixture: prefix });
+  else await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, ...(extended ? { requestId: `${prefix}-source` } : {}) }, baselineVersion: 1,
     verifiedPlantedQuantity: formAcceptance ? 20 : 10,
     samplingPlan: { status: "APPROVED", version: 1, selectedSamples: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map(permanentId => ({ permanentId, species: "Narra" })) },
     baseline: { approvalStatus: "APPROVED", sampleUnits: (formAcceptance ? ["TREE-001", "TREE-002"] : ["TREE-001"]).map((permanentId, index) => ({ permanentId, condition: "Healthy", ...(formAcceptance ? { heightMeters: 1, diameterCentimeters: 5, latitude: 12.662301 + index * 0.00003, longitude: 123.932983, captureDate: visitDate } : {}) })) }, testFixture: prefix });
-  const visit = await visitService.create({actorRole:"staff", cohortId, actorId: ids.staff, visitDate, testOnly: true });
-  assert.equal(visit.status, "DRAFT");
+  const visit = firstVisitMode ? { id: visitId, sampleAssessments: [] } : await visitService.create({actorRole:"staff", cohortId, actorId: ids.staff, visitDate, testOnly: true });
+  if (!firstVisitMode) assert.equal(visit.status, "DRAFT");
+  if (firstVisitMode) {
+    // The seeded cohort must be offered as an eligible first visit with the server-calculated 10% target.
+    const row = (await visitService.readiness({ actorId: ids.staff, actorRole: "staff" })).eligible.find(entry => entry.cohortId === cohortId);
+    assert.equal(row?.registersBaseline, true);
+    assert.equal(row.sampleTarget, 3);
+    const cohort = (await db.collection("verifiedPlantingCohorts").doc(cohortId).get()).data();
+    assert.equal(cohort.samplingPlan, undefined); assert.equal(cohort.baseline, null);
+  }
   const workflowFixture = combinedWorkflow ? await require("./combinedWorkflowFixture").seed(prefix) : {};
   const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
   if (releaseAcceptance === "paused") process.env.PERMANENT_SAMPLE_WRITE_PAUSED = "true";
@@ -128,7 +157,8 @@ async function main() {
   await fs.writeFile(fixturePath, JSON.stringify({ prefix, project: topology.project,
     releaseAcceptance, ...releaseFixture, ...workflowFixture,
     evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
-    password, visitId: visit.id, visitDate, sampleIds: visit.sampleAssessments.map(row => row.sampleId), diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])) }), "utf8");
+    password, visitId: visit.id, visitDate, sampleIds: visit.sampleAssessments.map(row => row.sampleId), diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])),
+    ...(firstVisitMode ? { mode: fixtureMode, cohortId, plantingReportId: `${prefix}-report`, reportNumber, expectedSampleTarget: 3 } : {}) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));
 }
 async function stop(code = 0) {

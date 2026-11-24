@@ -3,6 +3,7 @@ const release = require("../config/permanentSampleRelease");
 const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
+const { FIRST_VISIT_BASELINE_POLICY_ID, firstVisitBaselineEnabled, calculateSampleTarget, generateTreeIds } = require("../config/firstVisitBaseline");
 
 const cohorts = db.collection("verifiedPlantingCohorts");
 const BASELINE_STATUSES = new Set(["NOT_STARTED", "IN_PROGRESS", "REGISTERED"]);
@@ -233,6 +234,145 @@ function samplingPlanSnapshot(plan) {
   };
 }
 
+// --- First monitoring visit = sampling plan + baseline registration -------
+// Evaluates the flag only for first-visit plans, so every other path is unchanged
+// (and an invalid flag value cannot affect legacy plans).
+function isFirstVisitPlanActive(plan) {
+  return plan?.provisionalPolicy === FIRST_VISIT_BASELINE_POLICY_ID && firstVisitBaselineEnabled();
+}
+
+function coded(message, code, status = 409) {
+  return Object.assign(new Error(message), { status, code });
+}
+
+// A FIRST_VISIT plan and its baseline change only through the first monitoring visit (create, submit, review).
+// The legacy plan and baseline routes always refuse such a cohort, whatever the flag or plan status.
+function assertNotFirstVisitCohort(current) {
+  if (current?.samplingPlan?.origin === "FIRST_VISIT") {
+    throw coded("This cohort's sampling plan and baseline are managed by its first monitoring visit.", "FIRST_VISIT_BASELINE_ACTIVE");
+  }
+}
+
+const FIRST_VISIT_SELECTION_REASON = "Physically selected by Staff during the first monitoring visit";
+
+function firstVisitTreeIds(reportNumber, cohortId, count) {
+  if (typeof reportNumber === "string" && /^[A-Za-z0-9_-]+$/.test(reportNumber.trim())) {
+    try { return generateTreeIds(reportNumber.trim(), count); } catch { /* too long: fall back to the cohort id */ }
+  }
+  return generateTreeIds(String(cohortId || ""), count);
+}
+
+function prepareFirstVisitPlan({ cohort, reportNumber, cohortId, actorId, now }) {
+  if (cohort?.samplingPlan || cohort?.baseline) {
+    throw coded("This cohort already has a sampling plan or baseline; the first-visit baseline does not apply.", "FIRST_VISIT_BASELINE_NOT_APPLICABLE");
+  }
+  const target = calculateSampleTarget(cohort?.verifiedPlantedQuantity);
+  if (!target) throw coded("This cohort has no verified planted quantity for sampling.", "VERIFIED_QUANTITY_UNAVAILABLE");
+  // [LIMITATION L1] Interim safeguard, not policy: multi-species allocation awaits a MENRO decision.
+  const species = Array.isArray(cohort?.source?.species) ? cohort.source.species : [];
+  const quantityOf = row => Number(row?.verifiedPlantedQuantity ?? row?.releasedQuantity) || 0;
+  const planted = species.filter(row => quantityOf(row) > 0);
+  const candidates = [...new Set((planted.length ? planted : species).map(row => String(row?.species || "").trim()).filter(Boolean))];
+  if (candidates.length > 1) {
+    throw coded("Multi-species cohorts need a MENRO-approved species allocation before first-visit sampling.", "SPECIES_ALLOCATION_PENDING");
+  }
+  const siteReference = String(cohort?.source?.siteId || "").trim();
+  const ids = firstVisitTreeIds(reportNumber, cohort?.id || cohortId, target);
+  const selectedSamples = normalizePlannedSamples(ids.map(permanentId => ({ permanentId, unitType: "tree", species: candidates[0],
+    siteReference, selectionReason: FIRST_VISIT_SELECTION_REASON })), target);
+  const speciesSiteDistribution = normalizeDistribution([{ species: candidates[0], siteReference, sampleIds: ids }], selectedSamples);
+  const samplingPlan = {
+    schemaVersion: 1,
+    version: Number(cohort?.samplingPlan?.version || 0) + 1,
+    status: "DRAFT",
+    origin: "FIRST_VISIT",
+    provisionalPolicy: FIRST_VISIT_BASELINE_POLICY_ID,
+    provisionalTarget: target,
+    selectionMethod: "documented-manual",
+    selectedSamples,
+    speciesSiteDistribution,
+    notes: "",
+    submittedBy: null,
+    submittedAt: null,
+    createdBy: actorId,
+    createdAt: now,
+  };
+  return { samplingPlan, historyEntry: samplingPlanSnapshot(samplingPlan) };
+}
+
+const PLAN_TRANSITIONS = { PENDING_ADMIN_APPROVAL: new Set(["DRAFT", "RETURNED"]), APPROVED: new Set(["PENDING_ADMIN_APPROVAL"]), RETURNED: new Set(["PENDING_ADMIN_APPROVAL"]) };
+
+function planReviewTransition({ samplingPlan, samplingPlanHistory } = {}, status, actorId, now, remarks = "") {
+  if (!PLAN_TRANSITIONS[status]) throw coded("Sampling plan status is invalid.", "INVALID_PLAN_STATUS", 400);
+  if (!samplingPlan || !PLAN_TRANSITIONS[status].has(samplingPlan.status)) {
+    throw coded(`A ${samplingPlan?.status || "missing"} sampling plan cannot move to ${status}.`, "INVALID_PLAN_TRANSITION");
+  }
+  const reviewRemarks = String(remarks || "").trim().slice(0, 1000);
+  if (status === "RETURNED" && !reviewRemarks) throw coded("Remarks are required when returning a sampling plan.", "REVIEW_REMARKS_REQUIRED", 400);
+  const next = status === "PENDING_ADMIN_APPROVAL"
+    ? { ...samplingPlan, status, submittedBy: actorId, submittedAt: now, reviewedBy: null, reviewedAt: null, reviewRemarks: null }
+    : { ...samplingPlan, status, reviewedBy: actorId, reviewedAt: now, reviewRemarks };
+  const history = Array.isArray(samplingPlanHistory) ? samplingPlanHistory : [];
+  return { samplingPlan: next, samplingPlanHistory: [...history, samplingPlanSnapshot(next)] };
+}
+
+// Mirrors sampleMonitoringVisit.service currentEvidence(): the evidence entry whose
+// revision equals the assessment revision and that carries a private evidence link.
+// Replicated (not imported) because the shared helper returns a boolean, not the entry.
+function currentEvidenceEntry(row = {}) {
+  return (row.evidenceHistory || []).filter(evidence =>
+    Number(evidence?.revision) === Number(row.assessmentRevision || 0) && Boolean(evidence?.privateEvidence)).at(-1) || null;
+}
+
+const BASELINE_CONDITION = { Healthy: "Healthy", Damaged: "Damaged", Dead: "Dead", "Needs Rechecking": "Unknown" };
+
+function buildBaselineFromVisit({ cohort, visit, actorId, now }) {
+  if (!Number.isSafeInteger(visit?.baselineVersion) || visit.baselineVersion < 1) {
+    throw coded("The first monitoring visit must carry a positive baseline version.", "BASELINE_VERSION_INVALID");
+  }
+  const planned = Array.isArray(cohort?.samplingPlan?.selectedSamples) ? cohort.samplingPlan.selectedSamples : [];
+  const assessments = Array.isArray(visit?.sampleAssessments) ? visit.sampleAssessments : [];
+  const bySample = new Map(assessments.map(row => [row?.sampleId, row]));
+  const plannedIds = new Set(planned.map(sample => sample.permanentId));
+  if (!planned.length || bySample.size !== assessments.length || assessments.length !== planned.length || planned.some(sample => !bySample.has(sample.permanentId)) || assessments.some(row => !plannedIds.has(row?.sampleId))) {
+    throw coded("Every planned permanent sample must be assessed in the first monitoring visit.", "BASELINE_INCOMPLETE");
+  }
+  const provenance = new Map();
+  const draftUnits = planned.map(sample => {
+    const row = bySample.get(sample.permanentId);
+    const evidence = currentEvidenceEntry(row);
+    const evidenceId = String(evidence?.evidenceId || evidence?.captureSessionId || "");
+    const latitude = evidence?.location?.latitude, longitude = evidence?.location?.longitude;
+    if (!evidence || !evidenceId || !Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude)) || latitude === null || longitude === null) {
+      throw Object.assign(coded("Current verified evidence with GPS is required for every permanent sample.", "BASELINE_EVIDENCE_MISSING"), { sampleId: sample.permanentId });
+    }
+    const revision = Number(row.assessmentRevision || 0);
+    provenance.set(sample.permanentId, { sourceVisitId: visit.id, sourceAssessmentRevision: revision });
+    const height = row.heightCentimeters;
+    return {
+      permanentId: sample.permanentId, unitType: "tree", latitude, longitude,
+      condition: BASELINE_CONDITION[row.condition] || row.condition,
+      // normalizeSampleUnits treats only undefined/"" as absent (Number(null) would be 0).
+      heightMeters: height === null || height === undefined || height === "" ? undefined : Number(height) / 100,
+      diameterCentimeters: row.diameterCentimeters === null ? undefined : row.diameterCentimeters,
+      photoReferences: [{ evidenceId, capturedAt: evidence.capturedAt || evidence.linkedAt || null }],
+      remarks: row.remarks, captureDate: String(row.assessedOn || visit.dateMonitored || "").slice(0, 10),
+    };
+  });
+  // normalizeSampleUnits keeps only { evidenceId, capturedAt } per photo and has no species field,
+  // so species and photo provenance are re-attached after validation. privateEvidence is never copied.
+  const species = new Map(planned.map(sample => [sample.permanentId, sample.species]));
+  const sampleUnits = normalizeSampleUnits(draftUnits).map(unit => ({ ...unit, species: species.get(unit.permanentId),
+    photoReferences: unit.photoReferences.map(photo => ({ ...photo, ...provenance.get(unit.permanentId) })) }));
+  const registeredBy = visit.createdBy || actorId;
+  const source = { type: "FIRST_VISIT", visitId: visit.id };
+  const baselineVersion = visit.baselineVersion;
+  const baseline = { registeredBy, registeredAt: now, approvedBy: actorId, approvedAt: now, approvalStatus: "APPROVED", sampleUnits, source };
+  const pendingEntry = { version: baselineVersion, status: "PENDING_ADMIN_APPROVAL", registeredBy, registeredAt: now, sampleUnits, source };
+  const approvedEntry = { version: baselineVersion, status: "APPROVED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: "", source };
+  return { baseline, baselineHistoryAppend: [pendingEntry, approvedEntry], baselineStatus: "REGISTERED", baselineVersion };
+}
+
 async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionMethod, selectedSamples, speciesSiteDistribution, notes, submitForApproval = false }) {
   release.writeScope(actorId, cohortId);
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabledError();
@@ -243,19 +383,25 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
     const doc = await transaction.get(ref);
     if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
     const current = doc.data();
+    assertNotFirstVisitCohort(current);
     const currentPlan = current.samplingPlan || { version: 0, status: "DRAFT" };
     if (Number(currentPlan.version || 0) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
     if (currentPlan.status === "APPROVED") throw conflict("An approved sampling plan cannot be replaced. Submit an approved replacement through MENRO policy.");
-    if (!current.samplingPolicySnapshot && !resolveVerifiedPlantingCohortConfig().provisionalSamplingAllowed) {
+    // A first-visit plan keeps its own policy, and only while the first-visit baseline flag is on.
+    const firstVisit = isFirstVisitPlanActive(currentPlan);
+    if (!firstVisit && !current.samplingPolicySnapshot && !resolveVerifiedPlantingCohortConfig().provisionalSamplingAllowed) {
       throw Object.assign(conflict("This cohort has no MENRO-approved sampling policy snapshot. A sampling plan cannot use the test-only provisional rule."), { code: "SAMPLING_POLICY_SNAPSHOT_REQUIRED" });
     }
-    const readiness = current.samplingPolicySnapshot ? require("./purposePolicy.service").samplingReadiness(current.verifiedPlantedQuantity, current.samplingPolicySnapshot, current.source?.plantingDate) : null;
+    const readiness = !firstVisit && current.samplingPolicySnapshot ? require("./purposePolicy.service").samplingReadiness(current.verifiedPlantedQuantity, current.samplingPolicySnapshot, current.source?.plantingDate) : null;
     if (readiness?.pending.length) throw conflict("Sampling policy/procedures are pending MENRO approval; automatic and manual sample-plan activation remains blocked.");
-    const target = readiness ? readiness.target : provisionalTarget(current.verifiedPlantedQuantity);
+    const target = firstVisit ? calculateSampleTarget(current.verifiedPlantedQuantity) : readiness ? readiness.target : provisionalTarget(current.verifiedPlantedQuantity);
     if (!target) throw new Error("This cohort has no authoritative planted quantity for sampling.");
     const samples = normalizePlannedSamples(selectedSamples, target);
+    if (firstVisit && samples.map(sample => sample.permanentId).join("\u0000") !== (currentPlan.selectedSamples || []).map(sample => sample.permanentId).join("\u0000")) {
+      throw Object.assign(conflict("First-visit Tree IDs are assigned by the server and cannot be changed."), { code: "FIRST_VISIT_TREE_IDS_LOCKED" });
+    }
     const distribution = normalizeDistribution(speciesSiteDistribution, samples);
-    if (current.samplingPolicySnapshot && (samples.some(sample => sample.unitType !== "tree") || distribution.some(row => row.sampleIds.some(id => {
+    if ((firstVisit || current.samplingPolicySnapshot) && (samples.some(sample => sample.unitType !== "tree") || distribution.some(row => row.sampleIds.some(id => {
       const selected = samples.find(sample => sample.permanentId === id);
       return selected.species !== row.species || selected.siteReference !== row.siteReference;
     })))) throw new Error("New permanent-tree sampling must preserve each selected tree's species and site distribution.");
@@ -264,8 +410,9 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
       schemaVersion: 1,
       version: Number(currentPlan.version || 0) + 1,
       status: submitForApproval ? "PENDING_ADMIN_APPROVAL" : "DRAFT",
-      provisionalPolicy: current.samplingPolicySnapshot ? "ADMIN_APPROVED_PURPOSE_POLICY_SNAPSHOT" : resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
-      ...(current.samplingPolicySnapshot ? { samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}),
+      ...(firstVisit ? { origin: "FIRST_VISIT", createdBy: currentPlan.createdBy || actorId, createdAt: currentPlan.createdAt || now } : {}),
+      provisionalPolicy: firstVisit ? FIRST_VISIT_BASELINE_POLICY_ID : current.samplingPolicySnapshot ? "ADMIN_APPROVED_PURPOSE_POLICY_SNAPSHOT" : resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
+      ...(!firstVisit && current.samplingPolicySnapshot ? { samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}),
       provisionalTarget: target,
       selectionMethod,
       selectedSamples: samples,
@@ -289,13 +436,17 @@ async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve
   await db.runTransaction(async (transaction) => {
     const doc = await transaction.get(ref);
     if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
-    const current = doc.data(); const plan = current.samplingPlan;
+    const current = doc.data(); assertNotFirstVisitCohort(current); const plan = current.samplingPlan;
     if (!plan || plan.status !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending sampling plan can be reviewed.");
     if (Number(plan.version) !== Number(expectedVersion)) throw conflict("This sampling plan changed while you were editing. Refresh and try again.");
     // A plan built on the test-only provisional rule may still be returned, but never approved outside isolated tests.
     const config = resolveVerifiedPlantingCohortConfig();
     if (approve === true && plan.provisionalPolicy === config.provisionalSamplingPolicy && !config.provisionalSamplingAllowed) {
       throw Object.assign(conflict("This sampling plan uses the test-only provisional rule and cannot be approved. Return it until a MENRO-approved policy applies."), { code: "TEST_ONLY_SAMPLING_POLICY_REJECTED" });
+    }
+    // A first-visit plan may be approved only while the first-visit baseline flag is on; it can always be returned.
+    if (approve === true && plan.provisionalPolicy === FIRST_VISIT_BASELINE_POLICY_ID && !firstVisitBaselineEnabled()) {
+      throw Object.assign(conflict("First-visit baseline plans cannot be approved while the first-visit baseline workflow is disabled. Return it instead."), { code: "FIRST_VISIT_BASELINE_DISABLED" });
     }
     if (estimationEligibilityApproved && (!current.samplingPolicySnapshot || !Array.isArray(current.samplingReadiness?.pending) || current.samplingReadiness.pending.length || plan.selectedSamples.some(sample => sample.unitType !== "tree"))) throw conflict("Sampling validity cannot be approved while minimums, allocation/selection procedures or tree identities are unresolved.");
     const now = Timestamp.now();
@@ -378,6 +529,7 @@ async function registerBaselineImpl({ cohortId, expectedVersion, status = "REGIS
       throw error;
     }
     const current = doc.data();
+    assertNotFirstVisitCohort(current);
     const plan = current.samplingPlan;
     if (!plan || plan.status !== "APPROVED") throw conflict("An approved sampling plan is required before baseline registration.");
     if (Number(current.baselineVersion || 0) !== Number(expectedVersion)) {
@@ -488,6 +640,7 @@ async function approveBaseline({ cohortId, actorId, expectedVersion, approve = t
     const doc = await transaction.get(ref);
     if (!doc.exists) { const error = new Error("Verified planting cohort not found."); error.status = 404; throw error; }
     const current = doc.data();
+    assertNotFirstVisitCohort(current);
     if (Number(current.baselineVersion || 0) !== Number(expectedVersion)) throw conflict("This baseline changed while you were editing. Refresh and try again.");
     if (!current.baseline || current.baseline.approvalStatus !== "PENDING_ADMIN_APPROVAL") throw conflict("Only a pending baseline can be reviewed.");
     const now = Timestamp.now();
@@ -509,5 +662,9 @@ module.exports = {
   registerBaseline,
   registerBaselineWithEvidence,
   approveBaseline,
-  _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples, baselineEvidenceRecordId },
+  prepareFirstVisitPlan,
+  planReviewTransition,
+  buildBaselineFromVisit,
+  _test: { authoritativeQuantity, normalizeSampleUnits, provisionalTarget, normalizePlannedSamples, normalizeDistribution, baselineEvidenceRecordId,
+    prepareFirstVisitPlan, planReviewTransition, buildBaselineFromVisit, currentEvidenceEntry, isFirstVisitPlanActive },
 };

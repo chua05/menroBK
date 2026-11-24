@@ -280,6 +280,8 @@ function seed() {
     ],
   });
   table("verifiedPlantingCohorts").set("c", {
+    // B3: the shared cohortBinding also checks the cohort source site.
+    source: { siteId: "site" },
     samplingPlan: { status: "APPROVED", version: 1 },
     baseline: { approvalStatus: "APPROVED" },
     baselineVersion: 1,
@@ -557,4 +559,56 @@ test("unsupported original evidence reports a capture-required code without stor
   captureEvidenceAllowed = true;
   await service.upload({ ...input(), idempotencyKey: "camera_after_rejection_123" });
   assert.equal(consumed, 1); assert.equal(linked, 1);
+});
+
+// ---- B3: evidence for a first monitoring visit that registers the baseline ----
+function seedFirstVisitDraft() {
+  seed();
+  Object.assign(table("sampleMonitoringVisits").get("v"), { registersBaseline: true, samplingPlanVersion: 1, baselineVersion: 1 });
+  table("verifiedPlantingCohorts").set("c", {
+    source: { siteId: "site" },
+    samplingPlan: { status: "DRAFT", version: 1, origin: "FIRST_VISIT", selectedSamples: [{ permanentId: "TREE-001" }] },
+    baseline: null,
+    baselineVersion: 0,
+  });
+}
+async function withFirstVisitFlag(value, fn) {
+  const prior = process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED;
+  if (value === undefined) delete process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED;
+  else process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED = value;
+  try { return await fn(); } finally {
+    if (prior === undefined) delete process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED;
+    else process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED = prior;
+  }
+}
+
+test("B3 evidence links to a first-visit draft bound to its unapproved first-visit plan", async () => {
+  await withFirstVisitFlag("true", async () => {
+    seedFirstVisitDraft();
+    const out = await service.upload(input());
+    assert.deepEqual(out, { visitId: "v", sampleId: "TREE-001" });
+    assert.equal(table("sampleMonitoringVisits").get("v").sampleAssessments[0].evidenceHistory.length, 1);
+    assert.equal(consumed, 1);
+    assert.equal(linked, 1);
+  });
+});
+
+test("B3 first-visit evidence is refused when the flag is off, the plan is approved early, or the binding drifts", async () => {
+  const cases = [
+    [undefined, () => {}],
+    ["true", () => { table("verifiedPlantingCohorts").get("c").samplingPlan.status = "APPROVED"; }],
+    ["true", () => { table("verifiedPlantingCohorts").get("c").samplingPlan.origin = "MANUAL"; }],
+    ["true", () => { table("verifiedPlantingCohorts").get("c").baselineVersion = 1; }],
+    ["true", () => { table("verifiedPlantingCohorts").get("c").source.siteId = "other"; }],
+    ["true", () => { table("sampleMonitoringVisits").get("v").registersBaseline = false; }],
+  ];
+  for (const [flag, mutate] of cases) {
+    await withFirstVisitFlag(flag, async () => {
+      seedFirstVisitDraft(); mutate();
+      await assert.rejects(() => service.upload(input()), error => error.status === 409);
+      assert.equal(table("sampleMonitoringVisits").get("v").sampleAssessments[0].evidenceHistory, undefined);
+      assert.equal(table("sampleMonitoringEvidenceHashes").size, 0);
+      assert.equal(consumed, 0);
+    });
+  }
 });

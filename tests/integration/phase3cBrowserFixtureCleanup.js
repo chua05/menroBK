@@ -120,6 +120,14 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
       informationNotifications.push(notice);
     }
   }
+  // First-visit fixture mode: a strict (visit 1) submission notifies active Admins through the existing
+  // notification infrastructure, one deterministic id per visit/revision/Admin. Only this visit's notices are removed.
+  const submittedNotifications = manifest?.mode === "first-visit" ? (await db.collection("notifications").where("relatedRecordId", "==", visitId).get()).docs : [];
+  for (const notice of submittedNotifications) {
+    assert.equal(notice.data().relatedRecordType, "sampleMonitoringVisit");
+    assert.equal(notice.data().type, "sample_monitoring_visit_submitted");
+    assert.ok(notice.id.startsWith(`sample_monitoring_visit_submitted_${visitId}_`));
+  }
   const sourceRecords = [];
   for (const [collection, id] of [["seedlingRequests", `${prefix}-source`], ["plantingReports", `${prefix}-report`]]) {
     const doc = await db.collection(collection).doc(id).get();
@@ -134,7 +142,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   for (const id of counterIds) assert.ok(typeof id === "string" && id.startsWith(`${prefix}_`) && !id.includes("/"));
   const fixtureCounters = (await Promise.all(counterIds.map(id => db.collection("counters").doc(id).get()))).filter(doc => doc.exists);
   const docs = [...fixtureCounters, ...originals.docs, ...captures.docs, ...hashes.docs, ...operations.docs, ...intents, ...quota.docs, ...days.docs, ...audits.docs,
-    ...information.docs, ...informationNotifications, ...sourceRecords, ...(combined?.docs || [])];
+    ...information.docs, ...informationNotifications, ...submittedNotifications, ...sourceRecords, ...(combined?.docs || [])];
   if (dryRun) return { records: docs.length, users: users.filter(item => item.user).length, objects: objects.size, ownershipVerified: true };
   // No mutation precedes the ownership checks above. Errors other than absent
   // resources remain failures, so cleanup can never silently claim success.

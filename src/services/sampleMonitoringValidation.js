@@ -16,12 +16,42 @@ function measurement(value) {
   if (!Number.isFinite(number) || number < 0) throw invalid("Measurements must be nonnegative finite numbers or empty.");
   return number;
 }
+// API boundary units: stem diameter is exchanged in millimetres and stored in the existing centimetre field
+// (mm = cm x 10). Fixed-decimal rounding removes binary float noise (e.g. 12.3 / 10 -> 1.23, not 1.2300000000000002).
+const mmToCm = mm => mm === null || mm === undefined || !Number.isFinite(mm) ? null : Number((mm / 10).toFixed(6));
+const cmToMm = cm => cm === null || cm === undefined || !Number.isFinite(cm) ? null : Number((cm * 10).toFixed(5));
+// First monitoring visit = baseline registration: the visit registers the baseline and the cohort's
+// baseline is not yet approved, so the visit binds to the unapproved first-visit plan instead.
+const FIRST_VISIT_PLAN_OPEN_STATUSES = new Set(["DRAFT", "PENDING_ADMIN_APPROVAL", "RETURNED"]);
+function registersFirstVisitBaseline(cohort, visit) {
+  return visit?.registersBaseline === true && cohort?.baseline?.approvalStatus !== "APPROVED";
+}
+// Single source of truth for whether a visit still matches its cohort (site, plan, baseline).
 function cohortBinding(cohort, visit) {
+  if (registersFirstVisitBaseline(cohort, visit)) {
+    const plan = cohort?.samplingPlan;
+    // Evaluated only for first-visit visits, so legacy paths never read the flag (or hit its 503 when invalid).
+    if (!require("../config/firstVisitBaseline").firstVisitBaselineEnabled()) {
+      throw Object.assign(conflict("The first-visit baseline workflow is disabled."), { code: "FIRST_VISIT_BASELINE_DISABLED" });
+    }
+    if (plan?.origin !== "FIRST_VISIT" || !FIRST_VISIT_PLAN_OPEN_STATUSES.has(plan?.status) ||
+        cohort.source?.siteId !== visit.siteId || Number(plan.version) !== visit.samplingPlanVersion ||
+        Number(cohort.baselineVersion || 0) + 1 !== visit.baselineVersion) {
+      throw conflict("The first-visit site, sampling plan and baseline versions must still match this visit.");
+    }
+    return;
+  }
   if (cohort?.samplingPlan?.status !== "APPROVED" || cohort?.baseline?.approvalStatus !== "APPROVED" ||
       cohort.source?.siteId !== visit.siteId || Number(cohort.samplingPlan.version) !== visit.samplingPlanVersion ||
       Number(cohort.baselineVersion || 0) !== visit.baselineVersion) {
     throw conflict("Approved site, plan and baseline versions must still match this visit.");
   }
+}
+// The permanent samples a visit assesses: the first-visit plan's Tree IDs until visit 1 is approved,
+// then the approved baseline's registered units (the same Tree IDs).
+function samplesFor(cohort, visit) {
+  const rows = registersFirstVisitBaseline(cohort, visit) ? cohort?.samplingPlan?.selectedSamples : cohort?.baseline?.sampleUnits;
+  return Array.isArray(rows) ? rows : [];
 }
 function references(input, sampleId, priorVisit, priorVisitId) {
   const prior = priorVisit?.sampleAssessments?.find(row => row.sampleId === sampleId);
@@ -51,4 +81,4 @@ async function historicalVisit(read, visit) {
   }
   return prior;
 }
-module.exports = { version, boolean, measurement, cohortBinding, references, historicalVisit, invalid, conflict };
+module.exports = { version, boolean, measurement, mmToCm, cmToMm, cohortBinding, samplesFor, registersFirstVisitBaseline, references, historicalVisit, invalid, conflict };
