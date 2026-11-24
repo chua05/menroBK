@@ -19,6 +19,12 @@ const capture = require("./evidenceCaptureSession.service"),
 const bad = m => Object.assign(new Error(m), {
   status: 409
 });
+const validation = require("./sampleMonitoringValidation");
+// Non-throwing view of the shared cohort binding (an invalid first-visit flag still surfaces its 503).
+const bindsTo = (cohort, visit) => {
+  try { validation.cohortBinding(cohort, visit); return true; }
+  catch (error) { if (error.status === 503) throw error; return false; }
+};
 const rid = (visitId, sampleId, revision) => `VPME-${crypto.createHash("sha256").update(`${visitId}\0${sampleId}\0${revision}`).digest("hex").slice(0, 48)}`;
 const captureSessionIdFrom = manifest => typeof manifest?.[0]?.captureSessionId === "string"
   ? manifest[0].captureSessionId : "";
@@ -52,10 +58,8 @@ async function upload({
   const assessment = visit.sampleAssessments?.find(a => a.sampleId === sampleId);
   if (!assessment) throw bad("Permanent sample is not part of this visit.");
   const cohort = (await db.collection("verifiedPlantingCohorts").doc(visit.cohortId).get()).data();
-  if (!cohort || cohort?.samplingPlan?.status !== "APPROVED" ||
-      Number(cohort.samplingPlan.version) !== Number(visit.samplingPlanVersion) ||
-      cohort?.baseline?.approvalStatus !== "APPROVED" ||
-      Number(cohort.baselineVersion || 0) !== Number(visit.baselineVersion)) {
+  // Shared binding: approved plan + baseline, or (first visit) the unapproved first-visit plan.
+  if (!cohort || !bindsTo(cohort, visit)) {
     throw bad("The verified planting cohort no longer matches this monitoring visit.");
   }
   const original = evidenceManifest?.[0]?.source === "uploaded-original" && process.env.MENRO_MONITORING_ORIGINAL_PHOTO_PROPOSAL === "true";
@@ -132,14 +136,14 @@ async function upload({
       const failed = { missingVisit: !v.exists, missingCohort: !c.exists, existingHash: h.exists,
         visitVersion: Number(current?.version) !== Number(expectedVisitVersion), cohortId: current?.cohortId !== visit.cohortId,
         siteId: current?.siteId !== visit.siteId, planVersion: Number(current?.samplingPlanVersion) !== Number(visit.samplingPlanVersion),
-        baselineVersion: Number(current?.baselineVersion) !== Number(visit.baselineVersion), planStatus: cohort?.samplingPlan?.status !== "APPROVED",
-        cohortPlanVersion: Number(cohort?.samplingPlan?.version) !== Number(current?.samplingPlanVersion), baselineStatus: cohort?.baseline?.approvalStatus !== "APPROVED",
-        cohortBaselineVersion: Number(cohort?.baselineVersion || 0) !== Number(current?.baselineVersion), missingAssessment: !latest,
+        baselineVersion: Number(current?.baselineVersion) !== Number(visit.baselineVersion),
+        registersBaseline: Boolean(current?.registersBaseline) !== Boolean(visit.registersBaseline),
+        cohortBinding: !current || !bindsTo(cohort, current), missingAssessment: !latest,
         assessmentRevision: Number(latest?.assessmentRevision || 0) !== Number(assessmentRevision) };
       if (original) {
         failed.originalOwner = current?.createdBy !== actorId || !["DRAFT","RETURNED"].includes(current?.status);
         failed.originalCohortSite = cohort?.source?.siteId !== current?.siteId;
-        failed.originalRegisteredTree = !cohort?.baseline?.sampleUnits?.some(unit=>unit.permanentId===sampleId);
+        failed.originalRegisteredTree = !validation.samplesFor(cohort, current).some(unit=>unit?.permanentId===sampleId);
         failed.originalAssessment = !latest || assessmentFingerprint(latest,current?.dateMonitored)!==proof.assessmentFingerprint;
         failed.originalDuplicate = otherHashes.some(doc=>doc.exists);
         failed.originalSite = !site.exists || String(site.data().status||"").toLowerCase()==="inactive";

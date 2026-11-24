@@ -226,3 +226,244 @@ test("outside test mode a pending test-only plan cannot be approved but can stil
     assert.equal(returned.samplingPlan.status, "RETURNED");
   });
 });
+
+// B2: first monitoring visit acts as the sampling plan plus baseline registration.
+const { FIRST_VISIT_BASELINE_POLICY_ID } = require("../src/config/firstVisitBaseline");
+const firstVisitCohort = (overrides = {}) => ({ id: "VPC-first-visit-001", verifiedPlantedQuantity: 25, baselineStatus: "NOT_STARTED", baselineVersion: 0, baseline: null,
+  source: { plantingReportId: "report-fv", siteId: "site-7", species: [{ inventoryId: "inv-1", species: "Narra", releasedQuantity: 25, verifiedPlantedQuantity: 25 }] }, ...overrides });
+const deepFreeze = value => { if (value && typeof value === "object") { Object.values(value).forEach(deepFreeze); Object.freeze(value); } return value; };
+async function withFirstVisitFlag(value, fn) {
+  const previous = process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED;
+  if (value === undefined) delete process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED; else process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED = value;
+  try { return await fn(); } finally {
+    if (previous === undefined) delete process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED; else process.env.PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED = previous;
+  }
+}
+
+test("first-visit plan: a 25-tree single-species cohort gives 3 report-numbered Tree IDs in a valid DRAFT plan", () => {
+  const cohort = deepFreeze(firstVisitCohort());
+  const { samplingPlan, historyEntry } = service._test.prepareFirstVisitPlan({ cohort, reportNumber: "RPT-2026-020", actorId: "staff-1", now: "NOW" });
+  assert.deepEqual(samplingPlan.selectedSamples.map(s => s.permanentId), ["RPT-2026-020-T001", "RPT-2026-020-T002", "RPT-2026-020-T003"]);
+  assert.equal(samplingPlan.schemaVersion, 1);
+  assert.equal(samplingPlan.version, 1);
+  assert.equal(samplingPlan.status, "DRAFT");
+  assert.equal(samplingPlan.origin, "FIRST_VISIT");
+  assert.equal(samplingPlan.provisionalPolicy, FIRST_VISIT_BASELINE_POLICY_ID);
+  assert.equal(samplingPlan.provisionalTarget, 3);
+  assert.equal(samplingPlan.selectionMethod, "documented-manual");
+  assert.equal(samplingPlan.notes, "");
+  assert.equal(samplingPlan.submittedBy, null);
+  assert.equal(samplingPlan.submittedAt, null);
+  assert.equal(samplingPlan.createdBy, "staff-1");
+  assert.equal(samplingPlan.createdAt, "NOW");
+  assert.deepEqual(samplingPlan.selectedSamples[0], { permanentId: "RPT-2026-020-T001", unitType: "tree", species: "Narra", siteReference: "site-7",
+    selectionReason: "Physically selected by Staff during the first monitoring visit" });
+  // Re-validating through the existing normalisers is a no-op.
+  assert.deepEqual(service._test.normalizePlannedSamples(samplingPlan.selectedSamples, 3), samplingPlan.selectedSamples);
+  assert.deepEqual(service._test.normalizeDistribution(samplingPlan.speciesSiteDistribution, samplingPlan.selectedSamples), samplingPlan.speciesSiteDistribution);
+  assert.deepEqual(samplingPlan.speciesSiteDistribution, [{ species: "Narra", siteReference: "site-7", sampleIds: ["RPT-2026-020-T001", "RPT-2026-020-T002", "RPT-2026-020-T003"] }]);
+  assert.equal(historyEntry.status, "DRAFT");
+  assert.equal(historyEntry.provisionalPolicy, FIRST_VISIT_BASELINE_POLICY_ID);
+  assert.deepEqual(historyEntry.selectedSamples, samplingPlan.selectedSamples);
+});
+
+test("first-visit plan: a missing or unsafe reportNumber falls back to the cohort id", () => {
+  for (const reportNumber of [undefined, "", "RPT 2026/020"]) {
+    const { samplingPlan } = service._test.prepareFirstVisitPlan({ cohort: firstVisitCohort(), reportNumber, actorId: "staff-1", now: "NOW" });
+    assert.deepEqual(samplingPlan.selectedSamples.map(s => s.permanentId), ["VPC-first-visit-001-T001", "VPC-first-visit-001-T002", "VPC-first-visit-001-T003"]);
+  }
+  const { samplingPlan } = service._test.prepareFirstVisitPlan({ cohort: firstVisitCohort({ id: undefined }), cohortId: "VPC-explicit", actorId: "staff-1", now: "NOW" });
+  assert.equal(samplingPlan.selectedSamples[0].permanentId, "VPC-explicit-T001");
+});
+
+test("first-visit plan: refuses multi-species, existing plan or baseline, and zero quantity with 409 codes", () => {
+  const prepare = cohort => () => service._test.prepareFirstVisitPlan({ cohort, reportNumber: "RPT-2026-020", actorId: "staff-1", now: "NOW" });
+  const is = code => error => error.status === 409 && error.code === code;
+  assert.throws(prepare(firstVisitCohort({ source: { siteId: "site-7", species: [
+    { inventoryId: "inv-1", species: "Narra", releasedQuantity: 15, verifiedPlantedQuantity: 15 },
+    { inventoryId: "inv-2", species: "Mahogany", releasedQuantity: 10, verifiedPlantedQuantity: 10 }] } })), is("SPECIES_ALLOCATION_PENDING"));
+  assert.throws(prepare(firstVisitCohort({ samplingPlan: { version: 1, status: "DRAFT" } })), is("FIRST_VISIT_BASELINE_NOT_APPLICABLE"));
+  assert.throws(prepare(firstVisitCohort({ baseline: { approvalStatus: "APPROVED" } })), is("FIRST_VISIT_BASELINE_NOT_APPLICABLE"));
+  assert.throws(prepare(firstVisitCohort({ verifiedPlantedQuantity: 0 })), is("VERIFIED_QUANTITY_UNAVAILABLE"));
+  assert.throws(prepare(firstVisitCohort({ verifiedPlantedQuantity: undefined })), is("VERIFIED_QUANTITY_UNAVAILABLE"));
+  // A species with zero planted quantity does not count toward the allocation.
+  const single = service._test.prepareFirstVisitPlan({ cohort: firstVisitCohort({ source: { siteId: "site-7", species: [
+    { inventoryId: "inv-1", species: "Narra", releasedQuantity: 25, verifiedPlantedQuantity: 25 },
+    { inventoryId: "inv-2", species: "Mahogany", releasedQuantity: 5, verifiedPlantedQuantity: 0 }] } }), reportNumber: "RPT-2026-020", actorId: "staff-1", now: "NOW" });
+  assert.equal(single.samplingPlan.selectedSamples[0].species, "Narra");
+});
+
+test("first-visit plan transitions: submit, return requires remarks, approve; inputs are never mutated", () => {
+  const { samplingPlan, historyEntry } = service._test.prepareFirstVisitPlan({ cohort: firstVisitCohort(), reportNumber: "RPT-2026-020", actorId: "staff-1", now: "T0" });
+  const draft = deepFreeze({ samplingPlan, samplingPlanHistory: [historyEntry] });
+  const submitted = service._test.planReviewTransition(draft, "PENDING_ADMIN_APPROVAL", "staff-1", "T1");
+  assert.equal(submitted.samplingPlan.status, "PENDING_ADMIN_APPROVAL");
+  assert.equal(submitted.samplingPlan.submittedBy, "staff-1");
+  assert.equal(submitted.samplingPlan.submittedAt, "T1");
+  assert.equal(submitted.samplingPlanHistory.length, 2);
+  assert.equal(submitted.samplingPlanHistory[1].status, "PENDING_ADMIN_APPROVAL");
+  assert.equal(draft.samplingPlan.status, "DRAFT");
+  deepFreeze(submitted);
+  assert.throws(() => service._test.planReviewTransition(submitted, "RETURNED", "admin-1", "T2", "  "), error => error.code === "REVIEW_REMARKS_REQUIRED");
+  const returned = service._test.planReviewTransition(submitted, "RETURNED", "admin-1", "T2", "Re-tag tree 2");
+  assert.equal(returned.samplingPlan.status, "RETURNED");
+  assert.equal(returned.samplingPlan.reviewedBy, "admin-1");
+  assert.equal(returned.samplingPlan.reviewedAt, "T2");
+  assert.equal(returned.samplingPlan.reviewRemarks, "Re-tag tree 2");
+  const resubmitted = service._test.planReviewTransition(deepFreeze(returned), "PENDING_ADMIN_APPROVAL", "staff-1", "T3");
+  assert.deepEqual(resubmitted.samplingPlan.selectedSamples, samplingPlan.selectedSamples);
+  const approved = service._test.planReviewTransition(deepFreeze(resubmitted), "APPROVED", "admin-1", "T4");
+  assert.equal(approved.samplingPlan.status, "APPROVED");
+  assert.equal(approved.samplingPlan.reviewedBy, "admin-1");
+  assert.equal(approved.samplingPlan.reviewedAt, "T4");
+  assert.equal(approved.samplingPlanHistory.length, 5);
+  assert.deepEqual(approved.samplingPlanHistory.map(entry => entry.status), ["DRAFT", "PENDING_ADMIN_APPROVAL", "RETURNED", "PENDING_ADMIN_APPROVAL", "APPROVED"]);
+  assert.equal(submitted.samplingPlanHistory.length, 2);
+  assert.throws(() => service._test.planReviewTransition(draft, "APPROVED", "admin-1", "T5"), error => error.status === 409);
+  assert.throws(() => service._test.planReviewTransition(draft, "BOGUS", "admin-1", "T5"));
+});
+
+function firstVisitWithAssessments(overrides = []) {
+  const { samplingPlan } = service._test.prepareFirstVisitPlan({ cohort: firstVisitCohort(), reportNumber: "RPT-2026-020", actorId: "staff-1", now: "T0" });
+  const cohort = firstVisitCohort({ samplingPlan: { ...samplingPlan, status: "APPROVED" } });
+  const conditions = ["Healthy", "Needs Rechecking", "Dead"];
+  const assessments = samplingPlan.selectedSamples.map((sample, index) => ({ sampleId: sample.permanentId, condition: conditions[index],
+    heightCentimeters: index === 2 ? null : 150 - index * 50, diameterCentimeters: index === 2 ? undefined : 1.2, remarks: `row ${index}`, assessmentRevision: 1,
+    evidenceHistory: [
+      { revision: 0, privateEvidence: { path: "stale" }, captureSessionId: `stale-${index}`, location: { latitude: 1, longitude: 1 } },
+      { revision: 1, privateEvidence: { path: `private/${index}` }, captureSessionId: `session-00${index}`, location: { latitude: 12.6 + index / 100, longitude: 123.9, accuracyMeters: 8 }, linkedAt: "L1" },
+    ], ...(overrides[index] || {}) })).reverse();
+  return { cohort, visit: { id: "visit-1", createdBy: "staff-1", dateMonitored: "2026-11-20", baselineVersion: 1, sampleAssessments: assessments } };
+}
+
+test("baseline from first visit maps units in plan order with current-evidence GPS and no private evidence", () => {
+  const { cohort, visit } = firstVisitWithAssessments([{ assessedOn: "2026-11-19" }]);
+  deepFreeze(cohort); deepFreeze(visit);
+  const result = service._test.buildBaselineFromVisit({ cohort, visit, actorId: "admin-1", now: "T9" });
+  assert.equal(result.baselineStatus, "REGISTERED");
+  assert.equal(result.baselineVersion, 1);
+  const { baseline } = result;
+  assert.equal(baseline.registeredBy, "staff-1");
+  assert.equal(baseline.registeredAt, "T9");
+  assert.equal(baseline.approvedBy, "admin-1");
+  assert.equal(baseline.approvedAt, "T9");
+  assert.equal(baseline.approvalStatus, "APPROVED");
+  assert.deepEqual(baseline.source, { type: "FIRST_VISIT", visitId: "visit-1" });
+  assert.deepEqual(baseline.sampleUnits.map(unit => unit.permanentId), ["RPT-2026-020-T001", "RPT-2026-020-T002", "RPT-2026-020-T003"]);
+  const [first, second, third] = baseline.sampleUnits;
+  assert.equal(first.unitType, "tree");
+  assert.equal(first.species, "Narra");
+  assert.equal(first.condition, "Healthy");
+  assert.equal(first.heightMeters, 1.5);
+  assert.equal(first.diameterCentimeters, 1.2);
+  assert.equal(first.latitude, 12.6);
+  assert.equal(first.longitude, 123.9);
+  assert.equal(first.captureDate, "2026-11-19");
+  assert.equal(first.remarks, "row 0");
+  assert.deepEqual(first.photoReferences, [{ evidenceId: "session-000", capturedAt: "L1", sourceVisitId: "visit-1", sourceAssessmentRevision: 1 }]);
+  assert.equal(second.condition, "Unknown");
+  assert.equal(second.heightMeters, 1);
+  assert.equal(second.latitude, 12.61);
+  assert.equal(second.captureDate, "2026-11-20");
+  assert.equal(third.condition, "Dead");
+  assert.equal(third.heightMeters, null);
+  assert.equal(third.diameterCentimeters, null);
+  assert.ok(!JSON.stringify(result).includes("privateEvidence"));
+  assert.ok(!JSON.stringify(result).includes("private/"));
+  assert.equal(result.baselineHistoryAppend.length, 2);
+  assert.equal(result.baselineHistoryAppend[0].status, "PENDING_ADMIN_APPROVAL");
+  assert.equal(result.baselineHistoryAppend[0].version, 1);
+  assert.deepEqual(result.baselineHistoryAppend[0].sampleUnits, baseline.sampleUnits);
+  assert.equal(result.baselineHistoryAppend[1].status, "APPROVED");
+  assert.equal(result.baselineHistoryAppend[1].reviewedBy, "admin-1");
+});
+
+test("baseline from first visit refuses missing current evidence, missing GPS and incomplete samples", () => {
+  const build = overrides => () => { const { cohort, visit } = firstVisitWithAssessments(overrides); return service._test.buildBaselineFromVisit({ cohort, visit, actorId: "admin-1", now: "T9" }); };
+  const is = code => error => error.status === 409 && error.code === code;
+  assert.throws(build([{}, { assessmentRevision: 2 }]), is("BASELINE_EVIDENCE_MISSING"));
+  assert.throws(build([{}, { evidenceHistory: [] }]), is("BASELINE_EVIDENCE_MISSING"));
+  assert.throws(build([{ evidenceHistory: [{ revision: 1, privateEvidence: { path: "p" }, captureSessionId: "session-000" }] }]), is("BASELINE_EVIDENCE_MISSING"));
+  assert.throws(build([{ evidenceHistory: [{ revision: 1, captureSessionId: "session-000", location: { latitude: 12.6, longitude: 123.9 } }] }]), is("BASELINE_EVIDENCE_MISSING"));
+  assert.throws(() => { const { cohort, visit } = firstVisitWithAssessments(); return service._test.buildBaselineFromVisit({ cohort, visit: { ...visit, sampleAssessments: visit.sampleAssessments.slice(1) }, actorId: "admin-1", now: "T9" }); }, is("BASELINE_INCOMPLETE"));
+});
+
+test("baseline from first visit refuses a missing or non-positive baseline version", () => {
+  for (const baselineVersion of [undefined, null, 0, -1, 1.5, "1", Number.MAX_SAFE_INTEGER + 1]) {
+    const { cohort, visit } = firstVisitWithAssessments();
+    assert.throws(() => service._test.buildBaselineFromVisit({ cohort, visit: { ...visit, baselineVersion }, actorId: "admin-1", now: "T9" }),
+      error => error.status === 409 && error.code === "BASELINE_VERSION_INVALID", String(baselineVersion));
+  }
+});
+
+test("currentEvidenceEntry does not drift from the visit service currentEvidence predicate", () => {
+  // Source predicate: src/services/sampleMonitoringVisit.service.js currentEvidence (exported via _test).
+  const { currentEvidence } = require("../src/services/sampleMonitoringVisit.service")._test;
+  const fixtures = {
+    currentWithPrivate: { assessmentRevision: 2, evidenceHistory: [{ revision: 2, privateEvidence: { path: "p" } }] },
+    olderRevisionOnly: { assessmentRevision: 2, evidenceHistory: [{ revision: 1, privateEvidence: { path: "p" } }] },
+    currentWithoutPrivate: { assessmentRevision: 2, evidenceHistory: [{ revision: 2, captureSessionId: "session-1" }] },
+    revisionUndefinedWithZero: { evidenceHistory: [{ revision: 0, privateEvidence: { path: "p" } }] },
+    revisionUndefinedWithOne: { evidenceHistory: [{ revision: 1, privateEvidence: { path: "p" } }] },
+    noHistory: { assessmentRevision: 0 },
+  };
+  const expected = { currentWithPrivate: true, olderRevisionOnly: false, currentWithoutPrivate: false, revisionUndefinedWithZero: true, revisionUndefinedWithOne: false, noHistory: false };
+  for (const [name, row] of Object.entries(fixtures)) {
+    assert.equal(currentEvidence(row), expected[name], `visit predicate: ${name}`);
+    assert.equal(service._test.currentEvidenceEntry(row) !== null, currentEvidence(row), `drift: ${name}`);
+  }
+});
+
+// I1 (fix round 1): a FIRST_VISIT cohort's plan and baseline change only through its first monitoring visit.
+// These replace the earlier tests that let the legacy routes save, approve or return a first-visit plan.
+function storeFirstVisitCohort(reportId, transform = value => value) {
+  const cohortId = service.cohortIdFor(reportId);
+  const cohort = firstVisitCohort({ id: cohortId });
+  const { samplingPlan, historyEntry } = service._test.prepareFirstVisitPlan({ cohort, reportNumber: "RPT-2026-020", actorId: "staff-1", now: "T0" });
+  const { id, ...stored } = cohort;
+  table("verifiedPlantingCohorts").set(cohortId, transform({ ...stored, samplingPlan, samplingPlanHistory: [historyEntry] }));
+  return cohortId;
+}
+const firstVisitActive = error => error.status === 409 && error.code === "FIRST_VISIT_BASELINE_ACTIVE";
+const planPayload = (cohortId, plan) => ({ cohortId, actorId: "staff-1", expectedVersion: plan.version, selectionMethod: "documented-manual", submitForApproval: true,
+  selectedSamples: plan.selectedSamples, speciesSiteDistribution: plan.speciesSiteDistribution });
+
+test("I1: PUT /sampling-plan refuses a FIRST_VISIT plan in every status, with the flag on or off, without writing", async () => {
+  for (const flag of ["true", undefined]) {
+    for (const status of ["DRAFT", "RETURNED", "PENDING_ADMIN_APPROVAL", "APPROVED"]) {
+      reset();
+      const cohortId = storeFirstVisitCohort(`report-i1-save-${status}`, value => ({ ...value, samplingPlan: { ...value.samplingPlan, status } }));
+      const before = JSON.stringify(table("verifiedPlantingCohorts").get(cohortId));
+      await withFirstVisitFlag(flag, async () => {
+        await assert.rejects(service.saveSamplingPlan(planPayload(cohortId, table("verifiedPlantingCohorts").get(cohortId).samplingPlan)), firstVisitActive, `${flag} ${status}`);
+      });
+      assert.equal(JSON.stringify(table("verifiedPlantingCohorts").get(cohortId)), before);
+    }
+  }
+});
+
+test("I1: plan approve and return refuse a pending FIRST_VISIT plan, with the flag on or off", async () => {
+  for (const flag of ["true", undefined]) {
+    reset();
+    const cohortId = storeFirstVisitCohort(`report-i1-approve-${flag}`, value => ({ ...value,
+      ...service._test.planReviewTransition(value, "PENDING_ADMIN_APPROVAL", "staff-1", "T1") }));
+    await withFirstVisitFlag(flag, async () => {
+      await assert.rejects(service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true }), firstVisitActive);
+      await assert.rejects(service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: false, remarks: "Return" }), firstVisitActive);
+    });
+    assert.equal(table("verifiedPlantingCohorts").get(cohortId).samplingPlan.status, "PENDING_ADMIN_APPROVAL");
+  }
+});
+
+test("I1: after the first visit locks the baseline, baseline registration and review are refused", async () => {
+  reset();
+  const cohortId = storeFirstVisitCohort("report-i1-baseline", value => ({ ...value, samplingPlan: { ...value.samplingPlan, status: "APPROVED" },
+    baselineVersion: 1, baselineStatus: "REGISTERED", baseline: { approvalStatus: "APPROVED", sampleUnits: [] } }));
+  const before = JSON.stringify(table("verifiedPlantingCohorts").get(cohortId));
+  await withFirstVisitFlag("true", async () => {
+    await assert.rejects(service.registerBaseline({ cohortId, actorId: "staff-1", expectedVersion: 1, status: "REGISTERED",
+      sampleUnits: [{ permanentId: "RPT-2026-020-T001", unitType: "tree", latitude: 12.65, longitude: 123.91, condition: "Healthy", captureDate: "2026-11-02", photoReferences: [{ evidenceId: "photo-1" }] }] }), firstVisitActive);
+    await assert.rejects(service.approveBaseline({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true }), firstVisitActive);
+  });
+  assert.equal(JSON.stringify(table("verifiedPlantingCohorts").get(cohortId)), before);
+});

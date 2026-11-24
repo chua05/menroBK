@@ -129,7 +129,16 @@ async function loadBoundResources(actorId, binding) {
     }
   } else if (binding.workflow === "sample-monitoring") {
     const cohort = docs[1].data(), visit = docs[2]?.data();
-    if (!docs[1].exists || !docs[2]?.exists || visit.cohortId !== binding.cohortId || visit.siteId !== binding.siteId || visit.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(visit.status) || Number(visit.version) !== binding.visitVersion || Number(cohort?.samplingPlan?.version) !== binding.samplingPlanVersion || Number(cohort?.baselineVersion || 0) !== binding.baselineVersion || cohort?.samplingPlan?.status !== "APPROVED" || cohort?.baseline?.approvalStatus !== "APPROVED" || !cohort.baseline.sampleUnits?.some(unit => unit.permanentId === binding.sampleId)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The permanent sample monitoring capture target is unavailable.");
+    if (!docs[1].exists || !docs[2]?.exists || visit.cohortId !== binding.cohortId || visit.siteId !== binding.siteId || visit.createdBy !== actorId || !["DRAFT", "RETURNED"].includes(visit.status) || Number(visit.version) !== binding.visitVersion) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The permanent sample monitoring capture target is unavailable.");
+    // Shared cohort binding, evaluated against the plan/baseline versions this capture is bound to:
+    // an approved plan + baseline, or (first visit registers the baseline) the unapproved first-visit plan.
+    const boundVisit = { ...visit, samplingPlanVersion: binding.samplingPlanVersion, baselineVersion: binding.baselineVersion };
+    const validation = require("./sampleMonitoringValidation");
+    try { validation.cohortBinding(cohort, boundVisit); } catch (error) {
+      if (error.status === 503) throw error;
+      throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The permanent sample monitoring capture target is unavailable.");
+    }
+    if (!validation.samplesFor(cohort, boundVisit).some(unit => unit?.permanentId === binding.sampleId)) throw problem("CAPTURE_SESSION_FORBIDDEN", 403, "The permanent sample monitoring capture target is unavailable.");
   } else {
     if (!docs[1].exists) throw problem("CAPTURE_SESSION_INVALID", 404, "Planting report was not found.");
     const report = docs[1].data();

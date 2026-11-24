@@ -209,6 +209,24 @@ async function monitoringRevisionEvidenceForUser(recordId, observationId, revisi
   return resolveStoredEvidence(revision.evidenceRef.photoUrl, "monitoring");
 }
 
+// Called only after the baseline route's own authorization and scope checks. The reference must come from the
+// baseline's recorded FIRST_VISIT source visit of the same cohort; the stored object is the one the
+// sample-monitoring evidence route serves (same record id and evidence type), matched by id and revision.
+async function firstVisitBaselineEvidence(cohortId, sampleId, baseline, reference) {
+  const notFound = () => evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
+  const visitId = String(reference.sourceVisitId);
+  const revision = Number(reference.sourceAssessmentRevision);
+  if (baseline.source?.type !== "FIRST_VISIT" || baseline.source.visitId !== visitId || !Number.isInteger(revision) ||
+      !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/.test(visitId) || !reference.evidenceId) throw notFound();
+  const snapshot = await db.collection("sampleMonitoringVisits").doc(visitId).get();
+  if (!snapshot.exists || snapshot.data().cohortId !== cohortId) throw notFound();
+  const assessment = (snapshot.data().sampleAssessments || []).find(entry => entry?.sampleId === sampleId);
+  const entry = (assessment?.evidenceHistory || []).filter(evidence => evidence?.privateEvidence &&
+    Number(evidence.revision) === revision && String(evidence.evidenceId || evidence.captureSessionId || "") === String(reference.evidenceId)).at(-1);
+  if (!entry) throw notFound();
+  return cloudEvidence(entry.privateEvidence, sampleMonitoringEvidenceRecordId(visitId, sampleId, entry.revision), "sample-monitoring");
+}
+
 async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, user) {
   if (!["admin", "staff"].includes(user?.role)) throw evidenceError("EVIDENCE_FORBIDDEN", "Evidence access forbidden.");
   release.assertScope(user.uid, cohortId);
@@ -216,8 +234,11 @@ async function cohortBaselineEvidenceForUser(cohortId, sampleId, photoIndex, use
       !/^[A-Za-z0-9_-]{3,80}$/.test(String(sampleId || ""))) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   const snapshot = await db.collection("verifiedPlantingCohorts").doc(cohortId).get();
   if (!snapshot.exists) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
-  const sample = (snapshot.data().baseline?.sampleUnits || []).find((entry) => entry.permanentId === sampleId);
+  const baseline = snapshot.data().baseline || {};
+  const sample = (baseline.sampleUnits || []).find((entry) => entry.permanentId === sampleId);
   const reference = sample?.photoReferences?.[parseIndex(photoIndex)];
+  // A first-visit baseline stores no privateEvidence copy: its photo is the source visit's current evidence.
+  if (!reference?.privateEvidence && reference?.sourceVisitId) return firstVisitBaselineEvidence(cohortId, sampleId, baseline, reference);
   if (!reference?.privateEvidence) throw evidenceError("EVIDENCE_NOT_FOUND", "Evidence photo not found.");
   return cloudEvidence(reference.privateEvidence, baselineEvidenceRecordId(cohortId, sampleId), "cohort-baseline");
 }
