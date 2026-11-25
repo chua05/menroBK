@@ -63,7 +63,7 @@ function parseExifCoordinate(value, reference, maximum) {
   if (parts) {
     if (parts.length < 3) return { status: "unparseable", value: null };
     const [degrees, minutes, seconds] = parts.slice(0, 3).map(rationalToNumber);
-    if (![degrees, minutes, seconds].every(Number.isFinite) || minutes < 0 || minutes >= 60 || seconds < 0 || seconds >= 60) {
+    if (![degrees, minutes, seconds].every(Number.isFinite) || minutes < 0 || minutes >= 60 || seconds < 0 || seconds > 60) {
       return { status: "unparseable", value: null };
     }
     coordinate = Math.abs(degrees) + minutes / 60 + seconds / 3600;

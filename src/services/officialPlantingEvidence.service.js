@@ -2,7 +2,7 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const images = require("../utils/imageVerification.util");
 const { validatePlantingReport } = require("../utils/plantingVerification.util");
-const { calculateDistanceMeters, isPointInPolygon } = require("../utils/geo.util");
+const { evaluateSiteLocation } = require("../utils/geo.util");
 const { isPointWithinMunicipality } = require("../config/municipality");
 const capture = require("./evidenceCaptureSession.service");
 const saga = require("./evidenceWorkflow.service");
@@ -36,19 +36,21 @@ async function upload(user, id, files, input, key) {
     const sessions = await capture.resolveSubmissionEvidence({ actorId: user.uid, workflow: "planting-report", binding, files, manifest: input.evidenceManifest });
     const prepared = [], seen = new Set();
     for (let index = 0; index < files.length; index++) {
-      const file = files[index], imageDetails = await images.validateImageBuffer(file.buffer), imageHash = images.generateImageHash(file.buffer), session = sessions[index];
+      const file = files[index], imageDetails = await images.validateImageBuffer(file.buffer, { allowHeic: true }), imageHash = images.generateImageHash(file.buffer), session = sessions[index];
       if (seen.has(imageHash)) throw fail(409, "Duplicate planting image detected."); seen.add(imageHash);
       const metadata = session ? { latitude: session.latitude, longitude: session.longitude,
         capturedAt: session.capturedAtClient.toDate ? session.capturedAtClient.toDate().toISOString() : new Date(Number(session.capturedAtClient.seconds ?? session.capturedAtClient._seconds) * 1000).toISOString(), gpsStatus: "browser-session" } : await images.extractImageMetadata(file.buffer);
       if (!session && images.isClearlyScreenshot({ fileName: file.originalname, metadata, imageDetails })) throw fail(400, "Screenshot images are not accepted as planting evidence.");
       const latitude = metadata.latitude, longitude = metadata.longitude;
+      const gpsProblem = images.gpsMetadataProblem(metadata);
+      if (gpsProblem) throw fail(400, gpsProblem.message);
       if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !isPointWithinMunicipality(latitude, longitude)) throw fail(400, "Original photo GPS within Bulan is required. Device coordinates cannot replace EXIF GPS.");
       const verification = validatePlantingReport({ submittedLatitude: latitude, submittedLongitude: longitude, plantingDate: ctx.data.plantingDate, metadata });
-      const radius = Number(ctx.site.coverageRadiusMeters), distance = calculateDistanceMeters(latitude, longitude, Number(ctx.site.latitude), Number(ctx.site.longitude));
-      const siteValid = Number.isFinite(radius) && radius > 0 ? distance <= radius : Array.isArray(ctx.site.polygon) && ctx.site.polygon.length >= 3 ? isPointInPolygon(latitude, longitude, ctx.site.polygon) : distance <= 50;
+      const radius = Number(ctx.site.coverageRadiusMeters), { inside: siteValid, distanceMeters: distance, boundaryRule } = evaluateSiteLocation(ctx.site, latitude, longitude);
       // Field evidence must actually satisfy the established location/time checks.
       // A release-only declaration never enters this path.
-      if (!siteValid || !verification.timestampValid || !verification.gpsValid) throw fail(422, "Verify the photo's original location and planting timestamp before uploading.");
+      if (!siteValid) throw fail(422, "The photo location is outside the verified planting site.");
+      if (!verification.timestampValid || !verification.gpsValid) throw fail(422, "The photo capture date is invalid. It must have been taken on the planting date.");
       const prior = await db.collection("plantingEvidenceHashes").doc(imageHash).get();
       if (prior.exists) throw fail(409, "Duplicate planting image detected.");
       const older = await Promise.all([db.collection("plantingReports").where("imageHash", "==", imageHash).limit(1).get(),
@@ -56,7 +58,7 @@ async function upload(user, id, files, input, key) {
         db.collection("plantingContributions").where("imageHashes", "array-contains", imageHash).limit(1).get()]);
       if (older.some(snapshot => snapshot.docs.length)) throw fail(409, "Duplicate planting image detected.");
       prepared.push({ imageHash, imageDetails, metadata, latitude, longitude, gpsMetadataPresent: true, timestampMetadataPresent: true, gpsValid: true, timestampValid: true,
-        siteGpsValid: true, siteGpsDistanceMeters: distance, siteCoverageRadiusMeters: Number.isFinite(radius) && radius > 0 ? radius : null,
+        siteGpsValid: true, siteGpsDistanceMeters: distance, siteBoundaryRule: boundaryRule, locationAccuracyMeters: session?.accuracyMeters ?? metadata.gpsAccuracyMeters ?? null, siteCoverageRadiusMeters: Number.isFinite(radius) && radius > 0 ? radius : null,
         locationSource: session ? "Browser Capture Session" : "Photo Metadata (EXIF)", automatedStatus: "Passed Automated Check", suspiciousFlags: [] });
     }
     const photos = [];

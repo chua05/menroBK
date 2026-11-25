@@ -2,6 +2,8 @@ const {
   calculateDistanceMeters,
 } = require("./geo.util");
 
+const { manilaDayStart } = require("./photoMetadata.util");
+
 const GPS_TOLERANCE_METERS = 20;
 
 const DAY_IN_MILLISECONDS =
@@ -20,7 +22,7 @@ const validatePlantingReport = ({
     metadata.longitude !== null;
 
   const timestampMetadataPresent =
-    metadata.capturedAt !== null;
+    metadata.capturedAt !== null && metadata.capturedAt !== undefined;
 
   let gpsDistanceMeters = null;
   let gpsValid = false;
@@ -54,7 +56,7 @@ const validatePlantingReport = ({
       new Date(metadata.capturedAt);
 
     const declaredPlantingDate =
-      new Date(`${plantingDate}T00:00:00`);
+      manilaDayStart(plantingDate);
 
     const currentDate = new Date();
 
@@ -91,8 +93,14 @@ const validatePlantingReport = ({
     }
   } else {
     suspiciousFlags.push(
-      "TIMESTAMP_METADATA_MISSING"
+      metadata.captureTimeStatus === "invalid" ? "INVALID_IMAGE_TIMESTAMP" : "TIMESTAMP_METADATA_MISSING"
     );
+  }
+
+  // The photo's GPS clock and camera clock disagree by more than a day: MENRO Staff decide.
+  if (metadata.captureTimeContradictory) {
+    timestampValid = false;
+    suspiciousFlags.push("TIMESTAMP_CONTRADICTORY");
   }
 
   const automatedStatus =

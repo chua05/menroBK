@@ -44,6 +44,7 @@ const {
   generateImageHash,
   validateImageBuffer,
   extractImageMetadata,
+  gpsMetadataProblem,
   isClearlyScreenshot,
 } = require(
   "../utils/imageVerification.util"
@@ -56,8 +57,7 @@ const {
 );
 
 const {
-  calculateDistanceMeters,
-  isPointInPolygon,
+  evaluateSiteLocation,
 } = require(
   "../utils/geo.util"
 );
@@ -255,6 +255,8 @@ const participantCanAccessReport = async (report, participantId) => {
 // New reports:
 // imageHashes[]
 // --------------------------------
+// Shown below the photo controls.
+const photoFailure = (code, message) => Object.assign(new Error(message), { status: 400, code, fieldErrors: { photos: message } });
 const findReportByImageHash = async (
   imageHash
 ) => {
@@ -650,10 +652,6 @@ const createPlantingReportImpl = async (
   const hasSavedCoverageRadius =
     Number.isFinite(savedCoverageRadiusMeters) &&
     savedCoverageRadiusMeters > 0;
-  const hasLegacySitePolygon =
-    !hasSavedCoverageRadius &&
-    Array.isArray(site.polygon) &&
-    site.polygon.length >= 3;
 
 
   
@@ -759,7 +757,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
     // Confirm actual image buffer
     const imageDetails =
       await validateImageBuffer(
-        file.buffer
+        file.buffer, { allowHeic: true }
       );
 
 
@@ -817,23 +815,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       );
     }
 
-    const hasPhotoGpsValues = metadata.latitude !== null && metadata.latitude !== undefined &&
-      metadata.longitude !== null && metadata.longitude !== undefined;
-    const photoLatitude = hasPhotoGpsValues ? Number(metadata.latitude) : NaN;
-    const photoLongitude = hasPhotoGpsValues ? Number(metadata.longitude) : NaN;
-    const hasValidPhotoGps =
-      Number.isFinite(photoLatitude) && photoLatitude >= -90 && photoLatitude <= 90 &&
-      Number.isFinite(photoLongitude) && photoLongitude >= -180 && photoLongitude <= 180;
-
-    if (!hasValidPhotoGps) {
-      throw new Error(
-        metadata.gpsStatus === "unparseable"
-          ? "GPS metadata was found but could not be read from this photo. Please upload the original geotagged photo."
-          : hasPhotoGpsValues || metadata.gpsStatus === "invalid"
-            ? "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information."
-            : "GPS location metadata was not found in this photo. Please upload the original geotagged photo and try again."
-      );
-    }
+    const photoLatitude = Number(metadata.latitude);
+    const photoLongitude = Number(metadata.longitude);
+    const gpsProblem = gpsMetadataProblem(metadata);
+    if (gpsProblem) throw photoFailure(gpsProblem.code, gpsProblem.message);
 
     const insideBulan = isPointWithinMunicipality(photoLatitude, photoLongitude);
 
@@ -860,7 +845,7 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
       });
 
     if (photoVerification.suspiciousFlags.includes("FUTURE_IMAGE_TIMESTAMP")) {
-      throw new Error("Photo capture timestamp is in the future and cannot be verified.");
+      throw photoFailure("PHOTO_TIMESTAMP_FUTURE", "Photo capture timestamp is in the future and cannot be verified.");
     }
 
 
@@ -876,17 +861,9 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
     ];
 
 
-    const photoSiteDistanceMeters = calculateDistanceMeters(
-      photoLatitude,
-      photoLongitude,
-      siteLatitude,
-      siteLongitude
-    );
-    const photoSiteValid = hasSavedCoverageRadius
-      ? photoSiteDistanceMeters <= savedCoverageRadiusMeters
-      : hasLegacySitePolygon
-        ? isPointInPolygon(photoLatitude, photoLongitude, site.polygon)
-        : photoSiteDistanceMeters <= SITE_GPS_TOLERANCE_METERS;
+    const siteLocation = evaluateSiteLocation(site, photoLatitude, photoLongitude);
+    const photoSiteDistanceMeters = siteLocation.distanceMeters;
+    const photoSiteValid = siteLocation.inside;
 
     if (browserCapture && !photoSiteValid) {
       throw new Error("Browser camera evidence must be captured within the assigned planting site.");
@@ -928,7 +905,10 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
 
       captureSessionAuditId: browserCapture?.id || null,
 
-      locationAccuracyMeters: browserCapture?.accuracyMeters ?? null,
+      // Null means unknown.
+      locationAccuracyMeters: browserCapture?.accuracyMeters ?? metadata.gpsAccuracyMeters ?? null,
+
+      siteBoundaryRule: siteLocation.boundaryRule,
 
       locationCapturedAt: toTimestampOrNull(metadata.capturedAt),
 
@@ -1176,6 +1156,8 @@ if (!linkedEvent?.sourceRequestId && quantityPlanted > quantityReleased) {
         siteLocationStatus:
           preparedPhoto
             .siteLocationStatus,
+
+        siteBoundaryRule: preparedPhoto.siteBoundaryRule,
 
         municipalityScope:
           preparedPhoto.municipalityScope,

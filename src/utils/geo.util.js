@@ -115,7 +115,32 @@ const getContainingGeoJsonFeatures = (latitude, longitude, geoJson) => {
   );
 };
 
+const SITE_FALLBACK_METERS = 50;
+
+// A site polygon is the registered planting area itself (never a barangay): GeoJSON Polygon/MultiPolygon [lng, lat], or the stored
+// [{ lat, lng }] list. The boundary line counts as inside.
+const isInsideSitePolygon = (latitude, longitude, polygon) => {
+  if (polygon?.type) return isPointInGeoJsonGeometry(latitude, longitude, polygon);
+  if (!Array.isArray(polygon) || polygon.length < 3) return false;
+  const ring = polygon.map((point) => [Number(point?.lng), Number(point?.lat)]);
+  if (ring.flat().some((value) => !Number.isFinite(value))) return false;
+  return isPointInPolygon(latitude, longitude, polygon) || pointLocationInGeoJsonRing(latitude, longitude, ring) === "edge";
+};
+const hasSitePolygon = (site) => (Array.isArray(site?.polygon) ? site.polygon.length >= 3
+  : ["Polygon", "MultiPolygon"].includes(site?.polygon?.type));
+
+// One rule for every planting photo: the MENRO-configured coverage radius, else the registered site polygon, else 50 m.
+const evaluateSiteLocation = (site, latitude, longitude) => {
+  const distanceMeters = calculateDistanceMeters(latitude, longitude, Number(site.latitude), Number(site.longitude));
+  const radius = Number(site.coverageRadiusMeters);
+  if (Number.isFinite(radius) && radius > 0) return { inside: distanceMeters <= radius, distanceMeters, boundaryRule: "configured-radius", boundaryLimitMeters: radius };
+  if (hasSitePolygon(site)) return { inside: isInsideSitePolygon(latitude, longitude, site.polygon), distanceMeters, boundaryRule: "site-polygon", boundaryLimitMeters: null };
+  return { inside: distanceMeters <= SITE_FALLBACK_METERS, distanceMeters, boundaryRule: "50m-fallback", boundaryLimitMeters: SITE_FALLBACK_METERS };
+};
+
 module.exports = {
+  evaluateSiteLocation,
+  isInsideSitePolygon,
   calculateDistanceMeters,
   isPointInPolygon,
   getContainingGeoJsonFeatures,

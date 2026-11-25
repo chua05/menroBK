@@ -771,7 +771,7 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
     plantingDate: "2026-09-17", plantingLocation: "Site", eventId: "EVT-NO-GPS",
     accuracy: "unavailable",
   };
-  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1" }, [file]), /GPS location metadata was not found/);
+  await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1" }, [file]), /This photo does not contain GPS coordinates/);
   await assert.rejects(reportService.createPlantingReport({ ...body, participantId: "participant-1", siteId: "missing" }, [file]), /Site not found|Planting site not found/);
   const res = { result: {}, status(code) { this.result.code = code; return this; },
     json(value) { this.result.body = value; return this; } };
@@ -779,7 +779,7 @@ test("image without EXIF GPS is rejected even when client coordinates are suppli
   body.longitude = 123;
   await controller.submitPlantingReport({ body, user: { uid: "participant-1" }, files: { photo: [file] } }, res);
   assert.equal(res.result.code, 400);
-  assert.match(res.result.body.message, /GPS location metadata was not found/);
+  assert.match(res.result.body.message, /This photo does not contain GPS coordinates/);
 });
 
 test("client device coordinates never substitute for missing photo EXIF GPS", async () => {
@@ -802,7 +802,7 @@ test("client device coordinates never substitute for missing photo EXIF GPS", as
       quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site",
       latitude: 0, longitude: 0, eventId: "EVT-OUTSIDE",
     }, [{ buffer: image, mimetype: "image/png", originalname: "outside.png" }]),
-    /GPS location metadata was not found/
+    /This photo does not contain GPS coordinates/
   );
   assert.equal(table("sites").get("site-outside").latitude, 12);
 });
@@ -840,7 +840,7 @@ test("device coordinates cannot replace missing GPS in a Take Photo image", asyn
       locationSource: "Device Location at Capture", latitude: 12.82, longitude: 123.965,
       accuracy: 8, photoCapturedAt: capturedAt, locationCapturedAt: capturedAt,
     }, [{ buffer: image, mimetype: "image/jpeg", originalname: "planting-capture.jpg" }]),
-  /GPS location metadata was not found/);
+  /This photo does not contain GPS coordinates/);
   assert.equal(table("events").get("EVT-DEVICE-PHOTO").recordedSeedlingQuantity || 0, 0);
   assert.equal(table("plantingContributions").size, existingContributionCount);
 });

@@ -3,10 +3,7 @@ const { Timestamp } = require("firebase-admin/firestore");
 const { db } = require("../config/firebase");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
 const { isPointWithinMunicipality } = require("../config/municipality");
-const {
-  calculateDistanceMeters,
-  isPointInPolygon,
-} = require("../utils/geo.util");
+const { evaluateSiteLocation } = require("../utils/geo.util");
 const {
   generateImageHash,
   validateImageBuffer,
@@ -236,23 +233,11 @@ function validateSiteLocation(site, input) {
   if (!Number.isFinite(siteLatitude) || !Number.isFinite(siteLongitude)) {
     throw problem("CAPTURE_SITE_GEOMETRY_UNAVAILABLE", 503, "The assigned planting site cannot currently be verified.");
   }
-  const distanceMeters = calculateDistanceMeters(latitude, longitude, siteLatitude, siteLongitude);
-  const radius = Number(site.coverageRadiusMeters);
-  const hasConfiguredRadius = Number.isFinite(radius) && radius > 0;
-  const hasSitePolygon = Array.isArray(site.polygon) && site.polygon.length >= 3;
-  const insideAssignedSite = hasConfiguredRadius
-    ? distanceMeters <= radius
-    : hasSitePolygon
-      ? isPointInPolygon(latitude, longitude, site.polygon)
-      : distanceMeters <= SITE_FALLBACK_METERS;
-  if (!insideAssignedSite) {
+  const { inside, ...result } = evaluateSiteLocation(site, latitude, longitude);
+  if (!inside) {
     throw problem("CAPTURE_LOCATION_OUTSIDE_SITE", 422, "Camera evidence must be captured within the assigned planting site.");
   }
-  return {
-    latitude, longitude, distanceMeters,
-    boundaryRule: hasConfiguredRadius ? "configured-radius" : hasSitePolygon ? "site-polygon" : "50m-fallback",
-    boundaryLimitMeters: hasConfiguredRadius ? radius : hasSitePolygon ? null : SITE_FALLBACK_METERS,
-  };
+  return { latitude, longitude, ...result };
 }
 
 async function verifyCaptureSession({ actorId, actorRole, sessionId, nonce, file, capturedAt, ...location }) {

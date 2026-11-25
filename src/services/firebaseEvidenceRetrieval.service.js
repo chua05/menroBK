@@ -12,7 +12,7 @@ const { matchesEvidenceObject } = require('../config/developmentGcs');
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "cohort-baseline", "sample-monitoring"]);
-const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic" };
 const sha = value => createHash("sha256").update(value).digest("hex");
 const identifier = value => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(value) && !value.includes("..");
 const uuid = value => typeof value === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value);
@@ -35,6 +35,7 @@ function safeError(error, delivering = false) {
 function imageSignature(bytes, format) {
   if (format === "jpeg") return bytes.length >= 3 && bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255]));
   if (format === "png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"));
+  if (format === "heic") return bytes.length >= 12 && bytes.toString("ascii", 4, 8) === "ftyp";
   return bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
 }
 function validateResolved(input) {

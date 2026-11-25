@@ -1,0 +1,49 @@
+{
+ "iphone-xs-max-gps.heic": {
+  "format": "heic",
+  "model": "iPhone XS Max",
+  "gps": [
+   7.831431,
+   98.296653
+  ],
+  "accuracyMeters": 10.748,
+  "capturedAt": "2019-08-21T02:57:23.000Z"
+ },
+ "iphone-7-offset-gps.heic": {
+  "format": "heic",
+  "model": "iPhone 7",
+  "gps": [
+   38.046642,
+   12.994411
+  ],
+  "accuracyMeters": 6.001,
+  "capturedAt": "2019-10-20T16:34:30.000Z"
+ },
+ "samsung-a40-gps.heic": {
+  "format": "heic",
+  "model": "SM-A405FN",
+  "gps": [
+   50.137917,
+   14.547982
+  ],
+  "accuracyMeters": null,
+  "capturedAt": "2020-09-05T03:17:26.000Z"
+ },
+ "pixel-gps.jpg": {
+  "format": "jpeg",
+  "model": "Pixel",
+  "gps": [
+   50.299603,
+   14.820294
+  ],
+  "accuracyMeters": null,
+  "capturedAt": "2018-07-25T08:34:23.000Z"
+ },
+ "no-exif.heic": {
+  "format": "heic",
+  "model": "",
+  "gps": null,
+  "accuracyMeters": null,
+  "capturedAt": null
+ }
+}

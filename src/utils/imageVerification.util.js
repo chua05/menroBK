@@ -1,9 +1,7 @@
 const crypto = require("crypto");
 
-const exifr = require("exifr");
-
 const sharp = require("sharp");
-const { extractGpsCoordinates } = require("./exifGps.util");
+const { captureTime, parsePhotoMetadata, photoContainer } = require("./photoMetadata.util");
 const MAX_IMAGE_PIXELS = 40_000_000;
 const MAX_IMAGE_DIMENSION = 12_000;
 
@@ -40,10 +38,21 @@ const generateImageHash = (buffer) => {
 
 // VALIDATE IMAGE
 const validateImageBuffer = async (
-  imageBuffer
+  imageBuffer,
+  { allowHeic = false } = {}
 ) => {
 
   try {
+
+    // Original iPhone/Android HEIC: kept exactly as taken. Only planting evidence accepts it.
+    if (allowHeic && photoContainer(imageBuffer) === "heic") {
+      const heic = parsePhotoMetadata(imageBuffer);
+      if (!heic.width || !heic.height || !heic.hasHevc) throw new Error("UNSUPPORTED_IMAGE_FORMAT");
+      if (heic.width > MAX_IMAGE_DIMENSION || heic.height > MAX_IMAGE_DIMENSION || heic.width * heic.height > MAX_IMAGE_PIXELS) {
+        throw new Error("IMAGE_DIMENSIONS_EXCEEDED");
+      }
+      return { width: heic.width, height: heic.height, format: "heic" };
+    }
 
     const expectedFormat = detectSupportedImageFormat(imageBuffer);
     if (!expectedFormat) throw new Error("UNSUPPORTED_IMAGE_FORMAT");
@@ -108,54 +117,43 @@ const extractImageMetadata =
 
     try {
 
-      const metadata =
-        await exifr.parse(
-          imageBuffer,
-          {
-            gps: true,
-            tiff: true,
-            exif: true,
-          }
-        );
-
-      const gps = extractGpsCoordinates(metadata || {});
+      const photo = parsePhotoMetadata(imageBuffer), taken = captureTime(photo);
 
       return {
 
-        latitude: gps.latitude,
+        latitude: photo.gps.latitude,
 
-        longitude: gps.longitude,
+        longitude: photo.gps.longitude,
 
-        gpsStatus: gps.status,
+        gpsStatus: photo.gps.status,
 
-        capturedAt:
-          metadata?.DateTimeOriginal ??
-          metadata?.DateTimeDigitized ??
-          metadata?.CreateDate ??
-          metadata?.DateTime ??
-          null,
+        // The phone kept the GPS tags but blanked their values.
+        gpsRemoved: photo.gps.removed === true,
 
-        captureOffset:
-          metadata?.OffsetTimeOriginal ??
-          metadata?.OffsetTimeDigitized ??
-          metadata?.OffsetTime ??
-          "",
+        // The photo's own estimate in metres; null means unknown, never zero.
+        gpsAccuracyMeters: photo.gps.accuracyMeters,
 
-        deviceMake:
-          metadata?.Make ??
-          "",
+        gpsTimestampUtc: photo.gps.timestampUtc,
 
-        deviceModel:
-          metadata?.Model ??
-          "",
+        metadataStatus: photo.metadataStatus,
 
-        software:
-          metadata?.Software ??
-          "",
+        capturedAt: taken.capturedAt,
 
-        orientation:
-          metadata?.Orientation ??
-          null,
+        captureTimeStatus: taken.status,
+
+        captureTimeZone: taken.zone,
+
+        captureTimeContradictory: taken.contradictory === true,
+
+        captureOffset: photo.offset,
+
+        deviceMake: photo.make,
+
+        deviceModel: photo.model,
+
+        software: photo.software,
+
+        orientation: photo.orientation,
 
       };
 
@@ -206,7 +204,21 @@ const isClearlyScreenshot = ({ fileName, metadata }) => {
     (weakFilenameSignal && lacksCameraProvenance && lacksGps);
 };
 
+// What exactly is wrong with an uploaded photo's location metadata; null when it has usable coordinates.
+function gpsMetadataProblem(metadata) {
+  if (metadata.gpsStatus === "valid" || metadata.gpsStatus === "browser-session") return null;
+  if (metadata.metadataStatus === "malformed" || metadata.metadataReadError) return { code: "PHOTO_METADATA_UNREADABLE", message: "The photo metadata could not be read. Please upload the original geotagged photo." };
+  if (metadata.gpsStatus === "unparseable") return { code: "PHOTO_GPS_UNREADABLE", message: "GPS metadata was found but could not be read from this photo. Please upload the original geotagged photo." };
+  if (metadata.gpsStatus === "invalid") return { code: "PHOTO_GPS_INVALID", message: "This photo contains invalid GPS coordinates. Please upload an original geotagged photo with valid location information." };
+  return metadata.gpsRemoved
+    ? { code: "PHOTO_GPS_REMOVED", message: "This photo does not contain GPS coordinates. The phone removed them when the photo was shared or selected. Please upload the original file." }
+    : { code: "PHOTO_GPS_MISSING", message: "This photo does not contain GPS coordinates. Please upload the original geotagged photo and try again." };
+}
+
 module.exports = {
+
+  gpsMetadataProblem,
+
 
   generateImageHash,
 

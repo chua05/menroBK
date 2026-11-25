@@ -45,7 +45,7 @@ function createEvidenceRetrievalResolver({ authorizeAndResolve = existingLegacyA
       }
       const evidence = result.evidence;
       if (!evidence || typeof evidence.absolutePath !== "string" || !path.isAbsolute(evidence.absolutePath) ||
-          !["image/jpeg", "image/png", "image/webp"].includes(evidence.contentType)) throw error("INVALID_EVIDENCE_REFERENCE");
+          !["image/jpeg", "image/png", "image/webp", "image/heic"].includes(evidence.contentType)) throw error("INVALID_EVIDENCE_REFERENCE");
       // Keep the existing, already-authorized descriptor for the existing sendFile implementation.
       return Object.freeze({ provider: "local", evidence: Object.freeze({ absolutePath: evidence.absolutePath, contentType: evidence.contentType }) });
     } catch (cause) {

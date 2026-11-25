@@ -16,6 +16,8 @@ const getExtensionFromMimeType = (
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
+    "image/heic": "heic",
+    "image/heif": "heic",
   };
 
   return extensionMap[mimeType] || null;
@@ -34,6 +36,8 @@ const getExtensionFromFileName = (
     ".jpeg",
     ".png",
     ".webp",
+    ".heic",
+    ".heif",
   ];
 
   if (
