@@ -19,6 +19,7 @@ const cohortHelpers = () => require("./verifiedPlantingCohort.service");
 const notificationService = () => require("./notification.service");
 const growthCriteria = require("../config/permanentSampleGrowthCriteria");
 const { MORTALITY_CAUSES } = require("../config/permanentSampleMonitoringVocabulary");
+const { authoritativeQuantity, permanentSamplePolicy } = require("./verifiedPlantingCohortEligibility");
 const CONDITIONS = new Set(["Healthy", "Damaged", "Dead", "Needs Rechecking"]);
 // A visit stays "open" until Admin approves it; returned visits are still open for Staff correction.
 const OPEN_VISIT_STATUSES = new Set(["DRAFT", "RETURNED", "PENDING_ADMIN_APPROVAL"]);
@@ -318,10 +319,11 @@ function reportEligibilityProblems(cohort, reportSnap, siteSnap) {
   const source = cohort?.source || {}, problems = [];
   const report = reportSnap?.exists ? reportSnap.data() || {} : null;
   if (!report) return ["REPORT_NOT_FOUND"];
-  const quantity = cohortHelpers()._test.authoritativeQuantity(report);
+  const quantity = authoritativeQuantity(report);
   if (!quantity) problems.push("REPORT_NOT_VERIFIED");
   else if (quantity !== Number(cohort?.verifiedPlantedQuantity)) problems.push("VERIFIED_QUANTITY_CHANGED");
-  if (report.reportingPolicy && report.reportingPolicy.monitoring !== "PERMANENT_SAMPLE") problems.push("NOT_PERMANENT_SAMPLE_MONITORING");
+  const policy = permanentSamplePolicy(report);
+  if (!policy.allowed) problems.push(policy.code);
   if (!source.siteId || !siteSnap?.exists || String(siteSnap.data()?.status || "").toLowerCase() === "inactive") problems.push("SITE_UNAVAILABLE");
   else if (report.siteId && String(report.siteId) !== source.siteId) problems.push("SITE_MISMATCH");
   return problems;
@@ -864,13 +866,38 @@ async function review({
 // T6: authorized, read-only explanation of why a permanent-sample visit cannot be started yet.
 // It never names other Staff members, exposes evidence, or changes any record.
 const READINESS_LIMIT = 25;
-async function readiness({ actorId, actorRole }) {
+const READINESS_CURSOR = /^(?!__.*__$)[A-Za-z0-9_-]{1,200}$/; // Firestore reserves __*__ document IDs
+function readinessPage(limit, cursor) {
+  const size = limit === undefined ? READINESS_LIMIT : typeof limit === "string" && /^\d{1,2}$/.test(limit) ? Number(limit) : limit;
+  if (!Number.isSafeInteger(size) || size < 1 || size > READINESS_LIMIT || (cursor !== undefined && (typeof cursor !== "string" || !READINESS_CURSOR.test(cursor)))) {
+    throw Object.assign(new Error("The readiness page request is invalid."), { status: 400, code: "INVALID_READINESS_QUERY" });
+  }
+  return size;
+}
+// One page of cohort documents in document ID order, plus one more when another page exists.
+async function readinessCohortDocs(policy, size, cursor) {
+  const cohorts = db.collection("verifiedPlantingCohorts");
+  if (!policy.pilot) {
+    const ordered = cohorts.orderBy("__name__");
+    return (await (cursor === undefined ? ordered : ordered.startAfter(cursor)).limit(size + 1).get()).docs;
+  }
+  // The pilot list is already bounded (at most 10 IDs), so order and cursor apply within the allowed IDs.
+  const allowed = policy.cohorts.filter(id => cursor === undefined || id > cursor);
+  if (!allowed.length) return [];
+  const snapshot = await release.scopeQuery(cohorts, { ...policy, cohorts: allowed }, "__name__").limit(READINESS_LIMIT + 1).get();
+  return [...snapshot.docs].sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, size + 1);
+}
+async function readiness({ actorId, actorRole, limit, cursor }) {
   if (!["staff", "admin"].includes(actorRole)) throw Object.assign(new Error("Monitoring visits are restricted to MENRO Staff and Admin."), { status: 403 });
   const policy = release.assertUser(actorId);
-  const snapshot = await release.scopeQuery(db.collection("verifiedPlantingCohorts"), policy, "__name__").limit(READINESS_LIMIT + 1).get();
-  const cohortDocs = snapshot.docs.slice(0, READINESS_LIMIT);
+  const size = readinessPage(limit, cursor);
   const config = resolveVerifiedPlantingCohortConfig();
   const activeSchedule = schedulePolicy.resolvePermanentSampleSchedule();
+  const gates = { writesPaused: policy.paused, firstVisitBaselineEnabled: firstVisitConfig.firstVisitBaselineEnabled(),
+    scheduleEnabled: activeSchedule.enabled, pilotRestricted: policy.pilot };
+  const found = await readinessCohortDocs(policy, size, cursor);
+  const cohortDocs = found.slice(0, size);
+  const nextCursor = found.length > size ? cohortDocs.at(-1).id : null;
   const today = schedulePolicy.dateOnlyInManila();
   const cohorts = await Promise.all(cohortDocs.map(async doc => {
     const c = doc.data(), source = c.source || {}, reasons = [];
@@ -905,6 +932,8 @@ async function readiness({ actorId, actorRole }) {
       if (c.samplingPlan?.status !== "APPROVED") reasons.push({ code: "SAMPLING_PLAN_NOT_APPROVED", planStatus: c.samplingPlan?.status || "NOT_STARTED" });
       else if (usesRejectedProvisionalPolicy(c) && c.samplingPolicySnapshot) reasons.push({ code: "TEST_ONLY_SAMPLING_POLICY" });
       if (c.baseline?.approvalStatus !== "APPROVED") reasons.push({ code: "BASELINE_NOT_APPROVED", baselineStatus: c.baseline?.approvalStatus || c.baselineStatus || "NOT_STARTED" });
+      // No plan and no baseline yet, and the first-visit workflow that would register both is off.
+      if (!c.samplingPlan && !c.baseline) reasons.push({ code: "FIRST_VISIT_POLICY_DISABLED" });
     }
     const visitRows = visits.docs.map(visit => ({ id: visit.id, ...visit.data() }));
     const open = visitRows.filter(visit => OPEN_VISIT_STATUSES.has(visit.status));
@@ -936,7 +965,7 @@ async function readiness({ actorId, actorRole }) {
       ...(firstVisit ? { registersBaseline: true, sampleTarget } : {}),
       canCreateVisit, reasons, context };
   }));
-  return { cohorts, truncated: snapshot.docs.length > READINESS_LIMIT,
+  return { cohorts, truncated: nextCursor !== null, nextCursor, gates,
     // Selectable reports (a visit can be created now) are separated from the rest, which keep their reasons.
     eligible: cohorts.filter(row => row.canCreateVisit), notEligible: cohorts.filter(row => !row.canCreateVisit),
     visitCreationAvailable: activeSchedule.enabled && cohorts.some(row => row.canCreateVisit),
@@ -960,6 +989,7 @@ module.exports = {
     currentEvidence,
     inheritedDeadIsValid,
     assertCurrentEvidence,
+    reportEligibilityProblems,
     withGrowth
   }
 };

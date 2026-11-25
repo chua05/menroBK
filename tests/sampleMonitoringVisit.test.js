@@ -276,7 +276,7 @@ test("B3 flag off: a cohort with no plan or baseline keeps the legacy create and
     assert.equal(table("verifiedPlantingCohorts").get("fv").samplingPlan, undefined);
     const data = await s.readiness({ actorId: "staff", actorRole: "staff" });
     const row = data.cohorts.find(r => r.cohortId === "fv");
-    assert.deepEqual(row.reasons.map(r => r.code), ["SAMPLING_PLAN_NOT_APPROVED", "BASELINE_NOT_APPROVED", "VISIT_SCHEDULING_POLICY_PENDING"]);
+    assert.deepEqual(row.reasons.map(r => r.code), ["SAMPLING_PLAN_NOT_APPROVED", "BASELINE_NOT_APPROVED", "FIRST_VISIT_POLICY_DISABLED", "VISIT_SCHEDULING_POLICY_PENDING"]);
     assert.equal("registersBaseline" in row, false);
   });
 });
@@ -626,6 +626,31 @@ test("B3 I1: with visit 1 open the legacy plan routes refuse, and after approval
   });
 });
 
+test("conflicting and pending report policies are refused when visit 1 is created, submitted or approved", async () => {
+  for (const [reportingPolicy, code] of [[{ monitoring: "PERMANENT_SAMPLE", definition: { monitoring: "NONE" } }, "POLICY_CONFLICT"],
+    [{ monitoring: "PERMANENT_SAMPLE", policyStatus: "PENDING_MENRO_POLICY" }, "NOT_PERMANENT_SAMPLE_MONITORING"],
+    [{ definition: { monitoring: "PENDING_MENRO_POLICY" } }, "NOT_PERMANENT_SAMPLE_MONITORING"]]) {
+    const refused = e => e.status === 409 && e.code === "REPORT_NOT_ELIGIBLE" && e.problems.includes(code);
+    const setPolicy = value => { const row = table("plantingReports").get("rpt"); if (value) row.reportingPolicy = value; else delete row.reportingPolicy; };
+    await withEnv(FLAG_ON, async () => {
+      seedFirstVisit({ report: { reportingPolicy } });
+      await assert.rejects(() => createFirst(), refused);
+      assert.equal(table("sampleMonitoringVisits").size, 0);
+      setPolicy(null);
+      const visit = await createFirst(); attachEvidence(visit.id);
+      setPolicy(reportingPolicy);
+      await assert.rejects(() => submitFirst(visit), refused);
+      assert.equal(table("sampleMonitoringVisits").get(visit.id).status, "DRAFT");
+      setPolicy(null);
+      table("users").set("admin-1", { role: "admin" });
+      const pending = await submitFirst(visit);
+      setPolicy(reportingPolicy);
+      await assert.rejects(() => s.review({ visitId: visit.id, actorId: "admin", expectedVersion: pending.version, approve: true }), refused);
+      assert.equal(table("sampleMonitoringVisits").get(visit.id).status, "PENDING_ADMIN_APPROVAL");
+      assert.equal(table("verifiedPlantingCohorts").get("fv").baseline, null);
+    });
+  }
+});
 test("B3 M1: submit and approval of visit 1 re-check report eligibility in the transaction", async () => {
   await withEnv(FLAG_ON, async () => {
     seedFirstVisit();

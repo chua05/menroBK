@@ -4,6 +4,7 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
 const { FIRST_VISIT_BASELINE_POLICY_ID, firstVisitBaselineEnabled, calculateSampleTarget, generateTreeIds } = require("../config/firstVisitBaseline");
+const { cohortIdFor, authoritativeQuantity, documentReference, normalizedSpecies, permanentSamplePolicy } = require("./verifiedPlantingCohortEligibility");
 
 const cohorts = db.collection("verifiedPlantingCohorts");
 const BASELINE_STATUSES = new Set(["NOT_STARTED", "IN_PROGRESS", "REGISTERED"]);
@@ -18,13 +19,6 @@ function disabledError() {
   return error;
 }
 
-function cohortIdFor(reportId) {
-  if (typeof reportId !== "string" || !reportId || reportId.includes("/")) {
-    throw new Error("Invalid planting report ID.");
-  }
-  return `VPC-${crypto.createHash("sha256").update(reportId).digest("hex").slice(0, 24)}`;
-}
-
 // Private evidence storage accepts only identifier-safe record IDs. Keep the
 // cohort/sample association deterministic without leaking either identifier to
 // the object namespace or using a delimiter the storage contract rejects.
@@ -32,32 +26,11 @@ function baselineEvidenceRecordId(cohortId, sampleId) {
   return `VPCB-${crypto.createHash("sha256").update(`${cohortId}\u0000${sampleId}`).digest("hex").slice(0, 48)}`;
 }
 
-function normalizedSpecies(event = {}, report = {}) {
-  const items = Array.isArray(event.seedlingItems) ? event.seedlingItems : [];
-  const seen = new Set();
-  const output = [];
-  for (const item of items) {
-    const inventoryId = String(item?.inventoryId || "").trim();
-    const species = String(item?.species || "").trim();
-    const key = `${inventoryId}|${species}`;
-    if ((!inventoryId && !species) || seen.has(key)) continue;
-    seen.add(key);
-    output.push({ inventoryId, species, releasedQuantity: Number(item?.quantity || 0) || 0,
-      ...(report.officialPlantingWorkflow === true ? { verifiedPlantedQuantity: Number(report.acceptedSeedlingsByInventory?.[inventoryId] || 0) } : {}) });
-  }
-  if (!output.length && String(report.species || "").trim()) {
-    output.push({ inventoryId: String(report.inventoryId || "").trim(), species: String(report.species).trim(), releasedQuantity: 0 });
-  }
-  return output;
-}
-
-function authoritativeQuantity(report = {}) {
-  const isParent = report.reportType === "parent";
-  const eligible = isParent
-    ? report.reportingProgress === "Completed"
-    : report.verificationStatus === "Approved";
-  const quantity = Number(isParent ? report.acceptedQuantity : report.quantityPlanted);
-  return eligible && Number.isInteger(quantity) && quantity > 0 ? quantity : 0;
+// Copied as stored. A nested-only snapshot may lack some values: they stay absent (Firestore rejects undefined).
+// Sampling values never stand in for the official policy version or approver.
+function policySnapshot(policy) {
+  const { policyVersion, approvedBy, ...sampling } = policy.sampling || {};
+  return { ...sampling, ...Object.fromEntries(["policyVersion", "approvedBy"].filter(key => policy[key] !== undefined).map(key => [key, policy[key]])) };
 }
 
 async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
@@ -71,7 +44,7 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   if (policy.paused || policy.pilot) return null;
   const verifiedPlantedQuantity = authoritativeQuantity(report);
   if (!verifiedPlantedQuantity) return null;
-  if (report.reportingPolicy && report.reportingPolicy.monitoring !== "PERMANENT_SAMPLE") return null;
+  if (!permanentSamplePolicy(report).allowed) return null;
 
   const ref = cohorts.doc(cohortIdFor(reportId));
   const existing = await transaction.get(ref);
@@ -84,8 +57,10 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   }
 
   let event = {};
-  if (report.eventId) {
-    const eventDoc = await transaction.get(db.collection("events").doc(report.eventId));
+  // An event reference that is not a plain document ID cannot be read and must not abort the report's verification.
+  const eventId = documentReference(report.eventId);
+  if (eventId) {
+    const eventDoc = await transaction.get(db.collection("events").doc(eventId));
     if (eventDoc.exists) event = eventDoc.data();
   }
   const data = {
@@ -102,8 +77,8 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
       ...(report.officialPlantingWorkflow === true ? { confirmationBases: report.confirmationBases || [] } : {}),
     },
     verifiedPlantedQuantity,
-    ...(report.reportingPolicy ? { samplingPolicySnapshot: { ...report.reportingPolicy.sampling, policyVersion: report.reportingPolicy.policyVersion, approvedBy: report.reportingPolicy.approvedBy },
-      samplingReadiness: require("./purposePolicy.service").samplingReadiness(verifiedPlantedQuantity, report.reportingPolicy.sampling, String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10)) } : {}),
+    ...(report.reportingPolicy ? { samplingPolicySnapshot: policySnapshot(report.reportingPolicy),
+      samplingReadiness: require("./purposePolicy.service").samplingReadiness(verifiedPlantedQuantity, report.reportingPolicy.sampling ?? undefined, String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10)) } : {}),
     authoritativeAt: now,
     baselineStatus: "NOT_STARTED",
     baselineVersion: 0,
@@ -412,7 +387,7 @@ async function saveSamplingPlan({ cohortId, actorId, expectedVersion, selectionM
       status: submitForApproval ? "PENDING_ADMIN_APPROVAL" : "DRAFT",
       ...(firstVisit ? { origin: "FIRST_VISIT", createdBy: currentPlan.createdBy || actorId, createdAt: currentPlan.createdAt || now } : {}),
       provisionalPolicy: firstVisit ? FIRST_VISIT_BASELINE_POLICY_ID : current.samplingPolicySnapshot ? "ADMIN_APPROVED_PURPOSE_POLICY_SNAPSHOT" : resolveVerifiedPlantingCohortConfig().provisionalSamplingPolicy,
-      ...(!firstVisit && current.samplingPolicySnapshot ? { samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}),
+      ...(!firstVisit && current.samplingPolicySnapshot ? { samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion ?? null } : {}),
       provisionalTarget: target,
       selectionMethod,
       selectedSamples: samples,
@@ -450,7 +425,7 @@ async function approveSamplingPlan({ cohortId, actorId, expectedVersion, approve
     }
     if (estimationEligibilityApproved && (!current.samplingPolicySnapshot || !Array.isArray(current.samplingReadiness?.pending) || current.samplingReadiness.pending.length || plan.selectedSamples.some(sample => sample.unitType !== "tree"))) throw conflict("Sampling validity cannot be approved while minimums, allocation/selection procedures or tree identities are unresolved.");
     const now = Timestamp.now();
-    const reviewed = { ...plan, ...(current.samplingPolicySnapshot ? { estimationEligibilityApproved: approve === true && estimationEligibilityApproved === true, samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion } : {}), status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
+    const reviewed = { ...plan, ...(current.samplingPolicySnapshot ? { estimationEligibilityApproved: approve === true && estimationEligibilityApproved === true, samplingPolicyVersion: current.samplingPolicySnapshot.policyVersion ?? null } : {}), status: approve ? "APPROVED" : "RETURNED", reviewedBy: actorId, reviewedAt: now, reviewRemarks: String(remarks || "").trim().slice(0, 1000) };
     const history = Array.isArray(current.samplingPlanHistory) ? current.samplingPlanHistory : [];
     release.writeScope(actorId, cohortId);
     transaction.update(ref, { samplingPlan: reviewed, samplingPlanHistory: [...history, samplingPlanSnapshot(reviewed)], updatedAt: now });

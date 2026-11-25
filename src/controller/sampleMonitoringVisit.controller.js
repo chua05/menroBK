@@ -51,6 +51,6 @@ exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
 
 // Read-only readiness reasons; not a visit document, so it bypasses visit response shaping.
 exports.readiness = (req, res) => gate(res) || Promise.resolve()
-  .then(() => s.readiness({ actorId: req.user.uid, actorRole: req.user.role }))
+  .then(() => s.readiness({ actorId: req.user.uid, actorRole: req.user.role, limit: req.query.limit, cursor: req.query.cursor }))
   .then(data => res.status(200).json({ success: true, data }))
   .catch(error => fail(res, error, "sample-monitoring-readiness"))

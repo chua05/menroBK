@@ -11,7 +11,9 @@ function createMemoryFirestore({ projectId, databaseId = "(default)" } = {}) {
     where: (field, op, value) => query(collection, [...filters, [field, op, value]], max),
     select: () => query(collection, filters, max), limit: (count) => query(collection, filters, count), doc: (id) => docRef(collection, id) });
   const snapshot = (ref) => ({ id: ref.id, exists: table(ref.collection).has(ref.id), data: () => clone(table(ref.collection).get(ref.id)) });
-  const matches = (value, [field, op, expected]) => (op === "==" ? value?.[field] === expected : op === "in" ? expected.includes(value?.[field]) : false);
+  // Like Firestore, a dotted field path ("source.plantingReportId") matches a nested field.
+  const at = (value, field) => field.split(".").reduce((node, key) => node?.[key], value);
+  const matches = (value, [field, op, expected]) => (op === "==" ? at(value, field) === expected : op === "in" ? expected.includes(at(value, field)) : false);
   let writeTransactions = 0, failOn = 0;
   const applied = [];
 

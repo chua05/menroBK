@@ -2,6 +2,8 @@
 
 This source preparation does not authorize deployment, production access, activation, physical-device acceptance or MENRO policy approval. No live IAM, credentials, bucket settings or index state were inspected. Historical source-remediation results remain in `production-readiness-source-remediation.md`; this document supersedes its statement that write pause and pilot controls are unimplemented.
 
+Gate dependencies, activation order and the historical cohort recovery dry run are in `permanent-sample-activation.md`.
+
 ## Control contract
 
 Backend `src/config/permanentSampleRelease.js` validates these process-local settings before Firebase initialization and again at protected operations:
