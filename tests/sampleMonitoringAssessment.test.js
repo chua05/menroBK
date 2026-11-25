@@ -449,3 +449,25 @@ test("a returned visit stays returned while corrected; each corrected tree needs
     assert.equal(revisions(await save(v, healthy({ [IDS[0]]: { heightCentimeters: 150 }, [IDS[1]]: { heightCentimeters: 140 } }))), "2,1,0");
   });
 });
+
+test("write refusals name the Tree IDs and the field, and the API passes only those on", async () => {
+  await withEnv(FLAG, async () => {
+    seed(); const v = await createFirst();
+    const empty = { condition: null, heightCentimeters: null, stemDiameterMillimeters: null };
+    await assert.rejects(() => save(v, healthy({ [IDS[1]]: empty }), { submit: true, dateMonitored: today() }), e => e.code === "TREE_CONDITION_REQUIRED" && e.field === "condition" && e.missingSampleIds.join() === IDS[1]);
+    attach(v.id, today());
+    for (const [patch, field] of [[{ heightCentimeters: 0 }, "heightCentimeters"], [{ stemDiameterMillimeters: -1 }, "stemDiameterMillimeters"], [{ stemDiameterMillimeters: null }, "stemDiameterMillimeters"],
+      [{ condition: "Dead", remarks: "Dry" }, "mortalityCause"], [{ condition: "Dead", mortalityCause: "Drought" }, "remarks"], [{ condition: "Needs Rechecking", remarks: "Gone" }, "recheckReason"]]) {
+      await assert.rejects(() => save(v, healthy({ [IDS[1]]: { remarks: "", ...patch } }), { submit: true, dateMonitored: today() }), e => e.field === field && e.sampleId === IDS[1], field);
+    }
+    await assert.rejects(() => save(v, healthy(), { dateMonitored: "2999-01-01" }), e => e.code === "INVALID_DATE_MONITORED" && e.field === "dateMonitored");
+  });
+  const controller = require("../src/controller/sampleMonitoringVisit.controller"), service = require("../src/services/sampleMonitoringVisit.service"), original = service.save;
+  await withEnv({ VERIFIED_PLANTING_COHORT_ENABLED: "true" }, async () => {
+    service.save = async () => { throw Object.assign(new Error("refused"), { status: 409, code: "X", missingSampleIds: ["A"], sampleId: "A", field: "evidence", internal: "hidden" }); };
+    try {
+      let body; await controller.save({ params: {}, user: { uid: "u", role: "staff" }, body: {} }, { status: () => ({ json: value => { body = value; } }) });
+      assert.deepEqual(body, { success: false, code: "X", message: "refused", sampleId: "A", field: "evidence", missingSampleIds: ["A"] });
+    } finally { service.save = original; }
+  });
+});

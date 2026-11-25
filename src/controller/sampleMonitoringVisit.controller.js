@@ -4,7 +4,11 @@ const { publicQueryError } = require("../utils/firestoreQueryError");
 // Missing Firestore indexes become a stable 503 without the raw console link.
 const fail = (res, rawError, context) => {
   const error = publicQueryError(rawError, context);
-  return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message });
+  // The Tree IDs and field a write error refers to let the form show it below that field.
+  return res.status(error.status || 400).json({ success: false, code: error.code, message: error.message,
+    ...(typeof error.sampleId === "string" ? { sampleId: error.sampleId } : {}),
+    ...(typeof error.field === "string" ? { field: error.field } : {}),
+    ...(Array.isArray(error.missingSampleIds) ? { missingSampleIds: error.missingSampleIds } : {}) });
 };
 
 const gate = res => {
