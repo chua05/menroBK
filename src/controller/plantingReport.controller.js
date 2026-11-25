@@ -324,7 +324,7 @@ const submitPlantingReport = async (
       "Photo capture timestamp is in the future and cannot be verified.",
     ];
 
-    const statusCode = [400, 409, 422].includes(error.status) ? error.status : notFoundErrors.includes(error.message)
+    const statusCode = [400, 403, 409, 422].includes(error.status) ? error.status : notFoundErrors.includes(error.message)
       ? 404
       : validationErrors.includes(error.message) || error.message.startsWith("Quantity exceeds the remaining reportable quantity.")
       ? 400

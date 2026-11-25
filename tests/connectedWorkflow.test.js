@@ -429,7 +429,7 @@ test("historical Approved requests use a real completed Distribution as Released
   assert.equal(table("seedlingRequests").get("legacy-released").status, "Approved");
 });
 
-test("all authenticated participants can use released event distributions with actual item quantities", async () => {
+test("only the requester sees their released event distribution, with actual item quantities; a shared event grants nothing", async () => {
   seedApproved("request-multi", "EVT-2026-MULTI");
   table("seedlingRequests").get("request-multi").items.push({ inventoryId: "narra", species: "Narra", quantity: 50 });
   table("seedlingInventory").set("narra", {
@@ -461,11 +461,11 @@ test("all authenticated participants can use released event distributions with a
   const eligibleRes = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
   await controller.getMyDistributions({ user: { uid: "participant-eligible" } }, eligibleRes);
-  assert.equal(eligibleRes.result.body.data.some((item) => item.id === "request-multi"), true);
+  assert.deepEqual(eligibleRes.result.body.data, []);
   const unrelatedRes = { result: {}, status(code) { this.result.code = code; return this; },
     json(body) { this.result.body = body; return this; } };
   await controller.getMyDistributions({ user: { uid: "participant-unrelated" } }, unrelatedRes);
-  assert.equal(unrelatedRes.result.body.data.some((item) => item.id === "request-multi"), true);
+  assert.deepEqual(unrelatedRes.result.body.data, []);
 });
 
 test("planting-report event eligibility allows ongoing and completed events but blocks future and invalid events", () => {
@@ -494,7 +494,7 @@ test("planting-report event eligibility allows ongoing and completed events but 
   }, now), /archived/);
 });
 
-test("legacy per-type path: any authenticated participant can submit planting evidence for an eligible activity", async (t) => {
+test("legacy per-type path: only the requester can submit planting evidence for their released activity", async (t) => {
   legacyMode(t);
   const sharp = require("sharp");
   const reportService = require("../src/services/plantingReport.service");
@@ -525,7 +525,7 @@ test("legacy per-type path: any authenticated participant can submit planting ev
     .toBuffer();
   const payload = {
     distributionId: requestId, inventoryId: "calamansi", siteId: "site-1",
-    participantId: "participant-unrelated", participantName: "Maria Santos",
+    participantId: "participant-1", participantName: "Maria Santos",
     participantType: "Volunteer", participantBarangay: "Bical", barangay: "Bical",
     quantityPlanted: 20, plantingDate: "2026-09-17", plantingLocation: "Site One",
     eventId,
@@ -537,7 +537,17 @@ test("legacy per-type path: any authenticated participant can submit planting ev
     [{ buffer: image, mimetype: "image/jpeg", originalname: "evidence.jpg" }]), /valid planting date/);
   assert.equal(table("plantingReports").get(reportId).verificationStatus, "Pending");
   let submitted;
+  const notOwner = (error) => error.status === 403 && error.code === "DISTRIBUTION_NOT_OWNED";
+  const foreign = () => [{ buffer: image, mimetype: "image/jpeg", originalname: "foreign.jpg" }];
+  table("eventParticipants").set("joined-auth-scope", { eventId, userId: "participant-unrelated", participantType: "participant" });
+  await assert.rejects(reportService.createPlantingReport({ ...payload, participantId: "participant-unrelated" }, foreign()), notOwner);
+  await assert.rejects(reportService.createPlantingReport({ ...payload, participantId: "participant-unrelated", participantName: "Participant One" }, foreign()), notOwner, "a display name is not ownership");
+  await assert.rejects(reportService.createPlantingReport({ ...payload, participantId: "planting-staff" }, foreign()), notOwner);
+  assert.equal(table("plantingContributions").size, 0);
   try {
+    table("events").set("EVT-OTHER-REQUEST", { ...event, sourceRequestId: "other-request" });
+    await assert.rejects(reportService.createPlantingReport({ ...payload, eventId: "EVT-OTHER-REQUEST" }, foreign()), /Selected event does not match/);
+    await assert.rejects(reportService.createPlantingReport({ ...payload, siteId: "other-site" }, foreign()), /Selected planting site does not match|Planting site not found/);
     await assert.rejects(
       reportService.createPlantingReport({ ...payload, barangay: "Calomagon" },
         [{ buffer: image, mimetype: "image/jpeg", originalname: "wrong-barangay.jpg" }]),
@@ -551,9 +561,9 @@ test("legacy per-type path: any authenticated participant can submit planting ev
     assert.equal(submitted.submissions[0].plantingDate, "2026-09-17");
     assert.equal(submitted.submissions[0].photos.length, 1);
     assert.equal(submitted.participantId, "participant-1");
-    assert.equal(submitted.submissions[0].participantId, "participant-unrelated");
-    assert.equal(submitted.submissions[0].contributorId, "participant-unrelated");
-    assert.equal(submitted.submissions[0].participantType, "participant");
+    assert.equal(submitted.submissions[0].participantId, "participant-1");
+    assert.equal(submitted.submissions[0].contributorId, "participant-1");
+    assert.equal(submitted.submissions[0].participantType, "requester");
     assert.equal(submitted.submissions[0].staffReviewStatus, "Pending Review");
     assert.equal(submitted.submissions[0].staffApprovalRequired, true);
     assert.equal(submitted.acceptedQuantity, 0);
@@ -571,12 +581,12 @@ test("legacy per-type path: any authenticated participant can submit planting ev
     assert.equal(submitted.locationVerificationStatus, "site_match");
     const contributionId = submitted.submissions[0].id;
     assert.equal(table("notifications").get(
-      `planting_report_submitted_${reportId}_${contributionId}_participant-unrelated`,
-    ).recipientUserId, "participant-unrelated");
+      `planting_report_submitted_${reportId}_${contributionId}_participant-1`,
+    ).recipientUserId, "participant-1");
     assert.equal(table("notifications").get(
       `planting_report_submitted_staff_${reportId}_${contributionId}_planting-staff`,
     ).relatedSubrecordId, contributionId);
-    const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-unrelated");
+    const mariaReports = await reportService.getPlantingReportsByParticipantId("participant-1");
     assert.equal(mariaReports.some((report) => report.id === reportId), true);
     assert.equal(table("plantingReports").get(reportId).verificationStatus, "Partial");
     const secondImage = await sharp({ create: { width: 5, height: 5, channels: 3, background: "lime" } })
@@ -667,7 +677,7 @@ test("legacy per-type path: participant correction links to the Staff-returned s
     assert.equal(returned.rejectedQuantity, 0, "returns are not counted as rejections");
     assert.equal(table("events").get(eventId).recordedSeedlingQuantity, 0);
 
-    await assert.rejects(service.createPlantingReport({ ...payload, participantId: "participant-2", correctionOf: original.id }, [await photo("olive", "other.jpg")]), (error) => error.status === 409);
+    await assert.rejects(service.createPlantingReport({ ...payload, participantId: "participant-2", correctionOf: original.id }, [await photo("olive", "other.jpg")]), (error) => error.status === 403);
     const corrected = await service.createPlantingReport({ ...payload, correctionOf: original.id }, [await photo("maroon", "corrected.jpg")]);
     reports.push(corrected);
     const resubmitted = corrected.submissions.find((entry) => entry.correctionOf === original.id);
@@ -1406,7 +1416,7 @@ test("a returned final report is corrected as the next revision of the same logi
     assert.deepEqual([a, b].map((id) => table("plantingContributions").get(id).workflowStatus), ["Returned for Correction", "Returned for Correction"]);
     assert.deepEqual(table("events").get(fixture.eventId).recordedSeedlingsByInventory, { calamansi: 0, narra: 0 }, "a return releases every type");
     await assert.rejects(service.createPlantingReport({ ...fixture.payload, participantId: "participant-2", items, correctionOf: a }, [await fixture.photo("olive", "other.jpg")]),
-      (error) => error.status === 409, "only the original submitter corrects it");
+      (error) => error.status === 403, "only the original submitter corrects it");
     const corrected = await service.createPlantingReport({ ...fixture.payload, items: [items[0], { inventoryId: "narra", leftoverQuantity: 2, leftoverReason: "Two seedlings were damaged" }], correctionOf: a },
       [await fixture.photo("maroon", "corrected.jpg")]); reports.push(corrected);
     const latest = corrected.submissions.filter((row) => !row.correctedBySubmission);
@@ -1656,4 +1666,41 @@ test("a released reservation is never counted as planting activity in analytics"
     const text = require("node:fs").readFileSync(require("node:path").join(__dirname, "../src/services", file), "utf8");
     assert.doesNotMatch(text, /eventAttendance/, `${file} never reads attendance`);
   }
+});
+
+test("my released distributions: own, released and still reportable only; returned quantities come back; walk-ins stay with the citizen", async () => {
+  const service = require("../src/services/distribution.service");
+  const ids = async (uid) => (await service.getEligibleDistributionsForParticipant(uid)).map((row) => row.id);
+  const put = (id, owner, extra = {}) => {
+    table("seedlingRequests").set(id, { participantId: owner, status: "Released", eventId: `evt-${id}`, ...extra.request });
+    table("events").set(`evt-${id}`, { sourceRequestId: id, recordStatus: "scheduled", date: "2026-09-17", startTime: "08:00", plantingSiteId: "shared-site",
+      allocationReleasedAt: new Date(), seedlingItems: [{ inventoryId: "a", quantity: 10 }, { inventoryId: "b", quantity: 5 }], ...extra.event });
+    table("distributions").set(id, { requestId: id, eventId: `evt-${id}`, plantingSiteId: "shared-site", status: "Released", participantId: owner, participantName: "Same Name", ...extra.distribution });
+  };
+  put("own-a", "owner-a"); put("own-b", "owner-b");
+  put("unreleased-a", "owner-a", { distribution: { status: "Approved" } });
+  put("reported-a", "owner-a", { event: { recordedSeedlingsByInventory: { a: 8, b: 5 }, leftoverSeedlingsByInventory: { a: 2 } } });
+  put("partial-a", "owner-a", { event: { recordedSeedlingsByInventory: { a: 10, b: 4 } } });
+  put("closed-a", "owner-a"); table("plantingReports").set("event_evt-closed-a", { reportingProgress: "Completed" });
+  put("mismatch-a", "owner-a", { request: { participantId: "owner-b" } });
+  put("walkin", "walkin_citizen", { request: { walkIn: { encodedBy: "staff-encoder", requesterId: "walkin_citizen" } } });
+  assert.deepEqual((await ids("owner-a")).sort(), ["own-a", "partial-a"]);
+  assert.deepEqual(await ids("owner-b"), ["own-b"]);
+  for (const uid of ["staff-encoder", "nobody", "", undefined, null]) assert.deepEqual(await ids(uid), []);
+  assert.deepEqual(await ids("walkin_citizen"), ["walkin"], "the citizen, never the encoder, is the requester");
+  // A report returned for correction gives its quantities back, so the requester can select the release again.
+  Object.assign(table("events").get("evt-reported-a"), { recordedSeedlingsByInventory: { a: 0, b: 0 }, leftoverSeedlingsByInventory: { a: 0 } });
+  assert.ok((await ids("owner-a")).includes("reported-a"));
+});
+
+test("POST /planting-reports answers 403 for another participant's release and ignores a client participantId", async () => {
+  const { submitPlantingReport } = require("../src/controller/plantingReport.controller");
+  const fixture = await finalReportFixture("post-owner");
+  const { participantId: _owner, participantName: _name, ...body } = fixture.payload;
+  const res = { result: {}, status(code) { this.result.code = code; return this; }, json(value) { this.result.body = value; return this; } };
+  await submitPlantingReport({ user: { uid: "participant-2", fullName: "Participant One", role: "participant" }, files: { photos: [await fixture.photo("x", "foreign.jpg")] },
+    get: () => "ownership-key-0001", headers: { "idempotency-key": "ownership-key-0001" },
+    body: { ...body, participantId: "participant-1", items: JSON.stringify([{ inventoryId: "calamansi", leftoverQuantity: 0 }, { inventoryId: "narra", leftoverQuantity: 0 }]) } }, res);
+  assert.equal(res.result.code, 403, JSON.stringify(res.result.body));
+  assert.equal(res.result.body.message, "You can report only your own released seedlings.");
 });

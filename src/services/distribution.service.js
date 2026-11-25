@@ -2,6 +2,9 @@ const {
   db,
 } = require("../config/firebase");
 
+const { isDistributionOwner, loadDistributionRequest } = require("../utils/distributionOwnership.util");
+const { hasReportableBalance } = require("../utils/plantingBalance.util");
+
 const COLLECTION =
   "distributions";
 
@@ -345,19 +348,30 @@ const getDistributionsByParticipantId =
     );
   };
 
-// Planting-report eligibility is event/distribution based, not requester based.
-// The route remains participant-only, while every released distribution tied to
-// a usable planting event is available for recording actual planting activity.
-const getEligibleDistributionsForParticipant = async () => {
-  const [distributionSnapshot, eventSnapshot] = await Promise.all([
-    distributionCollection.get(),
-    db.collection("events").get(),
+// Only the authenticated requester's own released distributions with something left to report.
+// Sharing an event or a planting site never grants access to another requester's release.
+const getEligibleDistributionsForParticipant = async (uid) => {
+  if (typeof uid !== "string" || !uid) return [];
+  const candidates = (await distributionCollection.where("participantId", "==", uid).get()).docs
+    .map((doc) => ({ id: doc.id, ...doc.data() }))
+    .filter((distribution) => distribution.status === "Released" && distribution.eventId);
+  const own = (await Promise.all(candidates.map(async (distribution) =>
+    (isDistributionOwner(distribution, await loadDistributionRequest(db, distribution), uid) ? distribution : null)))).filter(Boolean);
+  const read = async (collection, id) => {
+    const doc = await db.collection(collection).doc(id).get();
+    return doc.exists ? { id: doc.id, ...doc.data() } : null;
+  };
+  const eventIds = [...new Set(own.map((distribution) => String(distribution.eventId)))];
+  const [eventRows, parentRows] = await Promise.all([
+    Promise.all(eventIds.map((id) => read("events", id))),
+    Promise.all(eventIds.map((id) => read("plantingReports", `event_${id}`))),
   ]);
+  const parents = new Map(eventIds.map((id, index) => [id, parentRows[index]]));
 
   const usableEvents = new Map(
-    eventSnapshot.docs
-      .map((doc) => ({ id: doc.id, ...doc.data() }))
+    eventRows
       .filter((event) => {
+        if (!event) return false;
         const recordStatus = String(event.recordStatus || "").trim().toLowerCase();
         const calendarStatus = String(event.status || "").trim().toLowerCase();
         const date = String(event.date || event.eventDate || event.startDate || "").slice(0, 10);
@@ -372,12 +386,11 @@ const getEligibleDistributionsForParticipant = async () => {
       })
       .map((event) => [event.id, event])
   );
-  return distributionSnapshot.docs
-    .map((doc) => ({ id: doc.id, ...doc.data() }))
+  return own
     .filter((distribution) => {
-      if (distribution.status !== "Released") return false;
       const event = usableEvents.get(String(distribution.eventId || ""));
       if (!event || !event.allocationReleasedAt || !event.plantingSiteId) return false;
+      if (!hasReportableBalance(event, parents.get(event.id))) return false;
       const eventRequestMatches = !event.sourceRequestId ||
         String(event.sourceRequestId) === String(distribution.requestId || distribution.id);
       return eventRequestMatches;
