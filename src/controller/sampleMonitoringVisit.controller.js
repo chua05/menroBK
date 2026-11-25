@@ -54,3 +54,12 @@ exports.readiness = (req, res) => gate(res) || Promise.resolve()
   .then(() => s.readiness({ actorId: req.user.uid, actorRole: req.user.role, limit: req.query.limit, cursor: req.query.cursor }))
   .then(data => res.status(200).json({ success: true, data }))
   .catch(error => fail(res, error, "sample-monitoring-readiness"))
+
+// Simplified first visit from an existing Admin-verified report. Only the report ID and the visit date come from the client.
+exports.verifiedReports = (req, res) => gate(res) || Promise.resolve()
+  .then(() => require("../services/verifiedReportFirstVisit.service").listVerifiedReports({ actorId: req.user.uid, actorRole: req.user.role, cursor: req.query.cursor }))
+  .then(data => res.status(200).json({ success: true, data }))
+  .catch(error => fail(res, error, "verified-reports-first-visit"));
+exports.startFirstVisit = (req, res) => gate(res) || send(res, 201, () => require("../services/verifiedReportFirstVisit.service").startFirstVisit({
+  reportId: req.params.reportId, actorId: req.user.uid, actorRole: req.user.role, visitDate: req.body?.visitDate,
+}));

@@ -4,7 +4,8 @@ const { db } = require("../config/firebase");
 const { Timestamp } = require("firebase-admin/firestore");
 const { resolveVerifiedPlantingCohortConfig } = require("../config/verifiedPlantingCohort");
 const { FIRST_VISIT_BASELINE_POLICY_ID, firstVisitBaselineEnabled, calculateSampleTarget, generateTreeIds } = require("../config/firstVisitBaseline");
-const { cohortIdFor, authoritativeQuantity, documentReference, normalizedSpecies, permanentSamplePolicy } = require("./verifiedPlantingCohortEligibility");
+const { cohortIdFor, authoritativeQuantity, documentReference, normalizedSpecies, permanentSamplePolicy, firstVisitPolicy, originalPolicyRecord } = require("./verifiedPlantingCohortEligibility");
+const { VERIFIED_REPORT_POLICY_ID, verifiedReportFirstVisitEnabled } = require("../config/verifiedReportFirstVisit");
 
 const cohorts = db.collection("verifiedPlantingCohorts");
 const BASELINE_STATUSES = new Set(["NOT_STARTED", "IN_PROGRESS", "REGISTERED"]);
@@ -33,6 +34,11 @@ function policySnapshot(policy) {
   return { ...sampling, ...Object.fromEntries(["policyVersion", "approvedBy"].filter(key => policy[key] !== undefined).map(key => [key, policy[key]])) };
 }
 
+// A report verification must never fail because this optional rule is misconfigured.
+function verifiedReportRuleForVerification() {
+  try { return verifiedReportFirstVisitEnabled(); } catch { return false; }
+}
+
 async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   reportId, report, now = Timestamp.now(),
 }) {
@@ -42,29 +48,48 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
   // without blocking the legacy report or inventing a backfill policy.
   const policy = release.resolve();
   if (policy.paused || policy.pilot) return null;
-  const verifiedPlantedQuantity = authoritativeQuantity(report);
-  if (!verifiedPlantedQuantity) return null;
-  if (!permanentSamplePolicy(report).allowed) return null;
+  if (!authoritativeQuantity(report)) return null;
+  const authorized = !permanentSamplePolicy(report).allowed && firstVisitPolicy(report, { verifiedReportRule: verifiedReportRuleForVerification() }).allowed;
+  if (!authorized && !permanentSamplePolicy(report).allowed) return null;
+  if (authorized && !Number.isSafeInteger(authoritativeQuantity(report))) return null;
 
+  const prepared = await prepareCohort(transaction, { reportId, report, now, ...(authorized ? { authorization: { trigger: "REPORT_VERIFICATION", authorizedBy: null } } : {}) });
+  if (prepared.existing) return { id: prepared.ref.id, ...prepared.existing, created: false };
+  // The verified-report rule never creates a cohort its own start would refuse.
+  if (authorized && (!documentReference(prepared.data.source.siteId) || siteMismatch(report, prepared.event))) return null;
+  transaction.create(prepared.ref, prepared.data);
+  return { id: prepared.ref.id, ...prepared.data, created: true };
+}
+
+// The report and its event name different planting sites.
+function siteMismatch(report = {}, event = {}) {
+  const reportSite = String(report.siteId || "").trim(), eventSite = String(event?.plantingSiteId || "").trim();
+  return Boolean(reportSite && eventSite && reportSite !== eventSite);
+}
+
+// Reads only: the existing cohort, or the document a caller may create after its own gate and eligibility checks.
+// `reader.get` is a transaction or a plain reader. `authorization` records the verified-report rule.
+async function prepareCohort(reader, { reportId, report, now, authorization = null }) {
+  const verifiedPlantedQuantity = authoritativeQuantity(report);
   const ref = cohorts.doc(cohortIdFor(reportId));
-  const existing = await transaction.get(ref);
+  const existing = await reader.get(ref);
   if (existing.exists) {
     const current = existing.data();
     if (current.source?.plantingReportId !== reportId) {
-      throw new Error("Verified planting cohort source is inconsistent.");
+      throw Object.assign(new Error("Verified planting cohort source is inconsistent."), { code: "COHORT_IDENTITY_CONFLICT", status: 409 });
     }
-    return { id: ref.id, ...current, created: false };
+    return { ref, existing: current };
   }
 
   let event = {};
   // An event reference that is not a plain document ID cannot be read and must not abort the report's verification.
   const eventId = documentReference(report.eventId);
   if (eventId) {
-    const eventDoc = await transaction.get(db.collection("events").doc(eventId));
+    const eventDoc = await reader.get(db.collection("events").doc(eventId));
     if (eventDoc.exists) event = eventDoc.data();
   }
   const data = {
-    schemaVersion: config.schemaVersion,
+    schemaVersion: resolveVerifiedPlantingCohortConfig().schemaVersion,
     recordType: "verifiedPlantingCohort",
     source: {
       plantingReportId: reportId,
@@ -72,13 +97,15 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
       eventId: String(report.eventId || "").trim(),
       distributionId: String(report.distributionId || report.requestId || "").trim(),
       siteId: String(report.siteId || event.plantingSiteId || "").trim(),
-      ...(report.reportingPolicy ? { plantingDate: String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10) } : {}),
+      ...(report.reportingPolicy || authorization ? { plantingDate: String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10) } : {}),
       species: normalizedSpecies(event, report),
       ...(report.officialPlantingWorkflow === true ? { confirmationBases: report.confirmationBases || [] } : {}),
     },
     verifiedPlantedQuantity,
     ...(report.reportingPolicy ? { samplingPolicySnapshot: policySnapshot(report.reportingPolicy),
       samplingReadiness: require("./purposePolicy.service").samplingReadiness(verifiedPlantedQuantity, report.reportingPolicy.sampling ?? undefined, String(report.plantingDate || report.eventDate || event.date || "").slice(0, 10)) } : {}),
+    ...(authorization ? { eligibilityAuthorization: { policyId: VERIFIED_REPORT_POLICY_ID, trigger: authorization.trigger, authorizedBy: authorization.authorizedBy, authorizedAt: now,
+      originalMethod: permanentSamplePolicy(report).method, originalPolicy: originalPolicyRecord(report) } } : {}),
     authoritativeAt: now,
     baselineStatus: "NOT_STARTED",
     baselineVersion: 0,
@@ -87,8 +114,7 @@ async function ensureCohortForAuthoritativeReportInTransaction(transaction, {
     createdAt: now,
     updatedAt: now,
   };
-  transaction.create(ref, data);
-  return { id: ref.id, ...data, created: true };
+  return { ref, data, event };
 }
 
 function safePhotoReference(reference = {}) {
@@ -105,7 +131,9 @@ function safeCohort(id, data) {
     sampleUnits: (data.baseline.sampleUnits || []).map(unit => ({ ...unit,
       photoReferences: (unit.photoReferences || []).map(safePhotoReference) })),
   } : data?.baseline;
-  return { id, ...data, baseline,
+  // Staff see that the report was authorized, never who triggered it.
+  const { authorizedBy, ...authorization } = data?.eligibilityAuthorization || {};
+  return { id, ...data, ...(data?.eligibilityAuthorization ? { eligibilityAuthorization: authorization } : {}), baseline,
     baselineHistory: Array.isArray(data?.baselineHistory) ? data.baselineHistory.map(redactBaselineEntry) : data?.baselineHistory };
 }
 
@@ -221,9 +249,10 @@ function coded(message, code, status = 409) {
 }
 
 // A FIRST_VISIT plan and its baseline change only through the first monitoring visit (create, submit, review).
-// The legacy plan and baseline routes always refuse such a cohort, whatever the flag or plan status.
+// The legacy plan and baseline routes always refuse such a cohort, and one authorized by the verified-report rule,
+// whatever the flags or plan status.
 function assertNotFirstVisitCohort(current) {
-  if (current?.samplingPlan?.origin === "FIRST_VISIT") {
+  if (current?.samplingPlan?.origin === "FIRST_VISIT" || current?.eligibilityAuthorization) {
     throw coded("This cohort's sampling plan and baseline are managed by its first monitoring visit.", "FIRST_VISIT_BASELINE_ACTIVE");
   }
 }
@@ -630,6 +659,8 @@ async function approveBaseline({ cohortId, actorId, expectedVersion, approve = t
 module.exports = {
   cohortIdFor,
   ensureCohortForAuthoritativeReportInTransaction,
+  prepareCohort,
+  siteMismatch,
   listVerifiedPlantingCohorts,
   getVerifiedPlantingCohort,
   saveSamplingPlan,

@@ -25,14 +25,16 @@ if (extended) Object.assign(process.env, { MONITORING_INFORMATION_ENABLED: "true
 // Opt-in first-visit fixture (Plan v2 E1): an unsampled cohort whose visit 1 registers the 10% baseline.
 // The default mode is unchanged; the two permanent-sample flags are enabled only inside this process.
 const fixtureMode = process.env.MENRO_BROWSER_FIXTURE_MODE;
-if (fixtureMode !== undefined && fixtureMode !== "first-visit") throw new Error("Unknown browser fixture mode.");
-const firstVisitMode = fixtureMode === "first-visit";
+if (fixtureMode !== undefined && !["first-visit", "verified-report"].includes(fixtureMode)) throw new Error("Unknown browser fixture mode.");
+// verified-report: the same first visit, started from a Staff Spot-Check report that has no cohort.
+const verifiedReportMode = fixtureMode === "verified-report";
+const firstVisitMode = fixtureMode === "first-visit" || verifiedReportMode;
 if (firstVisitMode) {
   if (!formAcceptance || combinedWorkflow || evidenceReadOnly || releaseAcceptance !== undefined) throw new Error("First-visit fixture mode requires the isolated sample-monitoring form acceptance topology only.");
-  for (const name of ["PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED", "PERMANENT_SAMPLE_SCHEDULE_ENABLED"]) {
+  for (const name of ["PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED", "PERMANENT_SAMPLE_SCHEDULE_ENABLED", "VERIFIED_REPORT_FIRST_VISIT_ENABLED"]) {
     if (process.env[name] !== undefined) throw new Error("First-visit fixture mode owns its process-local permanent-sample flags.");
   }
-  Object.assign(process.env, { PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED: "true", PERMANENT_SAMPLE_SCHEDULE_ENABLED: "true" });
+  Object.assign(process.env, { PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED: "true", PERMANENT_SAMPLE_SCHEDULE_ENABLED: "true", ...(verifiedReportMode ? { VERIFIED_REPORT_FIRST_VISIT_ENABLED: "true" } : {}) });
 }
 const topology = formAcceptance ? { project: "demo-menro-legacy-monitoring-20261106", firestore: "127.0.0.1:8381", auth: "127.0.0.1:9399", storage: "127.0.0.1:9398", bucket: "demo-menro-legacy-monitoring-20261106.firebasestorage.app" } : isolated ? { project: "demo-menro-phase3c-isolated", firestore: "127.0.0.1:8281", auth: "127.0.0.1:9299", storage: "127.0.0.1:9298", bucket: "demo-menro-phase3c-isolated.firebasestorage.app" } : { project: "demo-menro-phase2", firestore: "127.0.0.1:8181", auth: "127.0.0.1:9099", storage: "127.0.0.1:9199", bucket: "demo-menro-phase2.firebasestorage.app" };
 Object.assign(process.env, {
@@ -50,6 +52,7 @@ const assert = require("node:assert/strict");
 const { auth, db } = require("../../src/config/firebase");
 const app = require("../../src/app");
 const visitService = require("../../src/services/sampleMonitoringVisit.service");
+const { fixtureCohortId } = require("./phase3cBrowserFixtureCleanup");
 const prefix = `phase3c-browser-${randomUUID()}`;
 const ids = Object.fromEntries(["admin", "staff", "participant", "otherStaff"].map((role) => [role, `${prefix}-${role}`]));
 // The real dashboard may number a fixture report on first read. Keep those
@@ -71,7 +74,7 @@ if (formAcceptance) {
   };
 }
 const password = "Phase3c-Browser-Only-2026!";
-const siteId = `${prefix}-site`, cohortId = `${prefix}-cohort`;
+const siteId = `${prefix}-site`, cohortId = fixtureCohortId(prefix, fixtureMode);
 const { cleanupFixture, fixturePath, manifestPath } = require("./phase3cBrowserFixtureCleanup");
 const evidenceDirectory = path.join(os.tmpdir(), "menro-phase3c-test-evidence");
 const diagnosticPath = path.join(evidenceDirectory, `${prefix}.backend.log`);
@@ -128,10 +131,11 @@ async function main() {
     await db.collection("seedlingRequests").doc(`${prefix}-source`).set({ participantId: ids.participant, testFixture: prefix });
     await db.collection("plantingReports").doc(`${prefix}-report`).set(firstVisitMode
       ? { requestId: `${prefix}-source`, reportNumber, verificationStatus: "Approved", quantityPlanted: 25, siteId, plantingDate: visitDate,
-        reportingPolicy: { monitoring: "PERMANENT_SAMPLE" }, testFixture: prefix }
+        ...(verifiedReportMode ? { species: "Narra", reportingPolicy: { definition: { monitoring: "STAFF_SPOT_CHECK" } } } : { reportingPolicy: { monitoring: "PERMANENT_SAMPLE" } }), testFixture: prefix }
       : { requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: formAcceptance ? 20 : 10, testFixture: prefix });
   }
-  if (firstVisitMode) await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, requestId: `${prefix}-source`,
+  if (verifiedReportMode) assert.equal((await db.collection("verifiedPlantingCohorts").doc(cohortId).get()).exists, false);
+  else if (firstVisitMode) await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, requestId: `${prefix}-source`,
     plantingDate: visitDate, species: [{ species: "Narra", verifiedPlantedQuantity: 25 }] }, verifiedPlantedQuantity: 25,
     baselineVersion: 0, baselineStatus: "NOT_STARTED", baseline: null, testFixture: prefix });
   else await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, ...(extended ? { requestId: `${prefix}-source` } : {}) }, baselineVersion: 1,
@@ -142,11 +146,12 @@ async function main() {
   if (!firstVisitMode) assert.equal(visit.status, "DRAFT");
   if (firstVisitMode) {
     // The seeded cohort must be offered as an eligible first visit with the server-calculated 10% target.
-    const row = (await visitService.readiness({ actorId: ids.staff, actorRole: "staff" })).eligible.find(entry => entry.cohortId === cohortId);
+    const source = verifiedReportMode ? require("../../src/services/verifiedReportFirstVisit.service").listVerifiedReports : visitService.readiness;
+    const row = (await source({ actorId: ids.staff, actorRole: "staff" })).eligible.find(entry => entry.cohortId === cohortId);
     assert.equal(row?.registersBaseline, true);
     assert.equal(row.sampleTarget, 3);
     const cohort = (await db.collection("verifiedPlantingCohorts").doc(cohortId).get()).data();
-    assert.equal(cohort.samplingPlan, undefined); assert.equal(cohort.baseline, null);
+    if (verifiedReportMode) assert.equal(cohort, undefined); else { assert.equal(cohort.samplingPlan, undefined); assert.equal(cohort.baseline, null); }
   }
   const workflowFixture = combinedWorkflow ? await require("./combinedWorkflowFixture").seed(prefix) : {};
   const releaseFixture = releaseAcceptance ? await require("./permanentSampleReleaseFixture").seed({ prefix, ids, cohortId, siteId, visit }) : {};
