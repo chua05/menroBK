@@ -134,6 +134,19 @@ async function main() {
         ...(verifiedReportMode ? { species: "Narra", reportingPolicy: { definition: { monitoring: "STAFF_SPOT_CHECK" } } } : { reportingPolicy: { monitoring: "PERMANENT_SAMPLE" } }), testFixture: prefix }
       : { requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: formAcceptance ? 20 : 10, testFixture: prefix });
   }
+  // Opt-in: three verified reports that already have monitoring lifecycles, as on the live Survival Monitoring page.
+  const lifecycles = [];
+  if (verifiedReportMode && process.env.MENRO_BROWSER_LIFECYCLES === "true") {
+    const planted = require("../../src/config/permanentSampleSchedule").addCalendarMonths(`${Number(visitDate.slice(0, 4)) - 1}${visitDate.slice(4)}`, 9);
+    for (const [index, [suffix, quantity, species, monitoring]] of [["020", 10, "Pili", "STAFF_SPOT_CHECK"], ["024", 20, "Pili", "STAFF_SPOT_CHECK"], ["030", 10, "Kalamansi", "PENDING_MENRO_POLICY"]].entries()) {
+      const reportId = `${prefix}-rpt-${suffix}`, lifecycleId = `${prefix}-mon-${index + 1}`, reportNumber = `RPT-2026-${suffix}`, monitoringNumber = `MON-2026-00${index + 1}`;
+      await db.collection("plantingReports").doc(reportId).set({ reportNumber, requestId: `${prefix}-source`, verificationStatus: "Approved", quantityPlanted: quantity,
+        siteId, siteName: "Phase 3C browser fixture", species, plantingDate: planted, reportingPolicy: { policyVersion: 0, monitoring, definition: { monitoring, reporting: "REQUIRED" } }, testFixture: prefix });
+      await db.collection("monitoringRecords").doc(lifecycleId).set({ id: lifecycleId, recordType: "monitoringLifecycle", monitoringNumber, plantingReportId: reportId, plantingReportNumber: reportNumber, participantId: "", siteId, siteName: "Phase 3C browser fixture",
+        species: "", quantityPlanted: quantity, authoritativePlantingDate: planted, startMonitoringDate: null, nextMonitoringDate: null, monitoringEndDate: null, scheduleStatus: "AWAITING_MONITORING_POLICY", monitoringMethod: monitoring, history: [], archived: false, testFixture: prefix });
+      lifecycles.push({ reportId, reportNumber, monitoringNumber, lifecycleId, quantity, plantingDate: planted });
+    }
+  }
   if (verifiedReportMode) assert.equal((await db.collection("verifiedPlantingCohorts").doc(cohortId).get()).exists, false);
   else if (firstVisitMode) await db.collection("verifiedPlantingCohorts").doc(cohortId).set({ source: { siteId, plantingReportId: `${prefix}-report`, requestId: `${prefix}-source`,
     plantingDate: visitDate, species: [{ species: "Narra", verifiedPlantedQuantity: 25 }] }, verifiedPlantedQuantity: 25,
@@ -163,7 +176,7 @@ async function main() {
     releaseAcceptance, ...releaseFixture, ...workflowFixture,
     evidenceWriteEnabled: require("../../src/config/evidenceStorage").resolveEvidenceStorageConfig().cloudWorkflow === true,
     password, visitId: visit.id, visitDate, sampleIds: visit.sampleAssessments.map(row => row.sampleId), diagnosticPath, emails: Object.fromEntries(Object.keys(ids).map((role) => [role, `${role}.${prefix}@example.test`])),
-    ...(firstVisitMode ? { mode: fixtureMode, cohortId, plantingReportId: `${prefix}-report`, reportNumber, expectedSampleTarget: 3 } : {}) }), "utf8");
+    ...(firstVisitMode ? { mode: fixtureMode, cohortId, plantingReportId: `${prefix}-report`, reportNumber, expectedSampleTarget: 3, lifecycles } : {}) }), "utf8");
   server = app.listen(5185, "127.0.0.1", () => console.log("PHASE3C_BROWSER_BACKEND_READY"));
 }
 async function stop(code = 0) {

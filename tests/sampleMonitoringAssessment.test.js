@@ -130,7 +130,7 @@ test("B4 Needs Rechecking requires a reason and remarks, stays unresolved and is
     seed(); const v = await createFirst(); attach(v.id, today());
     const recheck = extra => healthy({ [IDS[0]]: { condition: "Needs Rechecking", remarks: "Tag not found", recheckReason: "Tree not located", ...extra } });
     await assert.rejects(() => save(v, recheck({ recheckReason: " " }), { submit: true, dateMonitored: today() }), code("RECHECK_REASON_REQUIRED", 400));
-    await assert.rejects(() => save(v, recheck({ remarks: "" })), e => e.status === 400);
+    await assert.rejects(() => save(v, recheck({ remarks: "" }), { submit: true, dateMonitored: today() }), e => e.status === 400);
     const ok = await save(v, recheck(), { submit: true, dateMonitored: today() });
     const row = ok.sampleAssessments[0];
     assert.equal(row.condition, "Needs Rechecking"); assert.equal(row.recheckReason, "Tree not located"); assert.equal(row.recheckQueued, true);
@@ -144,7 +144,7 @@ test("B4 per-tree assessedOn comes from evidence, else the client; never future 
     seed(); const opening = monthStart(1); const v = await createFirst(opening);
     const rows = extra => healthy(extra);
     await assert.rejects(() => save(v, rows({ [IDS[0]]: { assessedOn: "2099-01-01" } })), code("INVALID_ASSESSED_ON", 400));
-    await assert.rejects(() => save(v, rows({ [IDS[0]]: { assessedOn: "2020-01-01" } })), code("INVALID_ASSESSED_ON", 400));
+    await assert.rejects(() => save(v, rows({ [IDS[0]]: { assessedOn: "2019-12-31" } })), code("INVALID_ASSESSED_ON", 400));
     await assert.rejects(() => save(v, rows({ [IDS[0]]: { assessedOn: "2026-02-30" } })), code("INVALID_ASSESSED_ON", 400));
     let saved = await save(v, rows({ [IDS[0]]: { assessedOn: opening } }), { dateMonitored: opening });
     assert.equal(saved.sampleAssessments[0].assessedOn, opening);
@@ -391,5 +391,61 @@ test("B4 fix1: the CONFIRMED_DEAD_LOCKED message names the tree", async () => {
     await assert.rejects(() => s.save({ actorRole: "staff", visitId: "locked", actorId: "staff", expectedVersion: 0,
       assessments: [{ sampleId: "TREE-001", condition: "Healthy" }, { sampleId: "TREE-002", condition: null }] }),
     e => e.code === "CONFIRMED_DEAD_LOCKED" && e.status === 409 && e.message.includes("TREE-001"));
+  });
+});
+
+test("Save Draft keeps an incomplete Needs Rechecking tree, and search findings persist without an investigation outcome", async () => {
+  await withEnv(FLAG, async () => {
+    seed(); const v = await createFirst();
+    const rows = extra => healthy({ [IDS[0]]: { condition: "Needs Rechecking", remarks: "", recheckReason: "", ...extra } });
+    const draft = await save(v, rows({ searchFindings: "  Searched 10 m around the tag  " }));
+    assert.deepEqual([draft.status, draft.sampleAssessments[0].condition, draft.sampleAssessments[0].searchFindings, draft.sampleAssessments[0].investigationOutcome], ["DRAFT", "Needs Rechecking", "Searched 10 m around the tag", null]);
+    assert.equal((await save(v, rows({ investigationOutcome: "Not Located After Rechecking" }))).sampleAssessments[0].investigationOutcome, "Not Located After Rechecking");
+    attach(v.id, today());
+    await assert.rejects(() => save(v, rows({ remarks: "Gone", recheckReason: "Not found", investigationOutcome: "Not Located After Rechecking" }), { submit: true, dateMonitored: today() }), /search findings/);
+    await assert.rejects(() => save(v, rows({ searchFindings: 42 })), e => e.status === 400);
+    // Findings belong to the unresolved tree only.
+    assert.equal((await save(v, healthy({ [IDS[0]]: { searchFindings: "old" } }))).sampleAssessments[0].searchFindings, null);
+  });
+});
+
+test("Save Tree Assessment checks only the named tree like a submission, including its photo, and writes nothing when refused", async () => {
+  await withEnv(FLAG, async () => {
+    seed(); const v = await createFirst();
+    const stored = () => table("sampleMonitoringVisits").get(v.id), version = stored().version;
+    const empty = { condition: null, heightCentimeters: null, stemDiameterMillimeters: null };
+    const partial = extra => healthy({ [IDS[1]]: empty, [IDS[2]]: empty, ...extra });
+    await assert.rejects(() => save(v, partial(), { assessedSampleId: IDS[0] }), e => e.code === "CURRENT_SAMPLE_EVIDENCE_REQUIRED" && e.sampleId === IDS[0] && e.missingSampleIds.join() === IDS[0]);
+    attach(v.id, today());
+    await assert.rejects(() => save(v, partial({ [IDS[0]]: { heightCentimeters: null } }), { assessedSampleId: IDS[0] }), e => e.code === "MEASUREMENTS_REQUIRED" && e.sampleId === IDS[0]);
+    await assert.rejects(() => save(v, partial({ [IDS[0]]: { condition: "Dead", remarks: "Dry" } }), { assessedSampleId: IDS[0] }), e => e.code === "MORTALITY_DETAILS_REQUIRED");
+    await assert.rejects(() => save(v, partial(), { assessedSampleId: IDS[1] }), code("TREE_CONDITION_REQUIRED", 400));
+    await assert.rejects(() => save(v, partial(), { assessedSampleId: "OTHER-T001" }), code("INVALID_TREE_ASSESSMENT", 400));
+    await assert.rejects(() => save(v, partial(), { assessedSampleId: IDS[0], submit: true, dateMonitored: today() }), e => e.status === 400);
+    assert.equal(stored().version, version);
+    const saved = await save(v, partial(), { assessedSampleId: IDS[0] });
+    assert.deepEqual([saved.status, saved.version, saved.summary.healthy, saved.summary.notAssessed], ["DRAFT", version + 1, 1, 2]);
+  });
+});
+
+test("a returned visit stays returned while corrected; each corrected tree needs one new photo, whichever save changed it", async () => {
+  await withEnv(FLAG, async () => {
+    seed(); const v = await createFirst(); attach(v.id, today());
+    const pending = await save(v, healthy(), { submit: true, dateMonitored: today() });
+    await s.review({ visitId: v.id, actorId: "admin-1", expectedVersion: pending.version, approve: false, reasons: "Re-measure." });
+    const revisions = visit => visit.sampleAssessments.map(row => row.assessmentRevision).join();
+    const first = await save(v, healthy({ [IDS[0]]: { heightCentimeters: 130 } }));
+    assert.deepEqual([first.status, first.reviewReasons, revisions(first)], ["RETURNED", "Re-measure.", "1,0,0"]);
+    const corrected = healthy({ [IDS[0]]: { heightCentimeters: 131 }, [IDS[1]]: { heightCentimeters: 140 } });
+    const second = await save(v, corrected);
+    assert.deepEqual([second.status, revisions(second)], ["RETURNED", "1,1,0"]);
+    await assert.rejects(() => save(v, corrected, { submit: true, dateMonitored: today() }), e => e.code === "CURRENT_SAMPLE_EVIDENCE_REQUIRED" && e.missingSampleIds.join() === IDS.slice(0, 2).join());
+    assert.equal(table("sampleMonitoringVisits").get(v.id).sampleAssessments[0].evidenceHistory.length, 1, "earlier evidence is kept");
+    attach(v.id, today(), IDS.slice(0, 2));
+    const again = await save(v, corrected, { submit: true, dateMonitored: today() });
+    assert.equal(again.status, "PENDING_ADMIN_APPROVAL");
+    // A second return is a new correction round.
+    await s.review({ visitId: v.id, actorId: "admin-1", expectedVersion: again.version, approve: false, reasons: "Once more." });
+    assert.equal(revisions(await save(v, healthy({ [IDS[0]]: { heightCentimeters: 150 }, [IDS[1]]: { heightCentimeters: 140 } }))), "2,1,0");
   });
 });

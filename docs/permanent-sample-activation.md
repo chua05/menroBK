@@ -12,6 +12,7 @@ All settings are read by the backend process. Unset means off.
 | `PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED` | `false` | Visit 1 registers the 10% sample and the baseline. Off: a cohort with no plan and no baseline reports `FIRST_VISIT_POLICY_DISABLED`. | Cohort flag |
 | `PERMANENT_SAMPLE_SCHEDULE_ENABLED` | `false` | Opens visits on the approved calendar. Off: every cohort reports `VISIT_SCHEDULING_POLICY_PENDING`. | Cohort flag |
 | `VERIFIED_REPORT_FIRST_VISIT_ENABLED` | `false` | Every Admin-verified report with a valid quantity and site can start the simplified Visit 1, whatever method was stored. See "Verified-report rule". | Cohort, first-visit and schedule flags |
+| `PERMANENT_SAMPLE_ORIGINAL_PHOTO_ENABLED` | `false` | Upload Existing Photo: accepts original JPEGs with embedded GPS, an unambiguous capture time on the Date Monitored, inside the planting site and not a duplicate. GPS accuracy is unknown, so Admin must acknowledge each one at approval. Off: Take Photo only. Exactly `true` or `false`; anything else answers 503. MENRO must approve these rules first. | Cohort flag |
 | `PERMANENT_SAMPLE_PILOT_ENABLED` | `false` | Restricts all access to listed users AND listed existing cohorts. | Both pilot ID lists |
 | `PERMANENT_SAMPLE_WRITE_PAUSED` | `true` | Rejects permanent-sample changes with 503; authorized reads stay available. | - |
 

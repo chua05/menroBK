@@ -73,9 +73,9 @@ test("B5 history: visits 1 and 2 approved give ordered rows with server-recomput
     const context = (await view(v2.id)).visitContext;
     const due3 = schedule.addCalendarMonths(due2, 3);
     assert.deepEqual(context.history, [
-      { visitId: v1.id, visitNumber: 1, scheduledDueDate: v1date, visitDate: v1date, dateMonitored: v1date, status: "APPROVED",
+      { visitId: v1.id, canView: true, visitNumber: 1, scheduledDueDate: v1date, visitDate: v1date, dateMonitored: v1date, status: "APPROVED",
         healthy: 3, damaged: 0, confirmedDead: 0, needsRechecking: 0, notAssessed: 0, survivalRate: 100, survivalStatus: "COMPLETE" },
-      { visitId: v2.id, visitNumber: 2, scheduledDueDate: due2, visitDate: due2, dateMonitored: due2, status: "APPROVED",
+      { visitId: v2.id, canView: true, visitNumber: 2, scheduledDueDate: due2, visitDate: due2, dateMonitored: due2, status: "APPROVED",
         healthy: 1, damaged: 1, confirmedDead: 1, needsRechecking: 0, notAssessed: 0, survivalRate: 66.67, survivalStatus: "COMPLETE" },
       { visitId: null, visitNumber: 3, scheduledDueDate: due3, visitDate: null, dateMonitored: null, status: "SCHEDULED",
         availability: due3 > today() ? "NOT_YET_AVAILABLE" : "AVAILABLE",
@@ -122,7 +122,7 @@ test("B5 history: a returned visit shows RETURNED with its recomputed counts, an
     await s.review({ visitId: v2.id, actorId: "admin-1", expectedVersion: pending.version, approve: false, reasons: "Recheck tree 1" });
     const context = (await view(v2.id)).visitContext;
     const row = context.history.find(entry => entry.visitId === v2.id);
-    assert.deepEqual(row, { visitId: v2.id, visitNumber: 2, scheduledDueDate: due2, visitDate: due2, dateMonitored: due2, status: "RETURNED",
+    assert.deepEqual(row, { visitId: v2.id, canView: true, visitNumber: 2, scheduledDueDate: due2, visitDate: due2, dateMonitored: due2, status: "RETURNED",
       healthy: 1, damaged: 0, confirmedDead: 1, needsRechecking: 1, notAssessed: 0, survivalRate: null, survivalStatus: "PENDING_INCOMPLETE" });
     // No scheduled row while visit 2 exists (returned visits never advance the schedule).
     assert.equal(context.history.length, 2);

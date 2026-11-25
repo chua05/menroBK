@@ -104,7 +104,7 @@ async function verifyOriginal({actorId,actorRole,visitId,sampleId,input={},files
     if (!v || v.createdBy!==actorId || v.cohortId!==visit.cohortId || v.siteId!==visit.siteId || !["DRAFT","RETURNED"].includes(v.status) || v.version!==expectedVersion || Number(a?.assessmentRevision||0)!==revision || !a || assessmentFingerprint(a,v.dateMonitored)!==binding.assessmentFingerprint || JSON.stringify(currentSite.data())!==JSON.stringify(siteDoc.data())) throw fail(409,"ORIGINAL_BINDING_STALE","The original-photo target changed. Refresh and verify again.");
     validation.cohortBinding(currentCohort.data(),v);
     if(old.exists) { const existing=old.data(); if(existing.fingerprint!==fingerprint || existing.state!=="VERIFIED" || existing.expiresAt<=Date.now()) throw fail(409,"ORIGINAL_VERIFICATION_CONFLICT","This verification request changed, expired or was already used."); return existing; }
-    const value={...binding,...metadata,sha256,fingerprint,evidenceId:"VOE-"+randomUUID(),state:"VERIFIED",issuedAt:Date.now(),expiresAt:Date.now()+5*60*1000,policyStatus:"PROPOSED_PENDING_MENRO_APPROVAL"};
+    const value={...binding,...metadata,sha256,fingerprint,evidenceId:"VOE-"+randomUUID(),state:"VERIFIED",issuedAt:Date.now(),expiresAt:Date.now()+5*60*1000,policyStatus:requireOriginalProposal().policyStatus};
     release.writeScope(actorId,visit.cohortId);tx.create(proofRef,value);return value;
   });
   return { originalVerificationId: proofRef.id, evidenceId: proof.evidenceId, source: proof.source, location: proof.location,

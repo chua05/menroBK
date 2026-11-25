@@ -119,6 +119,19 @@ function inheritedDeadIsValid(row, priorVisit) {
   return source.visitId === priorVisit.id && Number(source.assessmentRevision) === Number(prior.assessmentRevision || 0) && currentEvidence(prior);
 }
 
+// Save Tree Assessment (spec section 17): the one saved tree is checked like a submission, including its evidence.
+// While a visit is returned, the photo reviewed with that submission still belongs to the tree until its assessment changes.
+function assertTreeAssessment(sampleId, { input, row, samples, locked, requireLocation, returned, priorRow }) {
+  const code = (status, name, message) => Object.assign(new Error(message), { status, code: name, sampleId });
+  if (!samples.some(sample => sample.permanentId === sampleId)) throw code(400, "INVALID_TREE_ASSESSMENT", "Select a Tree ID of this monitoring visit.");
+  if (locked) throw code(409, "CONFIRMED_DEAD_LOCKED", `Tree ${sampleId} is a confirmed death carried forward and cannot be edited.`);
+  if (!row?.condition) throw code(400, "TREE_CONDITION_REQUIRED", `Select the condition of ${sampleId}.`);
+  try { normalize([input], [{ permanentId: sampleId }], { strict: true }); }
+  catch (error) { throw Object.assign(error, { status: error.status || 400, sampleId }); }
+  const hasEvidence = currentEvidence(row, { requireLocation }) || returned && currentEvidence(priorRow, { requireLocation });
+  if (!hasEvidence) throw Object.assign(code(409, "CURRENT_SAMPLE_EVIDENCE_REQUIRED", `Take and verify the photo of ${sampleId} before saving its assessment. Use Save Draft to keep incomplete entries.`), { missingSampleIds: [sampleId] });
+}
+
 function assertCurrentEvidence(rows, priorVisit, { requireLocation = false } = {}) {
   const missing = rows.filter(row => !currentEvidence(row, { requireLocation }) && (requireLocation || !inheritedDeadIsValid(row, priorVisit))).map(row => row.sampleId);
   if (missing.length) throw Object.assign(conflict(requireLocation
@@ -240,10 +253,12 @@ function normalize(items, samples, { draft = false, strict = false, lockedIds = 
     seen.add(sampleId);
     const remarks = String(a?.remarks || "").trim().slice(0, 1000),
       outcome = String(a?.investigationOutcome || "").trim();
-    if (a.condition === "Needs Rechecking" && !remarks) throw validation.invalid("Needs Rechecking requires remarks.");
+    if (!draft && a.condition === "Needs Rechecking" && !remarks) throw validation.invalid("Needs Rechecking requires remarks.");
     if (outcome && !INVESTIGATION_OUTCOMES.has(outcome)) throw new Error("Invalid investigation outcome.");
     if (outcome && a.condition !== "Needs Rechecking") throw new Error("An investigation outcome requires Needs Rechecking.");
-    if (outcome && !String(a?.searchFindings || "").trim()) throw new Error("Not Located After Rechecking requires documented search findings.");
+    if (a?.searchFindings != null && typeof a.searchFindings !== "string") throw validation.invalid("Search findings must be text.");
+    const searchFindings = String(a?.searchFindings || "").trim().slice(0, 1000);
+    if (!draft && outcome && !searchFindings) throw new Error("Not Located After Rechecking requires documented search findings.");
     const base = {
       sampleId,
       condition: a.condition || null,
@@ -251,7 +266,8 @@ function normalize(items, samples, { draft = false, strict = false, lockedIds = 
       heightCentimeters: validation.measurement(a.heightCentimeters),
       diameterCentimeters: diameterInput(a),
       investigationOutcome: outcome || null,
-      searchFindings: outcome ? String(a.searchFindings).trim().slice(0, 1000) : null,
+      // Search and field findings belong to the unresolved tree, with or without a recorded outcome.
+      searchFindings: a.condition === "Needs Rechecking" && searchFindings ? searchFindings : null,
       recheckQueued: a.condition === "Needs Rechecking" && !outcome
     };
     // Legacy visits keep their measurement rules but store the spec section 15 Reason for Rechecking.
@@ -397,7 +413,8 @@ async function createFirstVisit({ cohortId, actorId, visitDate, scheduledMode, a
       visitDate,
       visitNumber: 1,
       scheduledDueDate: visitDate,
-      openingDate: visitDate,
+      // Visit 1 has no fixed date: the field assessment may be any day from planting to today.
+      openingDate: schedulePolicy.validDateOnly(source.plantingDate) ? source.plantingDate : visitDate,
       scheduleStatus: schedulePolicy.scheduleStatus(visitDate, today),
       ...(scheduledMode ? { schedulePolicyVersion: activeSchedule.policyVersion, schedulePolicySnapshot: activeSchedule } : {}),
       status: "DRAFT",
@@ -455,7 +472,9 @@ async function create({
   const unresolved = new Map((prior?.sampleAssessments || []).filter(a => a.recheckQueued || a.condition === "Needs Rechecking").map(a => [a.sampleId, a]));
   // A death recorded with current evidence, or one the approved prior visit already carried forward, keeps being carried.
   const confirmedDead = new Map((prior?.sampleAssessments || []).filter(a => a.condition === "Dead" && (currentEvidence(a) || a.inheritedConfirmedDead)).map(a => [a.sampleId, a]));
-  const visitId = id(cohortId, scheduledDueDate),
+  // Visit IDs come from the cohort and date. Visit 1 keeps the ID of the day it was started, which can equal a later due date.
+  const dateId = id(cohortId, scheduledDueDate),
+    visitId = approved.some(visit => visit.id === dateId) ? id(cohortId, `${scheduledDueDate}#${visitNumber}`) : dateId,
     ref = visitRef(visitId),
     cohortRef = db.collection("verifiedPlantingCohorts").doc(cohortId);
   await db.runTransaction(async tx => {
@@ -623,10 +642,12 @@ async function save({
   visitRemarks,
   overallRemarks,
   dateMonitored,
+  assessedSampleId,
   actorRole
 }) {
   if (!resolveVerifiedPlantingCohortConfig().enabled) throw disabled();
   assertStaffWriter(actorRole);
+  if (assessedSampleId !== undefined && (typeof assessedSampleId !== "string" || submit === true)) throw validation.invalid("assessedSampleId must name one Tree ID and is not used when submitting.");
   validation.version(expectedVersion);
   validation.boolean(submit, "submit");
   // Overall Visit Remarks (spec section 21): `overallRemarks`, with the existing `visitRemarks` as its alias.
@@ -672,7 +693,8 @@ async function save({
     }
     const measured = strict && !firstVisit && cur.registersBaseline !== true
       ? await priorMeasurements(id => tx.get(visitRef(id)), cur, priorVisit) : null;
-    const dateContext = { openingDate: cur.openingDate || cur.visitDate || null, today: schedulePolicy.dateOnlyInManila() };
+    const firstOpening = firstVisit && schedulePolicy.validDateOnly(cohort?.source?.plantingDate) ? cohort.source.plantingDate : null;
+    const dateContext = { openingDate: firstOpening || cur.openingDate || cur.visitDate || null, today: schedulePolicy.dateOnlyInManila() };
     const growthOptions = { strict, baselineOnly: firstVisit || cur.registersBaseline === true, priorMeasurements: measured,
       currentDate: dateMonitored ?? cur.dateMonitored ?? null };
     const values = normalize(assessments, samples, { draft: !submit, strict, lockedIds }).map(entry => {
@@ -682,7 +704,10 @@ async function save({
       if (lockedIds.has(entry.sampleId)) return withGrowth({ ...prior, ...references }, priorVisit, growthOptions);
       const comparable = value => value && ({ condition: value.condition, remarks: value.remarks || "", heightCentimeters: value.heightCentimeters ?? null, diameterCentimeters: value.diameterCentimeters ?? null, investigationOutcome: value.investigationOutcome || null, searchFindings: value.searchFindings || null, recheckQueued: Boolean(value.recheckQueued),
         ...(strict ? { mortalityCause: value.mortalityCause || null, recheckReason: value.recheckReason || null } : {}) });
-      const correctedAfterReturn = cur.status === "RETURNED" && JSON.stringify(comparable(entry)) !== JSON.stringify(comparable(prior));
+      // A correction needs new evidence once per returned submission, however many times it is saved before resubmitting.
+      const correctionRound = Number(cur.submissionRevision || 0);
+      const correctedAfterReturn = cur.status === "RETURNED" && prior?.correctionRound !== correctionRound &&
+        JSON.stringify(comparable(entry)) !== JSON.stringify(comparable(prior));
       const unchangedInheritedDead = JSON.stringify(comparable(entry)) === JSON.stringify(comparable(prior));
       const inheritedConfirmedDead = prior?.inheritedConfirmedDead && entry.condition === "Dead" && unchangedInheritedDead
         ? prior.inheritedConfirmedDead : null;
@@ -691,27 +716,33 @@ async function save({
         ...references,
         assessmentRevision: Number(prior?.assessmentRevision || 0) + (correctedAfterReturn ? 1 : 0),
         evidenceHistory: Array.isArray(prior?.evidenceHistory) ? prior.evidenceHistory : [],
+        ...(correctedAfterReturn ? { correctionRound } : prior?.correctionRound !== undefined ? { correctionRound: prior.correctionRound } : {}),
         ...(inheritedConfirmedDead ? { inheritedConfirmedDead } : {})
       };
       if (strict) row.assessedOn = assessedOnFor(row, inputBySampleId.get(entry.sampleId), prior, dateContext);
       return withGrowth(row, priorVisit, growthOptions);
     });
+    if (assessedSampleId !== undefined && strict) {
+      assertTreeAssessment(assessedSampleId, { input: inputBySampleId.get(assessedSampleId), row: values.find(entry => entry.sampleId === assessedSampleId),
+        samples, locked: lockedIds.has(assessedSampleId), requireLocation: firstVisit, returned: cur.status === "RETURNED", priorRow: priorBySampleId.get(assessedSampleId) });
+    }
     if (submit && values.some(entry => !entry.condition)) throw conflict("Every approved sample requires an assessment before submission.");
     if (submit && (cur.schedulePolicyVersion === schedulePolicy.POLICY_VERSION || firstVisit)) {
       const actualDate = dateMonitored ?? cur.dateMonitored;
       if (!schedulePolicy.validDateOnly(actualDate)) throw validation.invalid("Date Monitored is required for submission.");
-      if (cur.schedulePolicyVersion === schedulePolicy.POLICY_VERSION && actualDate < cur.openingDate) throw Object.assign(conflict(`This visit cannot be submitted before ${cur.openingDate}.`), { code: "VISIT_NOT_OPEN" });
+      if (!firstOpening && cur.schedulePolicyVersion === schedulePolicy.POLICY_VERSION && actualDate < cur.openingDate) throw Object.assign(conflict(`This visit cannot be submitted before ${cur.openingDate}.`), { code: "VISIT_NOT_OPEN" });
       if (firstVisit) {
-        // Visit 1 is monitored on or after both its visit date and the planting date (spec section 7), also in test mode.
+        // Visit 1 is monitored on any day from the planting date to today (spec section 7), also in test mode.
         const plantingDate = cohort?.source?.plantingDate;
         if (schedulePolicy.validDateOnly(plantingDate) && actualDate < plantingDate) throw Object.assign(conflict(`Permanent-sample monitoring is not eligible before ${plantingDate}.`), { code: "VISIT_BEFORE_ELIGIBILITY" });
-        if (actualDate < cur.visitDate) throw Object.assign(conflict(`This visit cannot be submitted before ${cur.visitDate}.`), { code: "VISIT_NOT_OPEN" });
+        if (!firstOpening && actualDate < cur.visitDate) throw Object.assign(conflict(`This visit cannot be submitted before ${cur.visitDate}.`), { code: "VISIT_NOT_OPEN" });
       }
       assertCurrentEvidence(values, priorVisit && { id: cur.priorVisitId, ...priorVisit }, { requireLocation: firstVisit });
     }
     if (submit) require("./sampleMonitoringOriginalEvidence").reviewRequirements({...cur, dateMonitored:dateMonitored ?? cur.dateMonitored, sampleAssessments:values});
     const version = Number(cur.version) + 1;
-    const status = submit ? "PENDING_ADMIN_APPROVAL" : "DRAFT";
+    // A returned visit stays Returned for Correction (with its reason) until it is resubmitted.
+    const status = submit ? "PENDING_ADMIN_APPROVAL" : cur.status;
     const now = Timestamp.now();
     // Each submission gets the next revision so the client can reconcile an ambiguous submit outcome.
     const submissionRevision = submit ? Number(cur.submissionRevision || 0) + 1 : Number(cur.submissionRevision || 0);
@@ -837,7 +868,9 @@ async function review({
       reviewedBy: actorId,
       reviewReasons: String(reasons).trim().slice(0, 1000),
       reviewedAt: now,
-      ...(approve ? { scheduleStatus: "COMPLETED", nextScheduledDueDate } : { scheduleStatus: "RETURNED" }),
+      ...(approve ? { scheduleStatus: "COMPLETED", nextScheduledDueDate,
+        // The approved actual monitoring date becomes the authoritative Visit 1 (baseline) date; the start day is kept.
+        ...(firstVisit && d.data().dateMonitored ? { visitDate: d.data().dateMonitored, startedOn: d.data().startedOn || d.data().visitDate } : {}) } : { scheduleStatus: "RETURNED" }),
       history: [...(d.data().history || []), {
         version: d.data().version,
         status,
@@ -846,7 +879,7 @@ async function review({
         nextScheduledDueDate,
         reviewedBy: actorId,
         reviewedAt: now,
-        ...(reviewedOriginals.length ? {originalEvidenceReviews:reviewedOriginals, accuracyAcknowledgment:"UNKNOWN", policyStatus:"PROPOSED_PENDING_MENRO_APPROVAL"} : {})
+        ...(reviewedOriginals.length ? {originalEvidenceReviews:reviewedOriginals, accuracyAcknowledgment:"UNKNOWN", policyStatus:require("../config/sampleMonitoringOriginalProposal").requireOriginalProposal().policyStatus} : {})
       }]
     });
     const scheduleUpdate = approve && nextScheduledDueDate ? {

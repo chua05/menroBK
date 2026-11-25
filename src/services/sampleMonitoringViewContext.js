@@ -33,7 +33,8 @@ function historyRows(visits, cohort, viewer = {}) {
         survivalRate: null, survivalStatus: null };
     }
     const counts = visitSummary(Array.isArray(entry.sampleAssessments) ? entry.sampleAssessments.filter(row => row && typeof row === "object") : []);
-    return { visitId: entry.id, ...dates, healthy: counts.healthy, damaged: counts.damaged,
+    // Staff open their own visits; approved results of other Staff stay summarized here and in the tree timeline.
+    return { visitId: entry.id, canView: viewer.actorRole === "admin" || Boolean(viewer.actorId) && entry.createdBy === viewer.actorId, ...dates, healthy: counts.healthy, damaged: counts.damaged,
       confirmedDead: counts.confirmedDead, needsRechecking: counts.needsRechecking, notAssessed: counts.notAssessed,
       survivalRate: counts.survivalRate, survivalStatus: counts.survivalStatus };
   });

@@ -62,7 +62,7 @@ async function upload({
   if (!cohort || !bindsTo(cohort, visit)) {
     throw bad("The verified planting cohort no longer matches this monitoring visit.");
   }
-  const original = evidenceManifest?.[0]?.source === "uploaded-original" && process.env.MENRO_MONITORING_ORIGINAL_PHOTO_PROPOSAL === "true";
+  const original = evidenceManifest?.[0]?.source === "uploaded-original" && require("../config/sampleMonitoringOriginalProposal").originalPhotosConfigured();
   if (original) require("../config/sampleMonitoringOriginalProposal").requireOriginalProposal();
   const payload = { visitId, sampleId, assessmentRevision, expectedVisitVersion };
   const binding = {
@@ -114,7 +114,7 @@ async function upload({
       evidenceType: "sample-monitoring",
       verification: original ? {latitude:proof.location.latitude,longitude:proof.location.longitude,gpsValid:true,timestampValid:true,siteGpsValid:true,
         capturedAt:proof.capturedAt,captureOffset:proof.captureOffset,captureDateManila:proof.captureDateManila,
-        evidenceSource:"uploaded-original",locationSource:"Original EXIF (accuracy unknown)",locationAccuracyMeters:null,verificationPolicyVersion:"local-original-exif-review-v1"} : {
+        evidenceSource:"uploaded-original",locationSource:"Original EXIF (accuracy unknown)",locationAccuracyMeters:null,verificationPolicyVersion:require("../config/sampleMonitoringOriginalProposal").requireOriginalProposal().proposalVersion} : {
         latitude: session.latitude,
         longitude: session.longitude,
         gpsValid: true,
@@ -151,7 +151,13 @@ async function upload({
       }
       const hashBinding = h.exists ? h.data() : null;
       const existingHashMatchesCurrentBinding = Boolean(hashBinding && hashBinding.visitId === visitId && hashBinding.sampleId === sampleId && Number(hashBinding.assessmentRevision) === Number(assessmentRevision));
-      if (Object.values(failed).some(Boolean)) { browserDiagnostic({ visitId, sampleId, expectedVisitVersion, assessmentRevision, existingHashMatchesCurrentBinding, failed }); throw bad("Assessment evidence changed while uploading."); }
+      if (Object.values(failed).some(Boolean)) { browserDiagnostic({ visitId, sampleId, expectedVisitVersion, assessmentRevision, existingHashMatchesCurrentBinding, failed });
+        // The only problem is that this exact image is already evidence elsewhere: say so instead of "changed".
+        if (failed.existingHash && !existingHashMatchesCurrentBinding && Object.entries(failed).every(([name, value]) => name === "existingHash" || !value)) {
+          throw Object.assign(bad("This photo is already registered as evidence. Take a new photo for this tree."), { code: "DUPLICATE_EVIDENCE" });
+        }
+        throw bad("Assessment evidence changed while uploading.");
+      }
       const items = current.sampleAssessments.map(a => a.sampleId !== sampleId ? a : {
         ...a,
         evidenceHistory: [...(a.evidenceHistory || []), {

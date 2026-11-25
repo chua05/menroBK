@@ -42,7 +42,7 @@ exports.get = (req, res) => gate(res) || send(res, 200, () => s.get(req.params.v
 }));
 exports.save = (req, res) => gate(res) || send(res, 200, () => s.save({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
-  assessments: req.body?.assessments, submit: req.body?.submit, visitRemarks: req.body?.visitRemarks, dateMonitored: req.body?.dateMonitored, actorRole: req.user.role,
+  assessments: req.body?.assessments, submit: req.body?.submit, visitRemarks: req.body?.visitRemarks, dateMonitored: req.body?.dateMonitored, assessedSampleId: req.body?.assessedSampleId, actorRole: req.user.role,
 }));
 exports.review = (req, res) => gate(res) || send(res, 200, () => s.review({
   visitId: req.params.visitId, actorId: req.user.uid, expectedVersion: req.body?.expectedVersion,
