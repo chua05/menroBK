@@ -47,6 +47,27 @@ test("Staff reporting derives identities and release quantities; requester docum
   assert.equal(result.submissions[0].submittedByName, "Verified Staff"); assert.equal(result.submissions[0].requesterName, "Real requester");
   assert.equal(result.submissions[0].staffReviewStatus, "Pending Review"); assert.equal(result.submissions[0].adminApprovalRequired, true); assert.deepEqual(result.submissions[0].photos, []);
 });
+// A walk-in citizen has no account, so Staff submit the report, but only when the released request's policy asks for one.
+const withPolicy = (fixture, reporting, walkIn = true) => Object.assign(memory.records("seedlingRequests").get(fixture.requestId), { reportingPolicy: { reporting }, ...(walkIn ? { walkIn: { encodedBy: "staff", citizenHasAccount: false } } : {}) });
+test("walk-in: no report can be submitted before release, or when the policy does not require one", async () => {
+  const unreleased = seed("walkin-unreleased"); withPolicy(unreleased, "REQUIRED").status = "Approved";
+  await assert.rejects(service.submitOfficialReport(staff, payload(unreleased.requestId)), error => error.status === 409);
+  const none = seed("walkin-none"); withPolicy(none, "NOT_REQUIRED"); const before = JSON.stringify([...memory.records("plantingContributions")]);
+  await assert.rejects(service.submitOfficialReport(staff, payload(none.requestId)), error => { assert.equal(error.status, 409); assert.equal(error.code, "PLANTING_REPORT_NOT_REQUIRED"); assert.equal(error.message, "No Planting Report Required for this released request."); return true; });
+  assert.equal(JSON.stringify([...memory.records("plantingContributions")]), before);
+  const { options } = await service.listReleasedOptions(staff, { requestId: none.requestId });
+  assert.equal(options[0].reportSubmissionAllowed, false); assert.equal(options[0].requesterName, "Real requester");
+});
+test("walk-in: a required (or optional, pending or historical) report is submitted by Staff for the actual citizen; participant requests are unchanged", async () => {
+  for (const [name, reporting, walkIn] of [["required", "REQUIRED", true], ["optional", "OPTIONAL", true], ["pending", "PENDING_POLICY", true], ["participant-none", "NOT_REQUIRED", false]]) {
+    const fixture = seed(`policy-${name}`); withPolicy(fixture, reporting, walkIn);
+    assert.equal((await service.listReleasedOptions(staff, { requestId: fixture.requestId })).options[0].reportSubmissionAllowed, true, name);
+    const report = await service.submitOfficialReport(staff, payload(fixture.requestId)); assert.equal(report.submissions[0].requesterName, "Real requester", name);
+    assert.equal(memory.records("seedlingRequests").get(fixture.requestId).participantId, "requester-real");
+  }
+  const historical = seed("walkin-historical"); memory.records("seedlingRequests").get(historical.requestId).walkIn = { encodedBy: "staff" };
+  assert.ok(await service.submitOfficialReport(staff, payload(historical.requestId)), "no stored policy keeps the existing behaviour");
+});
 test("Participant/Admin/unauthenticated cannot create Staff reports and body identities are rejected", async () => {
   const fixture = seed("roles");
   for (const user of [null, admin, { uid: "participant", role: "participant" }]) await assert.rejects(service.submitOfficialReport(user, payload(fixture.requestId)), error => [401, 403].includes(error.status));

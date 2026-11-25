@@ -25,6 +25,9 @@ function assertReleased(request, event, distribution, requestId, eventId) {
     throw fail(409, "The linked request, event and released distribution must agree before reporting.");
   }
 }
+// A walk-in citizen has no account, so Staff report for them, and only when the released request's policy does not waive
+// the report. Participant requests and requests without a stored policy keep their existing behaviour.
+const reportSubmissionAllowed = request => !(request.walkIn && request.reportingPolicy?.reporting === "NOT_REQUIRED");
 function optionsFor(requestId, request, eventId, event, distribution) {
   assertReleased(request, event, distribution, requestId, eventId);
   const distributionItems = distribution.items || [];
@@ -34,7 +37,7 @@ function optionsFor(requestId, request, eventId, event, distribution) {
     if (!Number.isSafeInteger(released) || released !== Number(item.quantity)) throw fail(409, "The release quantities require reconciliation before reporting.");
     return { inventoryId: item.inventoryId, species: item.species || distributed.species || "", quantityReleased: released, availableQuantity: availableForReporting(event, item) };
   });
-  return { ...(request.reportingPolicy ? { reportingPolicy: request.reportingPolicy } : {}), requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.participantType || request.userType || distribution.participantType || "",
+  return { ...(request.reportingPolicy ? { reportingPolicy: request.reportingPolicy } : {}), reportSubmissionAllowed: reportSubmissionAllowed(request), requestId, eventId, distributionId: requestId, requesterName: request.participantName || "", participantSector: request.workflow?.sector || request.participantType || request.userType || distribution.participantType || "",
     requestingAs: request.workflow?.requestingAs || "", organizationName: request.workflow?.organizationName || request.organization || "",
     requestType: request.requestType || request.workflow?.effectiveRequestType || require("../utils/requestClassification.util").classifyRequest(request.workflow) || "", expectedVersion: Number(event.officialReportingVersion || 0), siteId: event.plantingSiteId, siteName: event.plantingSiteName || "", eventName: event.name || "", plantingDate: event.date || "", items };
 }
@@ -54,7 +57,8 @@ async function listReleasedOptions(user, { cursor, requestId } = {}) {
   const options = [];
   for (const doc of page) {
     const request = doc.data();
-    if (!safeId(request.eventId)) continue;
+    // Listed only when a report can be submitted; a directly selected release is returned so the form can explain it.
+    if (!safeId(request.eventId) || !selected && !reportSubmissionAllowed(request)) continue;
     const [event, distribution] = await Promise.all([db.collection("events").doc(request.eventId).get(), db.collection("distributions").doc(doc.id).get()]);
     if (!event.exists || !distribution.exists) continue;
     try {
@@ -109,6 +113,7 @@ async function submitOfficialReport(user, input) {
     if (!eventDoc.exists) throw fail(404, "Planting event not found.");
     const event = eventDoc.data();
     const option = optionsFor(requestDoc.id, request, eventDoc.id, event, distributionDoc.data());
+    if (!input.correctionOf && !option.reportSubmissionAllowed) throw Object.assign(fail(409, "No Planting Report Required for this released request."), { code: "PLANTING_REPORT_NOT_REQUIRED" });
     if (input.confirmationBasis === "release-based" && option.requestType !== "individual") throw fail(400, "Release-based confirmation is available only for an individual requester.", { confirmationBasis: "Organizations require MENRO field reporting." });
     const eventDate = new Date(`${String(event.date).slice(0, 10)}T${event.time || event.startTime || "00:00"}:00+08:00`);
     if (!Number.isFinite(eventDate.getTime()) || eventDate > new Date()) throw fail(409, "Official planting reports cannot be submitted before the linked planting event.");

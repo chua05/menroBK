@@ -3,7 +3,7 @@ const {
   db,
 } = require("../config/firebase");
 const crypto = require("crypto");
-const { assertIndependentRequestAction } = require("../utils/requestSeparation.util");
+const { assertIndependentRequestAction, assertReleaseAction } = require("../utils/requestSeparation.util");
 const submissionPath = require("../utils/requestSubmissionPath.util");
 const { plantingArea, normalizeRequestPlantingArea, applyRegisteredSiteArea } = require("../utils/plantingArea.util");
 
@@ -2220,7 +2220,8 @@ const recordLateReleaseConflict = async (id, staff, data = {}) => {
     const doc = await transaction.get(requestRef);
     if (!doc.exists) throw new Error("Seedling request not found.");
     const request = doc.data();
-    assertIndependentRequestAction(request, staff.uid);
+    // Part of the release step; deciding the replacement schedule stays independent.
+    assertReleaseAction(request, staff.uid);
     assertMutationVersion(request, data.expectedVersion);
     if (request.status !== "Approved" || request.inventoryReleased === true) throw new Error("Only approved, unreleased requests can enter late-release rescheduling.");
     if (["AwaitingRequester", "PendingStaffReview", "ReturnedForRevision"].includes(request.lateReleaseRescheduling?.status)) {
@@ -2357,7 +2358,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
     const requestDoc = await transaction.get(requestRef);
     if (!requestDoc.exists) throw new Error("Seedling request not found.");
     const request = requestDoc.data();
-    assertIndependentRequestAction(request, releasedBy);
+    assertReleaseAction(request, releasedBy);
     assertMutationVersion(request, releaseData?.expectedVersion);
     if (request.inventoryReleased === true || request.status === "Released") {
       throw new Error("Seedlings have already been released for this request.");
