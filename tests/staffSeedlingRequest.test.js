@@ -361,6 +361,8 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   assert.equal(request.walkIn.encodedBy, identities.staff.uid); assert.equal(request.walkIn.encodedByName, identities.staff.fullName); assert.equal(request.walkIn.assistedByName, "Maria Santos"); assert.equal(request.walkIn.citizenHasAccount, false);
   for (const [action, body] of [["review", { items: request.items, purpose: request.purpose, plantingLocation: request.plantingLocation, preferredReleaseDate: request.preferredReleaseDate, expectedVersion: 0 }], ["return", { reason: "Encoder cannot decide", expectedVersion: 0 }], ["release", { expectedVersion: 0, availableReleaseDate: "2099-01-01", items: [{ inventoryId: "narra", releasedQuantity: 2 }] }]]) {
     const denied = await http(`/seedling-requests/${request.id}/${action}`, "staff", "PATCH", body);
+    // Releasing is not a review: before Admin approval it is refused as not approved, and nothing is released.
+    if (action === "release") { assert.equal(denied.status, 400); assert.match(denied.message, /Only approved requests can be released/); assert.equal(memory.records("distributions").has(request.id), false); continue; }
     assert.equal(denied.status, 403); assert.equal(denied.code, "REQUEST_SELF_PROCESSING_FORBIDDEN");
   }
   // A Staff-encoded walk-in follows the Staff path: Awaiting Approval, straight to Admin; the citizen stays the requester.
@@ -465,6 +467,58 @@ test("walk-in multipart encoding separates citizen and Staff, links a private si
   assert.equal(earlierResubmitted.data.walkIn.acknowledgementStatus, "RECEIVED_PENDING_MANUAL_REVIEW");
   assert.equal(earlierResubmitted.data.status, "Reviewed");
 
+});
+
+// Walk-in release: review/approval stay independent; releasing an already approved request does not need another officer.
+async function walkInRequest(purpose) {
+  const created = await submit("staff", undefined), record = memory.records("seedlingRequests").get(created.id);
+  memory.records("seedlingRequests").set(created.id, { ...record, participantId: "walkin_citizen", participantName: "Walk-in Citizen", requesterRole: "walk-in", createdByRole: "staff",
+    walkIn: { encodedBy: identities.staff.uid, encodedByName: identities.staff.fullName, citizenHasAccount: false }, ...(purpose ? { purpose } : {}) });
+  return memory.records("seedlingRequests").get(created.id) && created.id;
+}
+const approveWalkIn = async id => { const response = await http(`/seedling-requests/${id}/approve`, "admin", "PATCH", { expectedVersion: 0 }); assert.equal(response.status, 200, JSON.stringify(response)); return response.data; };
+const releaseBody = (request, extra = {}) => ({ expectedVersion: request.requestVersion, availableReleaseDate: "2099-01-01", items: [{ inventoryId: "narra", releasedQuantity: 2 }], ...extra });
+
+test("the Staff encoder releases an Admin-approved walk-in once: actual quantities, releaser, stock and the citizen requester are recorded", async () => {
+  const id = await walkInRequest(), path = `/seedling-requests/${id}/release`;
+  const early = await http(path, "staff", "PATCH", { ...releaseBody({ requestVersion: 0 }) });
+  assert.equal(early.status, 400, "not before Admin approval"); assert.match(early.message, /Only approved requests/);
+  const own = memory.records("seedlingRequests").get(id);
+  for (const [action, body] of [["review", { items: own.items, purpose: own.purpose, plantingLocation: own.plantingLocation, preferredReleaseDate: own.preferredReleaseDate }], ["return", { reason: "Correction needed" }]]) assert.equal((await http(`/seedling-requests/${id}/${action}`, "staff", "PATCH", { expectedVersion: 0, ...body })).code, "REQUEST_SELF_PROCESSING_FORBIDDEN");
+  const approved = await approveWalkIn(id), before = unchangedSnapshot();
+  for (const role of ["participant", "admin"]) assert.equal((await http(path, role, "PATCH", releaseBody(approved))).status, 403);
+  for (const items of [[{ inventoryId: "narra", releasedQuantity: 3 }], [{ inventoryId: "narra", releasedQuantity: 0 }], [{ inventoryId: "narra", releasedQuantity: 1 }], [{ inventoryId: "other", releasedQuantity: 2 }]])
+    assert.equal((await http(path, "staff", "PATCH", releaseBody(approved, { items }))).status, 400);
+  const stock = memory.records("seedlingInventory").get("narra"); memory.records("seedlingInventory").set("narra", { ...stock, availableQuantity: 1, currentQuantity: 1 });
+  const short = await http(path, "staff", "PATCH", releaseBody(approved)); assert.equal(short.status, 400); assert.match(short.message, /available stock/);
+  memory.records("seedlingInventory").set("narra", stock); assert.equal(unchangedSnapshot(), before, "refused releases write nothing");
+  const available = Number(stock.currentQuantity ?? stock.availableQuantity);
+  const released = await http(path, "staff", "PATCH", releaseBody(approved)); assert.equal(released.status, 200, JSON.stringify(released));
+  assert.deepEqual([released.data.status, released.data.releasedBy, released.data.totalQuantityReleased, released.data.releaseType], ["Released", identities.staff.uid, 2, "Complete"]); assert.ok(released.data.releasedAt);
+  assert.deepEqual([released.data.participantId, released.data.participantName, released.data.walkIn.encodedBy], ["walkin_citizen", "Walk-in Citizen", identities.staff.uid]);
+  const distribution = memory.records("distributions").get(id); assert.deepEqual([distribution.participantId, distribution.releasedBy, distribution.status], ["walkin_citizen", identities.staff.uid, "Released"]);
+  assert.equal(memory.records("seedlingInventory").get("narra").availableQuantity, available - 2);
+  const after = unchangedSnapshot();
+  for (const role of ["staff", "officer"]) for (const expectedVersion of [approved.requestVersion, released.data.requestVersion]) assert.notEqual((await http(path, role, "PATCH", releaseBody(approved, { expectedVersion }))).status, 200);
+  assert.equal(unchangedSnapshot(), after, "a second release writes nothing");
+});
+
+test("another Staff member may still release a walk-in, and the encoder may record a late-release conflict but never decide it", async () => {
+  const first = await walkInRequest(), approved = await approveWalkIn(first);
+  assert.equal((await http(`/seedling-requests/${first}/release`, "officer", "PATCH", releaseBody(approved))).data.releasedBy, identities.officer.uid);
+  const second = await walkInRequest(), other = await approveWalkIn(second);
+  const conflict = await http(`/seedling-requests/${second}/late-release-conflict`, "staff", "PATCH", { expectedVersion: other.requestVersion, availableReleaseDate: "2099-01-04", reason: "Later seedling availability" });
+  assert.equal(conflict.status, 200, JSON.stringify(conflict));
+  for (const action of ["approve", "return"]) assert.equal((await http(`/seedling-requests/${second}/late-release-rescheduling/${action}`, "staff", "PATCH", { expectedVersion: conflict.data.requestVersion, reason: "Correction needed" })).code, "REQUEST_SELF_PROCESSING_FORBIDDEN");
+  const blocked = await http(`/seedling-requests/${second}/release`, "staff", "PATCH", releaseBody(conflict.data)); assert.equal(blocked.status, 409, "the schedule conflict must be resolved first");
+});
+
+test("release separation: never the requester, and never the officer who both encoded and approved", () => {
+  const { assertIndependentRequestAction, assertReleaseAction } = require("../src/utils/requestSeparation.util");
+  const request = { participantId: "citizen", walkIn: { encodedBy: "encoder" }, approvedBy: "admin" };
+  for (const uid of ["encoder", "officer"]) assert.doesNotThrow(() => assertReleaseAction(request, uid));
+  for (const [row, uid] of [[request, "citizen"], [{ participantId: "staff" }, "staff"], [{ ...request, approvedBy: "encoder" }, "encoder"], [request, ""], [request, undefined]]) assert.throws(() => assertReleaseAction(row, uid), error => error.status === 403 && error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN");
+  assert.throws(() => assertIndependentRequestAction(request, "encoder"), error => error.code === "REQUEST_SELF_PROCESSING_FORBIDDEN", "review and approval rules are unchanged");
 });
 
 test("citizen and encoder remain unable to process an assisted request after a role change", () => {
