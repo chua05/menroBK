@@ -10,16 +10,17 @@ function assessmentFingerprint(row, date) {
 function reviewRequirements(visit) {
   if (!(visit.sampleAssessments || []).some(row => row.evidenceHistory?.some(e => e.source === "uploaded-original"))) return [];
   require("../config/sampleMonitoringOriginalProposal").requireOriginalProposal();
-  const required = [];
+  const required = [], replace = [];
   for (const row of visit.sampleAssessments || []) {
     if (!row.evidenceHistory?.some(e => e.source === "uploaded-original")) continue;
     const relevant = row.evidenceHistory.filter(e => Number(e.revision) === Number(row.assessmentRevision || 0) && e.assessmentFingerprint === assessmentFingerprint(row, visit.dateMonitored));
-    if (!relevant.length) throw fail("ORIGINAL_REPLACEMENT_REQUIRED", "An assessment or monitoring date changed. Save the draft and provide new relevant evidence; historical photos remain preserved.");
+    if (!relevant.length) replace.push(row.sampleId);
     for (const e of relevant.filter(e => e.source === "uploaded-original")) {
       if (!e.evidenceId || !e.privateEvidence || e.accuracyStatus !== "UNKNOWN" || e.verificationStatus !== "NEEDS_ADMIN_REVIEW") throw fail("ORIGINAL_REVIEW_INVALID", "Original evidence review information is incomplete.");
       required.push({ sampleId: row.sampleId, evidenceId: e.evidenceId, assessmentRevision: Number(row.assessmentRevision || 0) });
     }
   }
+  if (replace.length) throw Object.assign(fail("ORIGINAL_REPLACEMENT_REQUIRED", "An assessment or monitoring date changed. Save the draft and provide new relevant evidence; historical photos remain preserved."), { missingSampleIds: replace });
   return required;
 }
 function assertOriginalReview(visit, acknowledgments) {

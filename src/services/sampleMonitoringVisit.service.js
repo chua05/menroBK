@@ -197,7 +197,9 @@ async function priorMeasurements(read, cur, priorVisit) {
   }
   return result;
 }
-const invalidCode = (message, code) => Object.assign(validation.invalid(message), { code });
+const invalidCode = (message, code, field) => Object.assign(validation.invalid(message), { code, ...(field ? { field } : {}) });
+// Names the form field a rejected value belongs to.
+const inField = (field, read) => { try { return read(); } catch (error) { throw Object.assign(error, { field: error.field || field }); } };
 // Diameter at the API boundary: stemDiameterMillimeters (spec unit) or diameterCentimeters (existing clients).
 function diameterInput(a) {
   const centimeters = validation.measurement(a?.diameterCentimeters);
@@ -216,18 +218,19 @@ function strictFields(a, base, { draft }) {
   const condition = base.condition;
   let { heightCentimeters, diameterCentimeters } = base;
   if (condition === "Dead" || condition === "Needs Rechecking") heightCentimeters = diameterCentimeters = null;
-  for (const value of [heightCentimeters, diameterCentimeters]) {
-    if (value !== null && !(value > 0)) throw invalidCode("Height and stem diameter must be greater than zero.", "INVALID_MEASUREMENT");
+  for (const [field, value] of [["heightCentimeters", heightCentimeters], ["stemDiameterMillimeters", diameterCentimeters]]) {
+    if (value !== null && !(value > 0)) throw invalidCode("Height and stem diameter must be greater than zero.", "INVALID_MEASUREMENT", field);
   }
   if (!draft && LIVING.has(condition) && (heightCentimeters === null || diameterCentimeters === null)) {
-    throw invalidCode("Healthy and Damaged trees require height (cm) and stem diameter (mm).", "MEASUREMENTS_REQUIRED");
+    throw invalidCode("Healthy and Damaged trees require height (cm) and stem diameter (mm).", "MEASUREMENTS_REQUIRED",
+      heightCentimeters === null ? "heightCentimeters" : "stemDiameterMillimeters");
   }
   const cause = typeof a?.mortalityCause === "string" ? a.mortalityCause.trim() : "";
   if (a?.mortalityCause != null && typeof a.mortalityCause !== "string" || cause && !MORTALITY_CAUSES.includes(cause)) {
-    throw invalidCode("Cause of Mortality must be one of the configured causes.", "INVALID_MORTALITY_CAUSE");
+    throw invalidCode("Cause of Mortality must be one of the configured causes.", "INVALID_MORTALITY_CAUSE", "mortalityCause");
   }
   if (!draft && condition === "Dead" && (!cause || !base.remarks)) {
-    throw invalidCode("Dead requires a Cause of Mortality and remarks.", "MORTALITY_DETAILS_REQUIRED");
+    throw invalidCode("Dead requires a Cause of Mortality and remarks.", "MORTALITY_DETAILS_REQUIRED", cause ? "remarks" : "mortalityCause");
   }
   return { ...base, heightCentimeters, diameterCentimeters,
     mortalityCause: condition === "Dead" && cause ? cause : null,
@@ -239,7 +242,7 @@ function recheckReasonFor(a, condition, { draft }) {
   if (a?.recheckReason != null && typeof a.recheckReason !== "string") throw validation.invalid("Reason for Rechecking must be text.");
   const recheckReason = String(a?.recheckReason || "").trim().slice(0, 1000);
   if (!draft && condition === "Needs Rechecking" && !recheckReason) {
-    throw invalidCode("Needs Rechecking requires a Reason for Rechecking.", "RECHECK_REASON_REQUIRED");
+    throw invalidCode("Needs Rechecking requires a Reason for Rechecking.", "RECHECK_REASON_REQUIRED", "recheckReason");
   }
   return condition === "Needs Rechecking" && recheckReason ? recheckReason : null;
 }
@@ -247,24 +250,27 @@ function normalize(items, samples, { draft = false, strict = false, lockedIds = 
   if (!Array.isArray(items) || items.length !== samples.length) throw new Error("Every approved sample requires an assessment.");
   const allowed = new Set(samples.map(s => s.permanentId));
   const seen = new Set();
+  const unassessed = draft ? [] : items.filter(a => allowed.has(String(a?.sampleId || "")) && (a.condition == null || a.condition === "")).map(a => String(a.sampleId));
+  if (unassessed.length) throw Object.assign(invalidCode("Every approved sample requires an assessment before submission.", "TREE_CONDITION_REQUIRED", "condition"), { missingSampleIds: unassessed });
   return items.map(a => {
     const sampleId = String(a?.sampleId || "");
     if (!allowed.has(sampleId) || seen.has(sampleId) || !(CONDITIONS.has(a?.condition) || draft && (a?.condition == null || a.condition === ""))) throw new Error("Assessment does not match an approved sample.");
     seen.add(sampleId);
+    try {
     const remarks = String(a?.remarks || "").trim().slice(0, 1000),
       outcome = String(a?.investigationOutcome || "").trim();
-    if (!draft && a.condition === "Needs Rechecking" && !remarks) throw validation.invalid("Needs Rechecking requires remarks.");
+    if (!draft && a.condition === "Needs Rechecking" && !remarks) throw invalidCode("Needs Rechecking requires remarks.", "REMARKS_REQUIRED", "remarks");
     if (outcome && !INVESTIGATION_OUTCOMES.has(outcome)) throw new Error("Invalid investigation outcome.");
     if (outcome && a.condition !== "Needs Rechecking") throw new Error("An investigation outcome requires Needs Rechecking.");
     if (a?.searchFindings != null && typeof a.searchFindings !== "string") throw validation.invalid("Search findings must be text.");
     const searchFindings = String(a?.searchFindings || "").trim().slice(0, 1000);
-    if (!draft && outcome && !searchFindings) throw new Error("Not Located After Rechecking requires documented search findings.");
+    if (!draft && outcome && !searchFindings) throw invalidCode("Not Located After Rechecking requires documented search findings.", "SEARCH_FINDINGS_REQUIRED", "searchFindings");
     const base = {
       sampleId,
       condition: a.condition || null,
       remarks,
-      heightCentimeters: validation.measurement(a.heightCentimeters),
-      diameterCentimeters: diameterInput(a),
+      heightCentimeters: inField("heightCentimeters", () => validation.measurement(a.heightCentimeters)),
+      diameterCentimeters: inField("stemDiameterMillimeters", () => diameterInput(a)),
       investigationOutcome: outcome || null,
       // Search and field findings belong to the unresolved tree, with or without a recorded outcome.
       searchFindings: a.condition === "Needs Rechecking" && searchFindings ? searchFindings : null,
@@ -274,6 +280,7 @@ function normalize(items, samples, { draft = false, strict = false, lockedIds = 
     if (!strict) return { ...base, recheckReason: recheckReasonFor(a, base.condition, { draft }) };
     // Carried-forward confirmed deaths are locked rows, checked and kept by save().
     return lockedIds.has(sampleId) ? base : strictFields(a, base, { draft });
+    } catch (error) { throw Object.assign(error, { sampleId: error.sampleId || sampleId }); }
   });
 }
 // Spec section 14: a carried-forward confirmed death cannot be edited by Staff. The client may echo it back
@@ -659,7 +666,7 @@ async function save({
   if (visitRemarks !== undefined && (typeof visitRemarks !== "string" || visitRemarks.trim().length > 1000)) throw validation.invalid("Visit remarks must be at most 1000 characters.");
   if (dateMonitored !== undefined) {
     const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-    if (typeof dateMonitored !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateMonitored) || !Number.isFinite(Date.parse(dateMonitored)) || new Date(dateMonitored).toISOString().slice(0, 10) !== dateMonitored || dateMonitored > today) throw validation.invalid("Date Monitored must be a valid date and cannot be in the future.");
+    if (typeof dateMonitored !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(dateMonitored) || !Number.isFinite(Date.parse(dateMonitored)) || new Date(dateMonitored).toISOString().slice(0, 10) !== dateMonitored || dateMonitored > today) throw invalidCode("Date Monitored must be a valid date and cannot be in the future.", "INVALID_DATE_MONITORED", "dateMonitored");
   }
   release.assertUser(actorId); release.assertWrite();
   const ref = visitRef(visitId);
@@ -729,7 +736,7 @@ async function save({
     if (submit && values.some(entry => !entry.condition)) throw conflict("Every approved sample requires an assessment before submission.");
     if (submit && (cur.schedulePolicyVersion === schedulePolicy.POLICY_VERSION || firstVisit)) {
       const actualDate = dateMonitored ?? cur.dateMonitored;
-      if (!schedulePolicy.validDateOnly(actualDate)) throw validation.invalid("Date Monitored is required for submission.");
+      if (!schedulePolicy.validDateOnly(actualDate)) throw invalidCode("Date Monitored is required for submission.", "INVALID_DATE_MONITORED", "dateMonitored");
       if (!firstOpening && cur.schedulePolicyVersion === schedulePolicy.POLICY_VERSION && actualDate < cur.openingDate) throw Object.assign(conflict(`This visit cannot be submitted before ${cur.openingDate}.`), { code: "VISIT_NOT_OPEN" });
       if (firstVisit) {
         // Visit 1 is monitored on any day from the planting date to today (spec section 7), also in test mode.
