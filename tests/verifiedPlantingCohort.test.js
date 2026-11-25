@@ -193,6 +193,19 @@ test("new policy plans preserve one configured cohort target, species identity a
   assert.equal(approved.samplingPlan.estimationEligibilityApproved, true); assert.equal(approved.samplingPlanHistory.at(-1).samplingPolicyVersion, 2); assert.equal(approved.samplingPlanHistory.at(-1).estimationEligibilityApproved, true);
 });
 
+test("a policy snapshot without a version saves and reviews a plan with an explicit null version", async () => {
+  reset();
+  const cohortId = service.cohortIdFor("unversioned-policy-plan");
+  table("verifiedPlantingCohorts").set(cohortId, { verifiedPlantedQuantity: 10, baselineVersion: 0, source: { plantingDate: "2026-10-01" }, samplingReadiness: { pending: [] },
+    samplingPolicySnapshot: { percentage: 10, minimum: 1, firstVisitDelayWeeks: 2, intervalMonths: 12, speciesAllocationProcedure: "Approved", physicalSelectionProcedure: "Approved" } });
+  const saved = await service.saveSamplingPlan({ cohortId, actorId: "staff-1", expectedVersion: 0, selectionMethod: "documented-manual", submitForApproval: true,
+    selectedSamples: [{ permanentId: "TREE-001", unitType: "tree", species: "Narra", siteReference: "North", selectionReason: "Approved documented procedure" }],
+    speciesSiteDistribution: [{ species: "Narra", siteReference: "North", sampleIds: ["TREE-001"] }] });
+  assert.equal(saved.samplingPlan.samplingPolicyVersion, null);
+  const approved = await service.approveSamplingPlan({ cohortId, actorId: "admin-1", expectedVersion: 1, approve: true });
+  assert.equal(approved.samplingPlan.samplingPolicyVersion, null);
+});
+
 // T3: outside isolated tests the test-only provisional sampling rule is never accepted.
 async function outsideTestMode(fn) {
   const previous = process.env.NODE_ENV;

@@ -115,17 +115,26 @@ function releasePolicy(snapshot, releasedQuantity) {
 }
 function samplingReadiness(confirmed, sampling = {}, plantingDate, now = new Date()) {
   if (!Number.isSafeInteger(confirmed) || confirmed < 0) throw fail(400, "Confirmed planted quantity must be a nonnegative whole number.");
-  const baseTarget = Math.ceil(confirmed * Number(sampling.percentage ?? 10) / 100);
-  const target = confirmed === 0 ? 0 : sampling.minimum == null ? null : Math.min(confirmed, Math.max(sampling.minimum, baseTarget));
+  const percentage = Number.isFinite(sampling.percentage) && sampling.percentage > 0 && sampling.percentage <= 100 ? sampling.percentage : null;
+  const minimum = Number.isSafeInteger(sampling.minimum) && sampling.minimum >= 1 && sampling.minimum <= 10000 ? sampling.minimum : null;
+  const intervalMonths = Number.isSafeInteger(sampling.intervalMonths) && sampling.intervalMonths >= 1 && sampling.intervalMonths <= 120 ? sampling.intervalMonths : null;
+  const baseTarget = percentage === null ? null : Math.ceil(confirmed * percentage / 100);
+  const target = confirmed === 0 && percentage !== null && minimum !== null ? 0
+    : percentage === null || minimum === null ? null : Math.min(confirmed, Math.max(minimum, baseTarget));
   const pending = [];
-  if (target === null) pending.push("MINIMUM_SAMPLE_POLICY_PENDING");
+  if (percentage === null) pending.push("SAMPLING_PERCENTAGE_PENDING");
+  if (minimum === null) pending.push("MINIMUM_SAMPLE_POLICY_PENDING");
+  if (intervalMonths === null) pending.push("VISIT_INTERVAL_POLICY_PENDING");
   if (!sampling.speciesAllocationProcedure) pending.push("SPECIES_ALLOCATION_PROCEDURE_PENDING");
   if (!sampling.physicalSelectionProcedure) pending.push("PHYSICAL_SELECTION_PROCEDURE_PENDING");
-  if (sampling.firstVisitDelayWeeks == null) pending.push("FIRST_VISIT_DELAY_PENDING");
+  // Same bounds as validatePolicy; any other stored value is still pending (an unusable date must never throw here).
+  const delay = sampling.firstVisitDelayWeeks;
+  const delayWeeks = Number.isSafeInteger(delay) && delay >= 0 && delay <= 10000 ? delay : null;
+  if (delayWeeks === null) pending.push("FIRST_VISIT_DELAY_PENDING");
   const date = typeof plantingDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(plantingDate) ? new Date(`${plantingDate}T00:00:00Z`) : null;
-  const due = date && Number.isFinite(date.getTime()) && sampling.firstVisitDelayWeeks != null ? new Date(date.getTime() + sampling.firstVisitDelayWeeks * 7 * 86400000).toISOString().slice(0, 10) : null;
-  return { confirmedPlanted: confirmed, percentage: sampling.percentage ?? 10, baseTarget, target, pending, firstVisitDueDate: due,
+  const due = date && Number.isFinite(date.getTime()) && delayWeeks !== null ? new Date(date.getTime() + delayWeeks * 7 * 86400000).toISOString().slice(0, 10) : null;
+  return { confirmedPlanted: confirmed, percentage, baseTarget, target, pending, firstVisitDueDate: due,
     status: pending.length || !due ? "POLICY_PENDING" : due <= dateOnlyInManila(now) ? "Pending First Visit" : "Scheduled First Visit",
-    intervalMonths: sampling.intervalMonths ?? 12, automaticCreationEnabled: false };
+    intervalMonths, automaticCreationEnabled: false };
 }
 module.exports = { REPORTING, MONITORING, PENDING_MENRO_POLICY, initialPolicy, validatePolicy, currentPolicy, readSettings, saveSettings, candidateFor, validateDecision, approvalSnapshot, releasePolicy, samplingReadiness };
