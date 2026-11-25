@@ -26,7 +26,7 @@ function canonical(value) {
 async function operationIdentity({ actor, workflow, target, payload, binding, files, key }) {
   const images = [];
   for (const file of files) {
-    const details = await require("../utils/imageVerification.util").validateImageBuffer(file.buffer);
+    const details = await require("../utils/imageVerification.util").validateImageBuffer(file.buffer, { allowHeic: workflow.startsWith("planting-") });
     images.push({ sha256: digest(file.buffer), sizeBytes: file.buffer.length, format: details.format });
   }
   // Only workflows that supply a server-derived binding change identity.
@@ -135,8 +135,8 @@ function createEvidenceWorkflow({ db, storage, now = Date.now } = {}) {
     const intentId = operation.intentIds[index];
     if (!intentId) throw problem("INVALID_WORKFLOW_CONTEXT");
     const context = storage.serverContext({ actor: operation.actor, recordId, evidenceType, verification });
-    const input = { buffer: file.buffer, contentType: ({ jpeg: "image/jpeg", png: "image/png", webp: "image/webp" })[
-      (await require("../utils/imageVerification.util").validateImageBuffer(file.buffer)).format] };
+    const input = { buffer: file.buffer, contentType: ({ jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic" })[
+      (await require("../utils/imageVerification.util").validateImageBuffer(file.buffer, { allowHeic: evidenceType.startsWith("planting-") })).format] };
     await storage.reserve(context, input, intentId);
     return storage.upload(context, intentId, input);
   }

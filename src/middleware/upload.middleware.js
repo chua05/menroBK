@@ -53,6 +53,9 @@ const imageFileFilter = (
     "image/jpeg",
     "image/png",
     "image/webp",
+    // Original iPhone/Android photos; the service accepts them for planting evidence only.
+    "image/heic",
+    "image/heif",
   ];
 
   const allowedExtensions = [
@@ -60,6 +63,8 @@ const imageFileFilter = (
     ".jpeg",
     ".png",
     ".webp",
+    ".heic",
+    ".heif",
   ];
 
   const extension = path
@@ -87,7 +92,7 @@ const imageFileFilter = (
   ) {
     return callback(
       new Error(
-        "Only JPEG, PNG, and WEBP images are allowed."
+        "The photo format could not be processed. Upload the original JPEG, HEIC, PNG or WebP photo."
       )
     );
   }

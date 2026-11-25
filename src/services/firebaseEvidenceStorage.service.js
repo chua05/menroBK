@@ -8,7 +8,7 @@ const { validateImageBuffer, generateImageHash } = require("../utils/imageVerifi
 const { createEvidenceUploadQuota, EvidenceQuotaError } = require("./evidenceUploadQuota.service");
 
 const TYPES = new Set(["planting-report", "planting-contribution", "monitoring-early", "monitoring-official", "cohort-baseline", "sample-monitoring"]);
-const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp" };
+const MIME = { jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic" };
 const MAX_BYTES = 10 * 1024 * 1024;
 const LEASE_MS = 120_000;
 const MAX_ATTEMPTS = 3;
@@ -109,13 +109,13 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
     guard();
     if (!contexts.has(context)) throw failure("INVALID_UPLOAD_CONTEXT");
   }
-  async function image(input) {
+  async function image(input, evidenceType) {
     if (!onlyKeys(input, ["buffer", "contentType", "sha256"]) || !Buffer.isBuffer(input.buffer) ||
         !input.buffer.length || input.buffer.length > MAX_BYTES) throw failure("INVALID_FILE_METADATA");
     // Snapshot before awaiting: caller mutation cannot change bytes after hashing.
     const bytes = Buffer.from(input.buffer);
     let details;
-    try { details = await validateImageBuffer(bytes); } catch { throw failure("INVALID_FILE_METADATA"); }
+    try { details = await validateImageBuffer(bytes, { allowHeic: String(evidenceType).startsWith("planting-") }); } catch { throw failure("INVALID_FILE_METADATA"); }
     const contentType = MIME[details.format];
     if (!contentType || input.contentType !== contentType) throw failure("INVALID_FILE_METADATA");
     const sha256 = generateImageHash(bytes);
@@ -148,7 +148,7 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
   }
   async function reserve(context, input, operationIntentId = context?.intentId) {
     trusted(context);
-    const file = await image(input);
+    const file = await image(input, context.evidenceType);
     // Optional ID is a trusted server-ledger handle, NEVER a browser idempotency key.
     const id = operationIntentId;
     refFor(id);
@@ -222,7 +222,7 @@ function createFirebaseEvidenceStorage({ db, getBucket, clock, log = event => co
   }
   async function upload(context, id, input) {
     trusted(context);
-    const file = await image(input);
+    const file = await image(input, context.evidenceType);
     const ref = refFor(id), leaseOwner = randomUUID();
     const intent = await transaction(async tx => {
       const doc = await tx.get(ref);

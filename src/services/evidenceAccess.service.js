@@ -21,6 +21,7 @@ const contentTypes = {
   ".jpeg": "image/jpeg",
   ".png": "image/png",
   ".webp": "image/webp",
+  ".heic": "image/heic", ".heif": "image/heic",
 };
 let cloudRetrieval;
 // Monitoring corrections explicitly store null when replacing cloud evidence
