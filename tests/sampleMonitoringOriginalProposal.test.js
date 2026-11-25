@@ -52,3 +52,10 @@ test("unchanged originals require exact Admin acknowledgment without mutating hi
  assert.throws(()=>relevance.reviewRequirements({...visit,dateMonitored:"2026-11-11"}),e=>e.code==="ORIGINAL_REPLACEMENT_REQUIRED");
  assert.deepEqual(relevance.reviewRequirements({sampleAssessments:[{sampleId:"TREE-001",evidenceHistory:[]}]}),[]);
 });
+
+test("the release switch is off by default, accepts only exact values and needs no test environment", () => {
+  for (const value of [undefined, "", "false"]) assert.throws(() => requireOriginalProposal({ NODE_ENV: "production", PERMANENT_SAMPLE_ORIGINAL_PHOTO_ENABLED: value }), e => e.code === "ORIGINAL_PROPOSAL_DISABLED");
+  for (const value of ["TRUE", "1", "yes"]) assert.throws(() => requireOriginalProposal({ NODE_ENV: "production", PERMANENT_SAMPLE_ORIGINAL_PHOTO_ENABLED: value }), e => e.code === "ORIGINAL_PHOTO_CONFIGURATION_INVALID" && e.status === 503);
+  const released = requireOriginalProposal({ NODE_ENV: "production", PERMANENT_SAMPLE_ORIGINAL_PHOTO_ENABLED: "true" });
+  assert.deepEqual([released.linkingEnabled, released.accuracyPolicy, released.policyStatus], [true, "UNKNOWN_REQUIRES_EXPLICIT_ADMIN_REVIEW", "ENABLED_BY_MENRO_CONFIGURATION"]);
+});

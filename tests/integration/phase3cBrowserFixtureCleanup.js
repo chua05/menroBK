@@ -42,6 +42,19 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
     assert.equal(visit.data().cohortId, cohortId);
     assert.equal(visit.data().siteId, siteId);
   }
+  // First-visit fixtures may continue with later visits of the same cohort, created in the browser by the same Staff.
+  // Further fixture reports (existing-lifecycle acceptance) have their own cohorts and visits by the same Staff.
+  const firstVisitMode = ["first-visit", "verified-report"].includes(manifest?.mode);
+  const extraReports = firstVisitMode ? (await db.collection("plantingReports").where("testFixture", "==", prefix).get()).docs.filter(doc => doc.id !== `${prefix}-report`) : [];
+  for (const doc of extraReports) assert.ok(doc.id.startsWith(`${prefix}-rpt-`));
+  const { cohortIdFor } = require("../../src/services/verifiedPlantingCohortEligibility");
+  const extraCohorts = (await Promise.all(extraReports.map(doc => db.collection("verifiedPlantingCohorts").doc(cohortIdFor(doc.id)).get()))).filter(doc => doc.exists);
+  const extraLifecycles = extraReports.length ? (await db.collection("monitoringRecords").where("testFixture", "==", prefix).get()).docs : [];
+  const cohortIds = [cohortId, ...extraCohorts.map(doc => doc.id)];
+  const later = firstVisitMode ? (await Promise.all(cohortIds.map(id => db.collection("sampleMonitoringVisits").where("cohortId", "==", id).get()))).flatMap(result => result.docs).filter(doc => doc.id !== visitId) : [];
+  for (const doc of later) { assert.equal(doc.data().createdBy, staffId); assert.equal(doc.data().siteId, siteId); }
+  const visitIds = [visitId, ...later.map(doc => doc.id)];
+  const ofVisits = (collection, field) => { const rows = db.collection(collection); return visitIds.length === 1 ? rows.where(field, "==", visitId) : rows.where(field, "in", visitIds); };
   const users = [];
   for (const role of ["admin", "staff", "participant", "otherStaff"]) {
     const uid = `${prefix}-${role}`, profileRef = db.collection("users").doc(uid);
@@ -50,23 +63,23 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
     if (user) assert.equal(user.email.toLowerCase(), `${role}.${prefix}@example.test`.toLowerCase());
     users.push({ profileRef, user, uid });
   }
-  const originals = await db.collection("sampleMonitoringOriginalVerifications").where("visitId", "==", visitId).get();
+  const originals = await ofVisits("sampleMonitoringOriginalVerifications", "visitId").get();
   for (const doc of originals.docs) { assert.equal(doc.data().actorId,staffId); assert.equal(doc.data().cohortId,cohortId); assert.equal(doc.data().siteId,siteId); }
-  const captures = await db.collection("evidenceCaptureSessions").where("visitId", "==", visitId).get();
+  const captures = await ofVisits("evidenceCaptureSessions", "visitId").get();
   for (const doc of captures.docs) {
     assert.equal(doc.data().actorId, staffId);
-    assert.equal(doc.data().cohortId, cohortId);
+    assert.ok(cohortIds.includes(doc.data().cohortId));
     assert.equal(doc.data().siteId, siteId);
   }
-  const hashes = await db.collection("sampleMonitoringEvidenceHashes").where("visitId", "==", visitId).get();
-  const operations = await db.collection("evidenceWorkflowOperations").where("binding.visitId", "==", visitId).get();
+  const hashes = await ofVisits("sampleMonitoringEvidenceHashes", "visitId").get();
+  const operations = await ofVisits("evidenceWorkflowOperations", "binding.visitId").get();
   for (const doc of operations.docs) {
     assert.equal(doc.data().workflow, "sample-monitoring");
-    assert.equal(doc.data().binding.cohortId, cohortId);
+    assert.ok(cohortIds.includes(doc.data().binding.cohortId));
     assert.equal(doc.data().binding.siteId, siteId);
   }
-  const entries = (visit.data()?.sampleAssessments || []).flatMap(item =>
-    (item.evidenceHistory || []).filter(entry => entry.privateEvidence).map(entry => ({ ...entry, sampleId: item.sampleId })));
+  const entries = [visit, ...later].flatMap(doc => (doc.data()?.sampleAssessments || []).flatMap(item =>
+    (item.evidenceHistory || []).filter(entry => entry.privateEvidence).map(entry => ({ ...entry, sampleId: item.sampleId, visitId: doc.id }))));
   const references = entries.map(entry => entry.privateEvidence);
   const { rid } = require("../../src/services/sampleMonitoringEvidence.service");
   const intentIds = new Set(operations.docs.flatMap(doc => doc.data().intentIds || []));
@@ -85,7 +98,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
     const ref = entry.privateEvidence;
     assert.equal(ref.bucket, process.env.FIREBASE_STORAGE_BUCKET);
     assert.match(ref.uploadIntentId, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/);
-    assert.equal(ref.objectName, `evidence/v1/sample-monitoring/${rid(visitId, entry.sampleId, entry.revision)}/${ref.uploadIntentId}`);
+    assert.equal(ref.objectName, `evidence/v1/sample-monitoring/${rid(entry.visitId || visitId, entry.sampleId, entry.revision)}/${ref.uploadIntentId}`);
     const intent = intents.find(doc => doc.id === ref.uploadIntentId);
     if (intent) assert.equal(ref.objectName, intent.data().objectName);
     objects.add(ref.objectName);
@@ -107,7 +120,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   const quota = await db.collection("evidenceQuotaReservations").where("actorKey", "==", quotaActor).get();
   const days = await db.collection("evidenceQuotaDays").where("actorKey", "==", quotaActor).get();
   const audits = await db.collection("evidenceQuotaAudit").where("actorKey", "==", quotaActor).get();
-  const information = await db.collection("sampleMonitoringInformationRequests").where("visitId", "==", visitId).get();
+  const information = await ofVisits("sampleMonitoringInformationRequests", "visitId").get();
   const informationNotifications = [];
   for (const doc of information.docs) {
     const row = doc.data();
@@ -125,11 +138,11 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   }
   // First-visit fixture mode: a strict (visit 1) submission notifies active Admins through the existing
   // notification infrastructure, one deterministic id per visit/revision/Admin. Only this visit's notices are removed.
-  const submittedNotifications = ["first-visit", "verified-report"].includes(manifest?.mode) ? (await db.collection("notifications").where("relatedRecordId", "==", visitId).get()).docs : [];
+  const submittedNotifications = ["first-visit", "verified-report"].includes(manifest?.mode) ? (await ofVisits("notifications", "relatedRecordId").get()).docs : [];
   for (const notice of submittedNotifications) {
     assert.equal(notice.data().relatedRecordType, "sampleMonitoringVisit");
     assert.equal(notice.data().type, "sample_monitoring_visit_submitted");
-    assert.ok(notice.id.startsWith(`sample_monitoring_visit_submitted_${visitId}_`));
+    assert.ok(visitIds.some(id => notice.id.startsWith(`sample_monitoring_visit_submitted_${id}_`)));
   }
   const sourceRecords = [];
   for (const [collection, id] of [["seedlingRequests", `${prefix}-source`], ["plantingReports", `${prefix}-report`]]) {
@@ -151,7 +164,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   // resources remain failures, so cleanup can never silently claim success.
   await Promise.all([...objects].map(name => bucket.file(name).delete({ ignoreNotFound: true })));
   if (combined) await require("./combinedWorkflowFixture").cleanupObjects(combined);
-  const recordRefs = [...docs.map(doc => doc.ref), visitRef, cohortRef, siteRef, ...users.map(item => item.profileRef)];
+  const recordRefs = [...docs.map(doc => doc.ref), visitRef, ...later.map(doc => doc.ref), ...[...extraReports, ...extraCohorts, ...extraLifecycles].map(doc => doc.ref), cohortRef, siteRef, ...users.map(item => item.profileRef)];
   assert.ok(recordRefs.length <= 500, "Fixture cleanup exceeds its bounded atomic batch");
   const batch = db.batch();
   for (const ref of recordRefs) batch.delete(ref);

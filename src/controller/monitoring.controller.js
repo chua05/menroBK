@@ -93,7 +93,7 @@ const addEarlyMonitoringRecord = (req, res) => addMonitoringRecord(req, res, "ea
 
 async function getMonitoringRecords(req, res) {
   try {
-    const data = await getAllMonitoringRecords(req.query);
+    const data = await require("../services/permanentSampleLifecycle.service").attachPermanentSample(await getAllMonitoringRecords(req.query), { actorId: req.user?.uid });
     return res.status(200).json({ success: true, data });
   } catch (error) {
     console.error(error);

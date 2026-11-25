@@ -668,14 +668,21 @@ test("B3 M1: submit and approval of visit 1 re-check report eligibility in the t
   });
 });
 
-test("B3 M2: visit 1 Date Monitored cannot be earlier than the visit date or the planting date, even in test mode", async () => {
+test("B3 M2: visit 1 Date Monitored may be any day from planting to today, never earlier or in the future, even in test mode", async () => {
   await withEnv(FLAG_ON, async () => {
     seedFirstVisit();
     const visitDate = "2026-11-10";
     const visit = await createFirst({ visitDate }); attachEvidence(visit.id);
-    await assert.rejects(() => submitFirst(visit, { dateMonitored: "2026-11-09" }), e => e.status === 409 && e.code === "VISIT_NOT_OPEN");
+    const planted = table("verifiedPlantingCohorts").get("fv").source.plantingDate;
+    assert.equal(visit.openingDate, planted);
+    await assert.rejects(() => submitFirst(visit, { dateMonitored: "2000-01-01" }), e => e.status === 409 && e.code === "VISIT_BEFORE_ELIGIBILITY");
+    await assert.rejects(() => submitFirst(visit, { dateMonitored: "2999-01-01" }), e => e.status === 400);
     assert.equal(table("sampleMonitoringVisits").get(visit.id).status, "DRAFT");
-    assert.equal((await submitFirst(visit, { dateMonitored: visitDate })).status, "PENDING_ADMIN_APPROVAL");
+    // The assessment day can be earlier than the day Staff opened the visit; approval makes it the baseline date.
+    const pending = await submitFirst(visit, { dateMonitored: "2026-11-09" });
+    assert.deepEqual([pending.status, pending.visitDate], ["PENDING_ADMIN_APPROVAL", visitDate]);
+    const approvedVisit = await s.review({ visitId: visit.id, actorId: "admin", expectedVersion: pending.version, approve: true });
+    assert.deepEqual([approvedVisit.visitDate, approvedVisit.startedOn, approvedVisit.nextScheduledDueDate], ["2026-11-09", visitDate, "2026-12-09"]);
     // A planting date later than the visit date (e.g. corrected after creation) is also enforced.
     seedFirstVisit();
     const early = await createFirst({ visitDate }); attachEvidence(early.id);
