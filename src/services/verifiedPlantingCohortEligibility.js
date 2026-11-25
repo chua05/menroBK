@@ -56,4 +56,20 @@ function permanentSamplePolicy(report = {}) {
     method: pending ? "PENDING_MENRO_POLICY" : resolution.method };
 }
 
-module.exports = { cohortIdFor, documentReference, normalizedSpecies, isAuthoritativelyVerified, authoritativeQuantity, permanentSamplePolicy };
+// The verified-report rule (verifiedReportFirstVisit.js) widens these stored methods only. A conflict, an unreadable
+// value or an unrecognized method still needs a correction of the source record.
+const WIDENED_METHODS = new Set(["STAFF_SPOT_CHECK", "PENDING_MENRO_POLICY", "NONE"]);
+function firstVisitPolicy(report = {}, { verifiedReportRule = false } = {}) {
+  const stored = permanentSamplePolicy(report);
+  return !stored.allowed && verifiedReportRule === true && stored.code !== "POLICY_CONFLICT" && WIDENED_METHODS.has(stored.method)
+    ? { allowed: true, code: null, method: stored.method } : stored;
+}
+
+// Audit copy of the stored decision, kept on the cohort. The report's own snapshot is never rewritten.
+function originalPolicyRecord(report = {}) {
+  const policy = report.reportingPolicy;
+  return { hasSnapshot: Boolean(policy), monitoring: policy?.monitoring ?? null, definitionMonitoring: policy?.definition?.monitoring ?? null,
+    policyStatus: policy?.policyStatus ?? null, policyVersion: policy?.policyVersion ?? null };
+}
+
+module.exports = { firstVisitPolicy, originalPolicyRecord, cohortIdFor, documentReference, normalizedSpecies, isAuthoritativelyVerified, authoritativeQuantity, permanentSamplePolicy };

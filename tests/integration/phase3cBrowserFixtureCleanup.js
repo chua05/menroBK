@@ -9,6 +9,9 @@ const evidenceDirectory = path.join(os.tmpdir(), "menro-phase3c-test-evidence");
 const fixturePath = path.join(os.tmpdir(), "menro-phase3c-browser-fixture.json");
 const validPrefix = prefix => assert.match(prefix, /^phase3c-browser-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/);
 const manifestPath = prefix => { validPrefix(prefix); return path.join(evidenceDirectory, `${prefix}.fixture.json`); };
+// A verified-report fixture has no seeded cohort: starting Visit 1 creates it under the report's deterministic ID.
+const fixtureCohortId = (prefix, mode) => (mode === "verified-report"
+  ? require("../../src/services/verifiedPlantingCohortEligibility").cohortIdFor(`${prefix}-report`) : `${prefix}-cohort`);
 const missing = error => { if (error.code === "auth/user-not-found") return null; throw error; };
 
 // Recovery requires a local run record AND independent server ownership checks.
@@ -23,7 +26,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   else await fs.access(path.join(evidenceDirectory, `${prefix}.backend.log`));
   const { db, auth, getStorageBucket } = require("../../src/config/firebase");
   assert.equal(db.projectId, integration.projectId);
-  const siteId = `${prefix}-site`, cohortId = `${prefix}-cohort`, staffId = `${prefix}-staff`;
+  const siteId = `${prefix}-site`, cohortId = fixtureCohortId(prefix, manifest?.mode), staffId = `${prefix}-staff`;
   const visitDate = manifest?.visitDate || "2099-01-01";
   assert.match(visitDate, /^\d{4}-\d{2}-\d{2}$/);
   const visitId = require("../../src/services/sampleMonitoringVisit.service")._test.id(cohortId, visitDate);
@@ -33,7 +36,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   const [site, cohort, visit] = await Promise.all([siteRef.get(), cohortRef.get(), visitRef.get()]);
   if (!manifest) assert.ok(site.exists && cohort.exists && visit.exists, "Legacy recovery lacks independent fixture ownership records");
   if (site.exists) assert.equal(site.data().testFixture, prefix);
-  if (cohort.exists) { assert.equal(cohort.data().testFixture, prefix); assert.equal(cohort.data().source.siteId, siteId); }
+  if (cohort.exists) { if (manifest?.mode === "verified-report") assert.equal(cohort.data().source.plantingReportId, `${prefix}-report`); else assert.equal(cohort.data().testFixture, prefix); assert.equal(cohort.data().source.siteId, siteId); }
   if (visit.exists) {
     assert.equal(visit.data().createdBy, staffId);
     assert.equal(visit.data().cohortId, cohortId);
@@ -122,7 +125,7 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   }
   // First-visit fixture mode: a strict (visit 1) submission notifies active Admins through the existing
   // notification infrastructure, one deterministic id per visit/revision/Admin. Only this visit's notices are removed.
-  const submittedNotifications = manifest?.mode === "first-visit" ? (await db.collection("notifications").where("relatedRecordId", "==", visitId).get()).docs : [];
+  const submittedNotifications = ["first-visit", "verified-report"].includes(manifest?.mode) ? (await db.collection("notifications").where("relatedRecordId", "==", visitId).get()).docs : [];
   for (const notice of submittedNotifications) {
     assert.equal(notice.data().relatedRecordType, "sampleMonitoringVisit");
     assert.equal(notice.data().type, "sample_monitoring_visit_submitted");
@@ -163,4 +166,4 @@ async function cleanupFixture(prefix, { dryRun = false } = {}) {
   return { recordsRemoved: docs.length + [site, cohort, visit].filter(doc => doc.exists).length,
     usersRemoved: users.filter(item => item.user).length, objectsRemoved: existingObjects.size, verified: true };
 }
-module.exports = { cleanupFixture, fixturePath, manifestPath, evidenceDirectory };
+module.exports = { cleanupFixture, fixturePath, manifestPath, evidenceDirectory, fixtureCohortId };

@@ -19,7 +19,8 @@ const cohortHelpers = () => require("./verifiedPlantingCohort.service");
 const notificationService = () => require("./notification.service");
 const growthCriteria = require("../config/permanentSampleGrowthCriteria");
 const { MORTALITY_CAUSES } = require("../config/permanentSampleMonitoringVocabulary");
-const { authoritativeQuantity, permanentSamplePolicy } = require("./verifiedPlantingCohortEligibility");
+const { authoritativeQuantity, firstVisitPolicy } = require("./verifiedPlantingCohortEligibility");
+const { VERIFIED_REPORT_POLICY_ID, verifiedReportFirstVisitEnabled } = require("../config/verifiedReportFirstVisit");
 const CONDITIONS = new Set(["Healthy", "Damaged", "Dead", "Needs Rechecking"]);
 // A visit stays "open" until Admin approves it; returned visits are still open for Staff correction.
 const OPEN_VISIT_STATUSES = new Set(["DRAFT", "RETURNED", "PENDING_ADMIN_APPROVAL"]);
@@ -322,8 +323,10 @@ function reportEligibilityProblems(cohort, reportSnap, siteSnap) {
   const quantity = authoritativeQuantity(report);
   if (!quantity) problems.push("REPORT_NOT_VERIFIED");
   else if (quantity !== Number(cohort?.verifiedPlantedQuantity)) problems.push("VERIFIED_QUANTITY_CHANGED");
-  const policy = permanentSamplePolicy(report);
+  // The rule flag is read only for cohorts that recorded it, so every later step follows the same decision as the start.
+  const policy = firstVisitPolicy(report, { verifiedReportRule: cohort?.eligibilityAuthorization?.policyId === VERIFIED_REPORT_POLICY_ID && verifiedReportFirstVisitEnabled() });
   if (!policy.allowed) problems.push(policy.code);
+  if (cohort?.eligibilityAuthorization && report.archived === true) problems.push("REPORT_ARCHIVED");
   if (!source.siteId || !siteSnap?.exists || String(siteSnap.data()?.status || "").toLowerCase() === "inactive") problems.push("SITE_UNAVAILABLE");
   else if (report.siteId && String(report.siteId) !== source.siteId) problems.push("SITE_MISMATCH");
   return problems;
@@ -979,6 +982,8 @@ module.exports = {
   save,
   review,
   readiness,
+  reportEligibilityProblems,
+  reportNotEligible,
   // Server survival/condition summary, shared with the visit view context's history rows (B5).
   summary,
   _test: {

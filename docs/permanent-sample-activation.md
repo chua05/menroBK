@@ -11,13 +11,14 @@ All settings are read by the backend process. Unset means off.
 | `VERIFIED_PLANTING_COHORT_ENABLED` | `false` | Provisions one cohort when an Admin verifies an eligible Planting Report, and opens the cohort/visit routes. Off: routes return 409 `COHORT_WORKFLOW_DISABLED` and no cohort is created. | - |
 | `PERMANENT_SAMPLE_FIRST_VISIT_BASELINE_ENABLED` | `false` | Visit 1 registers the 10% sample and the baseline. Off: a cohort with no plan and no baseline reports `FIRST_VISIT_POLICY_DISABLED`. | Cohort flag |
 | `PERMANENT_SAMPLE_SCHEDULE_ENABLED` | `false` | Opens visits on the approved calendar. Off: every cohort reports `VISIT_SCHEDULING_POLICY_PENDING`. | Cohort flag |
+| `VERIFIED_REPORT_FIRST_VISIT_ENABLED` | `false` | Every Admin-verified report with a valid quantity and site can start the simplified Visit 1, whatever method was stored. See "Verified-report rule". | Cohort, first-visit and schedule flags |
 | `PERMANENT_SAMPLE_PILOT_ENABLED` | `false` | Restricts all access to listed users AND listed existing cohorts. | Both pilot ID lists |
 | `PERMANENT_SAMPLE_WRITE_PAUSED` | `true` | Rejects permanent-sample changes with 503; authorized reads stay available. | - |
 
 Exact parsing:
 
 - Cohort flag: only `true` (surrounding spaces and letter case ignored) is on. Anything else is off.
-- First-visit and schedule flags: spaces and letter case ignored; `true` is on, `false`, empty or unset is off, and any other value fails closed with 503.
+- First-visit, schedule and verified-report flags: spaces and letter case ignored; `true` is on, `false`, empty or unset is off, and any other value fails closed with 503.
 - Pause and pilot flags: exactly `true` or `false`. Any other value, including an empty one, other letter case or extra spaces, refuses startup and answers 503.
 - **An UNSET pause means writes are allowed.** Only an explicit `PERMANENT_SAMPLE_WRITE_PAUSED=true` pauses. Never remove the variable to "reset" it.
 
@@ -36,6 +37,17 @@ One rule (`src/services/verifiedPlantingCohortEligibility.js`) is used by automa
 - A report with no policy snapshot keeps its existing automatic provisioning, but is **not** recovered by the historical tool without MENRO approval.
 
 A stored policy is never converted, and reports, existing cohorts, plans, baselines, visits, MON records and aggregate monitoring are never rewritten.
+
+## Verified-report rule
+
+With `VERIFIED_REPORT_FIRST_VISIT_ENABLED=true`, reports stored as `STAFF_SPOT_CHECK`, `PENDING_MENRO_POLICY` or `NONE` follow the simplified first visit too. Conflicting, unreadable and unrecognized methods stay closed, and quantity, verification, site, date, species (L1), photo, GPS, role, pause and pilot checks are unchanged.
+
+- Staff start Visit 1 from the existing report (`POST /api/verified-sample-monitoring/verified-reports/:reportId/first-visit`). The single cohort is created in one transaction after every check, or reused; a retry is safe. No backfill, resubmission or re-approval is needed.
+- The report is never written. The cohort keeps `eligibilityAuthorization`: policy `menro-verified-report-first-visit-v1`, the original stored method and policy values, what triggered it (an Admin verification or a Staff start), the Staff UID for a start, and when. Every later step up to baseline approval follows that record, and the earlier sampling-plan and baseline routes refuse such a cohort (`FIRST_VISIT_BASELINE_ACTIVE`).
+- Admin verification of a new report also creates its cohort under this rule (cohort and rule flags on, not paused, no pilot); the visit itself still needs the first-visit and schedule flags.
+- Turning the flag off blocks starting, submitting and approving Visit 1 again for cohorts whose stored method needs the rule. It deletes nothing, and approved baselines continue.
+- A cohort ID is known before the cohort exists, so a pilot can list it in advance. The recovery dry run prints it as the expected cohort ID.
+- The historical recovery tool keeps its stricter decisions and does not apply this rule.
 
 ## Pause and pilot effects on provisioning
 
