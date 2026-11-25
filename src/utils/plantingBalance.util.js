@@ -12,4 +12,15 @@ function wholeQuantity(value) {
   return (typeof value === "number" || typeof value === "string" && /^\d+$/.test(value.trim())) &&
     String(value).trim() !== "" && Number.isSafeInteger(Number(value)) && Number(value) >= 0;
 }
-module.exports = { availableForReporting, progressFor, wholeQuantity };
+// Parent report states that still accept a participant report (the same states createPlantingReport accepts).
+const REPORTABLE_PROGRESS = new Set(["Draft", "Pending", "Pending Review", "Awaiting Submission", "Partial", "Fully Reported — Awaiting Review"]);
+// Nothing is left to report once every allocated type is planted, pending or declared left over. Returned and rejected reports
+// give their quantities back, so their corrections stay possible.
+function hasReportableBalance(event, parent) {
+  if (parent && !REPORTABLE_PROGRESS.has(parent.reportingProgress || parent.verificationStatus)) return false;
+  const items = Array.isArray(event?.seedlingItems) ? event.seedlingItems : [];
+  if (!items.length) return true;
+  return items.some((item) => Number(item.quantity || 0) - Number(event.recordedSeedlingsByInventory?.[item.inventoryId] || 0) -
+    Number(event.pendingSeedlingsByInventory?.[item.inventoryId] || 0) - Number(event.leftoverSeedlingsByInventory?.[item.inventoryId] || 0) > 0);
+}
+module.exports = { hasReportableBalance, availableForReporting, progressFor, wholeQuantity };

@@ -7,6 +7,7 @@ const {
 const { activationState, buildEarlyMonitoringPolicy, shiftCalendarDate } = require("../utils/earlyMonitoring.util");
 const { parentForEventInTransaction, reportDetails, normalizeSubmission } = require("./parentPlantingReport.service");
 const { ensureCohortForAuthoritativeReportInTransaction } = require("./verifiedPlantingCohort.service");
+const { isDistributionOwner, loadDistributionRequest } = require("../utils/distributionOwnership.util");
 const lifecycleRegistration = require("./monitoringLifecycleRegistration.service");
 const { availableForReporting, progressFor, wholeQuantity } = require("../utils/plantingBalance.util");
 const {
@@ -461,6 +462,13 @@ const createPlantingReportImpl = async (
   const distribution =
     distributionDoc.data();
 
+  // Only the requester may report the release; the actor is the authenticated UID, never a client value.
+  if (!isDistributionOwner(distribution, await loadDistributionRequest(db, distribution), data.participantId)) {
+    throw Object.assign(new Error("You can report only your own released seedlings."), { status: 403, code: "DISTRIBUTION_NOT_OWNED" });
+  }
+  if (distribution.plantingSiteId && distribution.plantingSiteId !== data.siteId) {
+    throw new Error("Selected planting site does not match the released distribution.");
+  }
 
   // --------------------------------
   // 3. VERIFY DISTRIBUTION STATUS
@@ -681,10 +689,6 @@ if (submittedEventId) {
 
   if (linkedEvent.sourceRequestId && linkedEvent.sourceRequestId !== distribution.requestId) {
     throw new Error("Selected event does not match the released distribution.");
-  }
-
-  if (distribution.plantingSiteId && distribution.plantingSiteId !== data.siteId) {
-    throw new Error("Selected planting site does not match the released distribution.");
   }
 
   const officialEventDate = assertReportableEvent(linkedEvent);
