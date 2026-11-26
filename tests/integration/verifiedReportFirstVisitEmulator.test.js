@@ -209,6 +209,10 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       const sampleAnalytics = async () => (await api("/analytics/dashboard", "admin")).body.data.permanentSample;
       const sampleRow = async () => (await sampleAnalytics()).cohorts.find(entry => entry.reportNumber === number);
       const markers = async (query = "") => (await api(`/analytics/dashboard${query}`, "admin")).body.data.permanentSample.trees.filter(tree => tree.reportNumber === number);
+      // Full Planting Sites Map (Staff/Admin): approved markers identical to the analytics map, pending visits kept apart.
+      const mapTrees = async (role = "staffA") => { const { status, body } = await api("/analytics/map-trees", role); assert.equal(status, 200, JSON.stringify(body));
+        return { trees: body.data.trees.filter(tree => tree.reportNumber === number), pending: body.data.pendingTrees.filter(tree => tree.reportNumber === number) }; };
+      assert.equal((await api("/analytics/map-trees", null)).status, 401, "map tree markers need a signed-in user");
       // Every marker sits exactly at the registered position stored on the approved cohort baseline.
       const registered = async () => Object.fromEntries((await db.collection("verifiedPlantingCohorts").doc(cohortIdFor(reportId)).get()).data().baseline.sampleUnits.map(unit => [unit.permanentId, [unit.latitude, unit.longitude]]));
       const state = async () => { const { permanentSample: p } = await lifecycle(); return [p.startMonitoringDate, p.startProvisional, p.nextMonitoringDate, p.openVisit?.status || null]; };
@@ -232,10 +236,12 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       assert.deepEqual(await state(), [v1Date, true, null, "PENDING_ADMIN_APPROVAL"]);
       assert.equal(await sampleRow(), undefined, "a visit awaiting Admin review is not in the analytics");
       assert.deepEqual(await markers(), [], "no tree marker before Admin approval");
+      assert.deepEqual(await mapTrees(), { trees: [], pending: [] }, "first-visit trees have no registered GPS until Admin approval: nothing is drawn or counted");
       assert.equal((await review(visit.id, false, "Re-measure the first tree.")).body.data.status, "RETURNED");
       assert.deepEqual(await state(), [null, false, null, "RETURNED"], "a returned visit schedules nothing");
       assert.equal(await sampleRow(), undefined, "a returned visit is not in the analytics");
       assert.deepEqual(await markers(), [], "no tree marker for a returned visit");
+      assert.deepEqual(await mapTrees(), { trees: [], pending: [] }, "a returned visit is not on the full map");
       const corrected = rows(40); corrected[0].heightCentimeters = 41;
       assert.equal((await put(visit.id, { assessments: corrected, submit: false, assessedSampleId: trees[0], dateMonitored: v1Date })).status, 200);
       await capture(visit.id, trees[0]);
@@ -251,6 +257,9 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
         assert.deepEqual([tree.latitude, tree.longitude], positions[tree.treeId], `${tree.treeId} is drawn at its stored registration GPS`);
         assert.deepEqual([tree.condition, tree.visitNumber, tree.dateMonitored, tree.siteName], ["Healthy", 1, v1Date, "Emulator Site"]);
       }
+      const fullMap1 = await mapTrees();
+      assert.deepEqual(fullMap1.trees, visit1Markers.map(tree => ({ ...tree, reviewStatus: "Approved", pendingReview: null })), "the full map shows exactly the analytics map's approved trees");
+      assert.deepEqual(fullMap1.pending, []); assert.equal((await mapTrees("admin")).trees.length, trees.length, "Admin sees the same markers");
       assert.deepEqual
 ([approved.body.data.visitDate, approved.body.data.startedOn], [v1Date, today]);
       assert.deepEqual((await db.collection("verifiedPlantingCohorts").doc(cohortIdFor(reportId)).get()).data().baseline.sampleUnits.map(unit => unit.permanentId), trees);
@@ -266,6 +275,10 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       assert.deepEqual([submit2.body.data.sampleAssessments[0].heightDifferenceCm, submit2.body.data.sampleAssessments.at(-1).heightDifferenceCm], [9, 10]);
       const rate2 = Number((((trees.length - 1) / trees.length) * 100).toFixed(2));
       assert.equal((await sampleRow()).visitNumber, 1, "Visit 2 awaiting review leaves Visit 1 as the latest approved result");
+      const fullMapPending = await mapTrees();
+      assert.deepEqual(fullMapPending.trees.map(tree => [tree.treeId, tree.condition, tree.visitNumber]), trees.map(tree => [tree, "Healthy", 1]), "a pending Visit 2 never overrides approved conditions");
+      assert.deepEqual(fullMapPending.trees[0].pendingReview, { visitNumber: 2, condition: "Damaged", dateMonitored: today }, "the pending result is noted on the tree");
+      assert.deepEqual(fullMapPending.pending, [], "no second, provisional marker for an approved Tree ID");
       const visitsBefore = (await sampleAnalytics()).summary.approvedVisits;
       assert.equal((await review(second.body.data.id, true)).status, 200);
       const sample = await sampleAnalytics(), latestRow = sample.cohorts.find(entry => entry.reportNumber === number);
@@ -280,6 +293,8 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       assert.deepEqual(visit2Markers.map(tree => [tree.treeId, tree.condition, tree.visitNumber]), trees.map((tree, i) => [tree, i === 0 ? "Damaged" : i === 1 ? "Dead" : "Healthy", 2]),
         "Visit 2 updates the same Tree IDs in place: no second marker");
       assert.deepEqual(visit2Markers.map(tree => [tree.latitude, tree.longitude]), trees.map(tree => positions[tree]), "approval never moves a registered tree");
+      const fullMap2 = await mapTrees();
+      assert.deepEqual(fullMap2.trees, visit2Markers.map(tree => ({ ...tree, reviewStatus: "Approved", pendingReview: null })), "after approval the full map updates the same Tree IDs");
       assert.equal(visit2Markers[0].heightCentimeters, 50); assert.equal(visit2Markers[1].heightCentimeters, null, "a dead tree has no height");
       const dashboard = (await api("/analytics/dashboard", "admin")).body.data;
       assert.equal(dashboard.summary.sampleSurvivalRate, dashboard.permanentSample.summary.survivalRate, "the Sample Survival Rate KPI is the permanent-sample rate");

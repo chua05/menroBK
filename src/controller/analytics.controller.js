@@ -1,4 +1,4 @@
-const { getDashboard } = require("../services/analytics.service");
+const { getDashboard, getMapTrees } = require("../services/analytics.service");
 const { sendSuccess, sendError } = require("../utils/response.util");
 
 async function dashboard(req, res) {
@@ -15,4 +15,13 @@ async function dashboard(req, res) {
   }
 }
 
-module.exports = { dashboard };
+async function mapTrees(req, res) {
+  try {
+    return sendSuccess(res, 200, "Map tree markers retrieved", await getMapTrees());
+  } catch (error) {
+    console.error(error);
+    return sendError(res, 500, "Failed to retrieve monitored tree markers.");
+  }
+}
+
+module.exports = { dashboard, mapTrees };
