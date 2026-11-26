@@ -7,6 +7,7 @@ const {
 } = require("../utils/monitoringObservation.util");
 const { WORKFLOW_STATUS, deriveWorkflowStatus } = require("../utils/plantingReviewWorkflow.util");
 const { summarize: summarizePermanentSamples } = require("./permanentSampleAnalytics.service");
+const { cmToMm } = require("./sampleMonitoringValidation");
 const SAMPLE_CONDITIONS = ["Healthy", "Damaged", "Dead", "Needs Rechecking"];
 
 const COLLECTIONS = [
@@ -458,12 +459,16 @@ async function getDashboard(rawFilters = {}) {
   }
   let earliestDataMonth = [...distributionByMonth.keys(), ...plantingByMonth.keys(), ...survivalByMonth.keys()].sort()[0] || "";
   const permanentSample = permanentSampleAnalytics(records, filters, { siteById, reportById });
+  // Barangays with approved sample results appear in the coverage table even before verified planting is recorded there.
+  for (const row of permanentSample.byBarangay.values()) barangayRow(row.name);
   for (const row of permanentSample.trend) if (!earliestDataMonth || row.month < earliestDataMonth) earliestDataMonth = row.month;
   const periods = monthBuckets(filters, earliestDataMonth);
 
   return {
     summary: {
       totalSaplingsDistributed: totalReleased, totalTreesPlanted: totalPlanted,
+      // The headline survival KPI: sampled trees of Admin-approved Monitor Planted Trees visits (not whole-cohort survival).
+      sampleSurvivalRate: permanentSample.summary.survivalRate,
       overallSurvivalRate: monitoredTotal > 0
         ? Number(((survivingTotal / monitoredTotal) * 100).toFixed(2))
         : null,
@@ -486,6 +491,8 @@ async function getDashboard(rawFilters = {}) {
     })).sort((a, b) => b.planted - a.planted || a.species.localeCompare(b.species)),
     barangaySurvival: [...barangayRows.values()].map((row) => ({
       barangay: row.name, planted: row.planted, monitored: row.total,
+      sampleMonitored: permanentSample.byBarangay.get(canonical(row.name))?.monitored || 0,
+      sampleRate: permanentSample.byBarangay.get(canonical(row.name))?.rate ?? null,
       rate: row.total > 0 ? Number(((row.surviving / row.total) * 100).toFixed(2)) : null,
       status: row.total <= 0 ? null
         : row.dead === row.total ? "Critical"
@@ -501,6 +508,8 @@ async function getDashboard(rawFilters = {}) {
         return { period: period.period, rate: row?.rate ?? null, checked: row?.checked || 0, surviving: row?.surviving || 0, visits: row?.visits || 0 };
       }),
       cohorts: permanentSample.cohorts,
+      trees: permanentSample.trees,
+      locationUnavailable: permanentSample.locationUnavailable,
       exclusions: permanentSample.exclusions,
     },
     verificationAnalytics: {
@@ -576,9 +585,37 @@ function permanentSampleAnalytics(records, filters, { siteById, reportById }) {
       const visit = visitById.get(item.visitId) || {};
       return { ...item, date: dateOnly(visit.dateMonitored || item.visitDate), visitNumber: Number(visit.visitNumber) || null, ...tally(item.samples.filter(keep)) };
     }).filter((item) => item.total > 0 && item.date && (!filters.dateFrom || item.date >= filters.dateFrom) && (!filters.dateTo || item.date <= filters.dateTo));
-    if (history.length) rows.push({ entry, context, report, history });
+    if (history.length) rows.push({ entry, context, report, history, cohort, keep });
   }
   const latest = rows.map((row) => ({ ...row, last: row.history.at(-1) }));
+  // One marker per permanent Tree ID, at its registered position, with the condition of the latest approved visit shown.
+  // A tree without valid registered coordinates is counted as location unavailable; no position is ever made up.
+  const trees = [];
+  let locationUnavailable = 0;
+  const validCoordinate = (value, limit) => value !== null && value !== "" && Number.isFinite(Number(value)) && Math.abs(Number(value)) <= limit;
+  for (const row of latest) {
+    const units = new Map((row.cohort.baseline?.sampleUnits || []).map((unit) => [unit.permanentId, unit]));
+    const assessments = new Map(((visitById.get(row.last.visitId) || {}).sampleAssessments || []).map((item) => [item.sampleId, item]));
+    for (const sample of row.last.samples.filter(row.keep)) {
+      const unit = units.get(sample.sampleId) || {}, assessed = assessments.get(sample.sampleId) || {};
+      if (!validCoordinate(unit.latitude, 90) || !validCoordinate(unit.longitude, 180) || (Number(unit.latitude) === 0 && Number(unit.longitude) === 0)) { locationUnavailable += 1; continue; }
+      trees.push({ treeId: sample.sampleId, species: text(unit.species) || null, latitude: Number(unit.latitude), longitude: Number(unit.longitude),
+        siteId: row.context.siteId, siteName: row.context.siteName, barangay: row.context.barangay, reportNumber: row.report.reportNumber || "",
+        condition: sample.condition, visitNumber: row.last.visitNumber, dateMonitored: row.last.date,
+        heightCentimeters: Number.isFinite(assessed.heightCentimeters) ? assessed.heightCentimeters : null,
+        stemDiameterMillimeters: cmToMm(assessed.diameterCentimeters) });
+    }
+  }
+  // Sample results per planting-site barangay: latest approved visit per planting, rate only from complete visits.
+  const sampleByBarangay = new Map();
+  for (const row of latest) {
+    const id = canonical(row.context.barangay);
+    if (!id) continue;
+    const bucket = sampleByBarangay.get(id) || { name: row.context.barangay, monitored: 0, checked: 0, surviving: 0 };
+    bucket.monitored += row.last.total;
+    if (row.last.complete) { bucket.checked += row.last.total; bucket.surviving += row.last.surviving; }
+    sampleByBarangay.set(id, bucket);
+  }
   const conditions = Object.fromEntries(SAMPLE_CONDITIONS.map((condition) => [condition, latest.reduce((total, row) => total + row.last.counts[condition], 0)]));
   const complete = latest.filter((row) => row.last.complete);
   const checked = complete.reduce((total, row) => total + row.last.total, 0);
@@ -605,6 +642,8 @@ function permanentSampleAnalytics(records, filters, { siteById, reportById }) {
     },
     conditions,
     trend: [...byMonth.values()].map((row) => ({ ...row, rate: row.checked > 0 ? Number(((row.surviving / row.checked) * 100).toFixed(2)) : null })),
+    trees, locationUnavailable,
+    byBarangay: new Map([...sampleByBarangay].map(([id, row]) => [id, { ...row, rate: row.checked > 0 ? Number(((row.surviving / row.checked) * 100).toFixed(2)) : null }])),
     cohorts: latest.map((row) => ({
       cohortId: row.entry.cohortId, reportNumber: row.report.reportNumber || "", siteName: row.context.siteName, barangay: row.context.barangay,
       visitNumber: row.last.visitNumber, date: row.last.date, total: row.last.total, ...Object.fromEntries(SAMPLE_CONDITIONS.map((condition) => [condition, row.last.counts[condition]])),

@@ -287,7 +287,7 @@ test("empty analytics keeps zero chart periods and stable response sections", as
   try {
     const result = await getDashboard({ dateFrom: "2026-01-01", dateTo: "2026-03-31" });
     assert.deepEqual(result.summary, {
-      totalSaplingsDistributed: 0, totalTreesPlanted: 0, overallSurvivalRate: null,
+      totalSaplingsDistributed: 0, totalTreesPlanted: 0, sampleSurvivalRate: null, overallSurvivalRate: null,
       verifiedPlantingReports: 0, barangaysCovered: 0, activePlantingSites: 0,
     });
     assert.deepEqual(result.plantingTrend.map((item) => item.count), [0, 0, 0]);
@@ -421,6 +421,54 @@ test("permanent-sample analytics: approved visits only, latest per cohort, compl
     assert.deepEqual([september.summary.survivalRate, september.summary.approvedVisits], [100, 1]);
     const none = (await getDashboard({ dateFrom: "2025-01-01", dateTo: "2025-12-31" })).permanentSample;
     assert.deepEqual([none.summary.survivalRate, none.summary.totalSampleTrees, none.cohorts], [null, 0, []]);
+  } finally {
+    for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
+  }
+});
+
+test("permanent-sample trees: one marker per Tree ID at its registered GPS with the latest approved condition; headline KPI and barangay sample columns", async () => {
+  const saved = Object.fromEntries(Object.entries(data).map(([name, rows]) => [name, [...rows]]));
+  for (const rows of Object.values(data)) rows.length = 0;
+  data.sites.push({ id: "s1", siteName: "Zone 8 Site", barangay: "ZoneVIIIPoblacion", status: "active" }, { id: "s2", siteName: "Bical Site", barangay: "Bical", status: "active" });
+  data.plantingReports.push({ id: "r1", reportNumber: "RPT-1", siteId: "s1" }, { id: "r2", reportNumber: "RPT-2", siteId: "s2" });
+  const cohort = (id, siteId, reportId, sampleUnits) => ({ id, source: { siteId, plantingReportId: reportId }, baselineVersion: 1,
+    baseline: { approvalStatus: "APPROVED", sampleUnits }, samplingPlan: { status: "APPROVED", version: 1 } });
+  data.verifiedPlantingCohorts.push(
+    cohort("c1", "s1", "r1", [{ permanentId: "A-T001", species: "Pili", latitude: 12.6623, longitude: 123.93298 }, { permanentId: "A-T002", species: "Narra", latitude: "12.6624", longitude: "123.9331" },
+      { permanentId: "A-T003", species: "Pili", latitude: null, longitude: null }]),
+    cohort("c2", "s2", "r2", [{ permanentId: "B-T001", species: "Pili", latitude: 0, longitude: 0 }, { permanentId: "B-T002", species: "Pili", latitude: 12.7, longitude: 123.9 }]));
+  const visit = (id, cohortId, visitNumber, dateMonitored, status, rows) => ({ id, cohortId, siteId: cohortId === "c1" ? "s1" : "s2", visitNumber, status, visitDate: dateMonitored, dateMonitored, baselineVersion: 1, samplingPlanVersion: 1,
+    sampleAssessments: rows.map(([sampleId, condition, heightCentimeters, diameterCentimeters]) => ({ sampleId, condition, heightCentimeters, diameterCentimeters })) });
+  data.sampleMonitoringVisits.push(
+    visit("v1", "c1", 1, "2026-09-10", "APPROVED", [["A-T001", "Healthy", 40, 0.6], ["A-T002", "Healthy", 41, 0.6], ["A-T003", "Healthy", 39, 0.5]]),
+    visit("v2", "c1", 2, "2026-10-10", "APPROVED", [["A-T001", "Damaged", 52, 0.75], ["A-T002", "Dead"], ["A-T003", "Healthy", 50, 0.7]]),
+    visit("v3", "c1", 3, "2026-11-10", "RETURNED", [["A-T001", "Dead"], ["A-T002", "Dead"], ["A-T003", "Dead"]]),
+    visit("w1", "c2", 1, "2026-10-20", "APPROVED", [["B-T001", "Healthy", 30, 0.4], ["B-T002", "Needs Rechecking", 31, 0.4]]));
+  data.monitoringRecords.push({ id: "m1", plantingReportId: "r1", siteId: "s1", barangay: "ZoneVIIIPoblacion", quantityPlanted: 10,
+    history: [{ monitoredDate: "2026-10-01", healthyCount: 5, damagedCount: 0, deadCount: 5, reviewStatus: "Approved" }] });
+  try {
+    const result = await getDashboard({}), sample = result.permanentSample;
+    assert.deepEqual(sample.trees, [
+      { treeId: "A-T001", species: "Pili", latitude: 12.6623, longitude: 123.93298, siteId: "s1", siteName: "Zone 8 Site", barangay: "ZoneVIIIPoblacion", reportNumber: "RPT-1",
+        condition: "Damaged", visitNumber: 2, dateMonitored: "2026-10-10", heightCentimeters: 52, stemDiameterMillimeters: 7.5 },
+      { treeId: "A-T002", species: "Narra", latitude: 12.6624, longitude: 123.9331, siteId: "s1", siteName: "Zone 8 Site", barangay: "ZoneVIIIPoblacion", reportNumber: "RPT-1",
+        condition: "Dead", visitNumber: 2, dateMonitored: "2026-10-10", heightCentimeters: null, stemDiameterMillimeters: null },
+      { treeId: "B-T002", species: "Pili", latitude: 12.7, longitude: 123.9, siteId: "s2", siteName: "Bical Site", barangay: "Bical", reportNumber: "RPT-2",
+        condition: "Needs Rechecking", visitNumber: 1, dateMonitored: "2026-10-20", heightCentimeters: 31, stemDiameterMillimeters: 4 },
+    ], "the returned Visit 3 never moves a marker; missing and 0,0 positions are never drawn");
+    assert.equal(sample.locationUnavailable, 2);
+    assert.equal(new Set(sample.trees.map((tree) => tree.treeId)).size, sample.trees.length, "one marker per Tree ID");
+    assert.equal(result.summary.sampleSurvivalRate, 66.67, "headline KPI: c1 2 of 3 survive; c2 awaits rechecking");
+    assert.equal(result.summary.overallSurvivalRate, 50, "official whole-cohort survival is still computed separately");
+    const zone = result.barangaySurvival.find((row) => row.barangay === "ZoneVIIIPoblacion"), bical = result.barangaySurvival.find((row) => row.barangay === "Bical");
+    assert.deepEqual([zone.sampleMonitored, zone.sampleRate, zone.monitored, zone.rate], [3, 66.67, 10, 50], "sample and official columns never share a denominator");
+    assert.deepEqual([bical.sampleMonitored, bical.sampleRate], [2, null], "a planting awaiting rechecking has no sample rate");
+    const september = await getDashboard({ dateFrom: "2026-09-01", dateTo: "2026-09-30" });
+    assert.deepEqual(september.permanentSample.trees.map((tree) => [tree.treeId, tree.condition, tree.visitNumber]), [["A-T001", "Healthy", 1], ["A-T002", "Healthy", 1]]);
+    assert.deepEqual((await getDashboard({ site: "s2" })).permanentSample.trees.map((tree) => tree.treeId), ["B-T002"]);
+    assert.deepEqual((await getDashboard({ species: "Narra" })).permanentSample.trees.map((tree) => tree.treeId), ["A-T002"]);
+    const empty = await getDashboard({ dateFrom: "2025-01-01", dateTo: "2025-01-31" });
+    assert.deepEqual([empty.summary.sampleSurvivalRate, empty.permanentSample.trees, empty.permanentSample.locationUnavailable], [null, [], 0]);
   } finally {
     for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
   }
