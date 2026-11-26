@@ -66,6 +66,8 @@ async function capture(visitId, sampleId) {
 }
 const save = async (visitId, trees, submit) => api(`/verified-sample-monitoring/visits/${visitId}`, "staffA", "PUT", { expectedVersion: (await visitService.get(visitId)).version, submit, dateMonitored: V1_DATE,
   assessments: trees.map(sampleId => ({ sampleId, condition: "Healthy", heightCentimeters: 40, stemDiameterMillimeters: 6, remarks: "Registered" })) });
+// The official (whole-cohort and planting) figures; the sample survival KPI is expected to follow approvals.
+const officialSummary = async () => { const { sampleSurvivalRate, ...official } = (await api("/analytics/dashboard", "admin")).body.data?.summary || {}; void sampleSurvivalRate; return JSON.stringify(official); };
 const review = async (visitId, approve, reasons = "") => api(`/verified-sample-monitoring/visits/${visitId}/review`, "admin", "POST", { expectedVersion: (await visitService.get(visitId)).version, approve, reasons });
 
 test.before(async () => {
@@ -201,11 +203,14 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
     await monRef.set({ id: monRef.id, recordType: "monitoringLifecycle", monitoringNumber: mon, plantingReportId: reportId, plantingReportNumber: number, siteId, species: "", quantityPlanted: quantity, authoritativePlantingDate: planted,
       startMonitoringDate: null, nextMonitoringDate: null, monitoringEndDate: null, scheduleStatus: "AWAITING_MONITORING_POLICY", monitoringMethod: monitoring, history: [], archived: false, testFixture: prefix });
     try {
-      const stored = JSON.stringify((await monRef.get()).data()), lifecycles = (await db.collection("monitoringRecords").get()).size, analyticsBefore = JSON.stringify((await api("/analytics/dashboard", "admin")).body.data?.summary);
+      const stored = JSON.stringify((await monRef.get()).data()), lifecycles = (await db.collection("monitoringRecords").get()).size, analyticsBefore = await officialSummary();
       const lifecycle = async () => (await api("/monitoring", "admin")).body.data.find(row => row.monitoringNumber === mon);
       // Approved Monitor Planted Trees results in the main analytics: this report's cohort, or undefined while it has no approved visit.
       const sampleAnalytics = async () => (await api("/analytics/dashboard", "admin")).body.data.permanentSample;
       const sampleRow = async () => (await sampleAnalytics()).cohorts.find(entry => entry.reportNumber === number);
+      const markers = async (query = "") => (await api(`/analytics/dashboard${query}`, "admin")).body.data.permanentSample.trees.filter(tree => tree.reportNumber === number);
+      // Every marker sits exactly at the registered position stored on the approved cohort baseline.
+      const registered = async () => Object.fromEntries((await db.collection("verifiedPlantingCohorts").doc(cohortIdFor(reportId)).get()).data().baseline.sampleUnits.map(unit => [unit.permanentId, [unit.latitude, unit.longitude]]));
       const state = async () => { const { permanentSample: p } = await lifecycle(); return [p.startMonitoringDate, p.startProvisional, p.nextMonitoringDate, p.openVisit?.status || null]; };
       assert.deepEqual(await state(), [null, false, null, null]);
       const row = (await listRows("staffA")).find(entry => entry.plantingReportId === reportId);
@@ -226,9 +231,11 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       const submitted = await put(visit.id, { assessments: rows(40), submit: true, dateMonitored: v1Date }); assert.equal(submitted.status, 200, JSON.stringify(submitted.body));
       assert.deepEqual(await state(), [v1Date, true, null, "PENDING_ADMIN_APPROVAL"]);
       assert.equal(await sampleRow(), undefined, "a visit awaiting Admin review is not in the analytics");
+      assert.deepEqual(await markers(), [], "no tree marker before Admin approval");
       assert.equal((await review(visit.id, false, "Re-measure the first tree.")).body.data.status, "RETURNED");
       assert.deepEqual(await state(), [null, false, null, "RETURNED"], "a returned visit schedules nothing");
       assert.equal(await sampleRow(), undefined, "a returned visit is not in the analytics");
+      assert.deepEqual(await markers(), [], "no tree marker for a returned visit");
       const corrected = rows(40); corrected[0].heightCentimeters = 41;
       assert.equal((await put(visit.id, { assessments: corrected, submit: false, assessedSampleId: trees[0], dateMonitored: v1Date })).status, 200);
       await capture(visit.id, trees[0]);
@@ -238,6 +245,12 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       assert.deepEqual(await state(), [v1Date, false, due2, null]);
       assert.deepEqual(await sampleRow(), { cohortId: cohortIdFor(reportId), reportNumber: number, siteName: "Emulator Site", barangay: "Zone 1", visitNumber: 1, date: v1Date,
         total: trees.length, Healthy: trees.length, Damaged: 0, Dead: 0, "Needs Rechecking": 0, survivalRate: 100 }, "the approved Visit 1 appears at once");
+      const positions = await registered(), visit1Markers = await markers();
+      assert.deepEqual(visit1Markers.map(tree => tree.treeId), trees, "one marker per permanent Tree ID");
+      for (const tree of visit1Markers) {
+        assert.deepEqual([tree.latitude, tree.longitude], positions[tree.treeId], `${tree.treeId} is drawn at its stored registration GPS`);
+        assert.deepEqual([tree.condition, tree.visitNumber, tree.dateMonitored, tree.siteName], ["Healthy", 1, v1Date, "Emulator Site"]);
+      }
       assert.deepEqual
 ([approved.body.data.visitDate, approved.body.data.startedOn], [v1Date, today]);
       assert.deepEqual((await db.collection("verifiedPlantingCohorts").doc(cohortIdFor(reportId)).get()).data().baseline.sampleUnits.map(unit => unit.permanentId), trees);
@@ -263,13 +276,22 @@ for (const [number, mon, quantity, species, monitoring] of [["RPT-2026-020", "MO
       const filtered = (await api("/analytics/dashboard?barangay=Zone%201", "admin")).body.data.permanentSample;
       assert.ok(filtered.cohorts.some(entry => entry.reportNumber === number));
       assert.deepEqual((await api("/analytics/dashboard?barangay=Bical", "admin")).body.data.permanentSample.cohorts, []);
+      const visit2Markers = await markers();
+      assert.deepEqual(visit2Markers.map(tree => [tree.treeId, tree.condition, tree.visitNumber]), trees.map((tree, i) => [tree, i === 0 ? "Damaged" : i === 1 ? "Dead" : "Healthy", 2]),
+        "Visit 2 updates the same Tree IDs in place: no second marker");
+      assert.deepEqual(visit2Markers.map(tree => [tree.latitude, tree.longitude]), trees.map(tree => positions[tree]), "approval never moves a registered tree");
+      assert.equal(visit2Markers[0].heightCentimeters, 50); assert.equal(visit2Markers[1].heightCentimeters, null, "a dead tree has no height");
+      const dashboard = (await api("/analytics/dashboard", "admin")).body.data;
+      assert.equal(dashboard.summary.sampleSurvivalRate, dashboard.permanentSample.summary.survivalRate, "the Sample Survival Rate KPI is the permanent-sample rate");
+      assert.ok(dashboard.barangaySurvival.find(row => row.barangay === "Zone 1").sampleMonitored >= trees.length);
+      assert.deepEqual(await markers("?barangay=Bical"), []);
       const visit1Only = (await api(`/analytics/dashboard?dateFrom=${v1Date}&dateTo=${v1Date}`, "admin")).body.data.permanentSample.cohorts.find(entry => entry.reportNumber === number);
       assert.deepEqual([visit1Only.visitNumber, visit1Only.survivalRate], [1, 100], "a date range ending before Visit 2 shows the Visit 1 result");
       const final = await lifecycle();
       assert.deepEqual([final.permanentSample.startMonitoringDate, final.permanentSample.nextMonitoringDate, final.permanentSample.approvedVisits, final.permanentSample.nextVisitNumber, final.permanentSample.latest.survivalRate], [v1Date, due3, 2, 3, rate2]);
       assert.equal(JSON.stringify((await monRef.get()).data()), stored, "the lifecycle document is never rewritten");
       assert.equal((await db.collection("monitoringRecords").get()).size, lifecycles, "no lifecycle is created");
-      assert.equal(JSON.stringify((await api("/analytics/dashboard", "admin")).body.data?.summary), analyticsBefore, "aggregate analytics are unchanged");
+      assert.equal(await officialSummary(), analyticsBefore, "official aggregate analytics are unchanged (only the sample survival KPI moves)");
     } finally { await monRef.delete(); }
   });
 }
