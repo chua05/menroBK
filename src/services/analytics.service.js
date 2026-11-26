@@ -150,9 +150,9 @@ function lifecycleStatus(record, today) {
   return "Available for Monitoring";
 }
 
-async function loadCollections() {
-  const snapshots = await Promise.all(COLLECTIONS.map((name) => db.collection(name).get()));
-  return Object.fromEntries(COLLECTIONS.map((name, index) => [name,
+async function loadCollections(names = COLLECTIONS) {
+  const snapshots = await Promise.all(names.map((name) => db.collection(name).get()));
+  return Object.fromEntries(names.map((name, index) => [name,
     snapshots[index].docs.map((doc) => ({ id: doc.id, ...doc.data() }))]));
 }
 
@@ -653,4 +653,48 @@ function permanentSampleAnalytics(records, filters, { siteById, reportById }) {
   };
 }
 
-module.exports = { getDashboard, cleanFilters, dateOnly, lifecycleStatus };
+// Tree markers for the full Planting Sites Map (Staff/Admin). Approved markers are exactly the analytics map's permanentSample.trees.
+// A visit awaiting Admin approval never changes an approved condition: it is noted on that tree, or, for a tree with no approved
+// visit yet, drawn as a separate provisional marker. Drafts and returned visits are not shown. Positions are only registered GPS.
+async function getMapTrees() {
+  const records = await loadCollections(["sites", "plantingReports", "sampleMonitoringVisits", "verifiedPlantingCohorts"]);
+  const siteById = new Map(records.sites.map((site) => [site.id, site]));
+  const reportById = new Map(records.plantingReports.map((report) => [report.id, report]));
+  const approved = permanentSampleAnalytics(records, cleanFilters({}), { siteById, reportById });
+  const release = require("../config/permanentSampleRelease");
+  const policy = release.resolve();
+  const trees = approved.trees.map((tree) => ({ ...tree, reviewStatus: "Approved", pendingReview: null }));
+  const byId = new Map(trees.map((tree) => [tree.treeId, tree]));
+  const cohortById = new Map(records.verifiedPlantingCohorts.map((cohort) => [cohort.id, cohort]));
+  const pendingTrees = [];
+  let locationUnavailable = approved.locationUnavailable;
+  const validCoordinate = (value, limit) => value !== null && value !== "" && Number.isFinite(Number(value)) && Math.abs(Number(value)) <= limit;
+  // One open visit per cohort; the newest pending one if older data ever holds more.
+  const pendingVisits = records.sampleMonitoringVisits.filter((visit) => visit.status === "PENDING_ADMIN_APPROVAL")
+    .sort((a, b) => String(b.visitDate).localeCompare(String(a.visitDate)));
+  const seenCohorts = new Set();
+  for (const visit of pendingVisits) {
+    const cohort = cohortById.get(visit.cohortId);
+    if (!cohort || seenCohorts.has(cohort.id) || !release.allowsCohort(cohort.id, policy)) continue;
+    if (cohort.baseline?.approvalStatus !== "APPROVED" || cohort.samplingPlan?.status !== "APPROVED" || visit.siteId !== cohort.source?.siteId ||
+      visit.baselineVersion !== cohort.baselineVersion || visit.samplingPlanVersion !== cohort.samplingPlan.version) continue;
+    seenCohorts.add(cohort.id);
+    const site = siteById.get(cohort.source.siteId) || {}, report = reportById.get(cohort.source.plantingReportId) || {};
+    const units = new Map((cohort.baseline.sampleUnits || []).map((unit) => [unit.permanentId, unit]));
+    const date = dateOnly(visit.dateMonitored || visit.visitDate) || null, visitNumber = Number(visit.visitNumber) || null;
+    for (const assessed of visit.sampleAssessments || []) {
+      if (!units.has(assessed.sampleId) || !SAMPLE_CONDITIONS.includes(assessed.condition)) continue;
+      const known = byId.get(assessed.sampleId);
+      if (known) { known.pendingReview = { visitNumber, condition: assessed.condition, dateMonitored: date }; continue; }
+      const unit = units.get(assessed.sampleId);
+      if (!validCoordinate(unit.latitude, 90) || !validCoordinate(unit.longitude, 180) || (Number(unit.latitude) === 0 && Number(unit.longitude) === 0)) { locationUnavailable += 1; continue; }
+      pendingTrees.push({ treeId: assessed.sampleId, species: text(unit.species) || null, latitude: Number(unit.latitude), longitude: Number(unit.longitude),
+        siteId: cohort.source.siteId, siteName: site.siteName || site.name || "", barangay: site.barangay || report.barangay || "", reportNumber: report.reportNumber || "",
+        condition: assessed.condition, visitNumber, dateMonitored: date, reviewStatus: "Pending Review", pendingReview: null,
+        heightCentimeters: Number.isFinite(assessed.heightCentimeters) ? assessed.heightCentimeters : null, stemDiameterMillimeters: cmToMm(assessed.diameterCentimeters) });
+    }
+  }
+  return { trees, pendingTrees, locationUnavailable, summary: { approvedTrees: trees.length, pendingTrees: pendingTrees.length } };
+}
+
+module.exports = { getDashboard, getMapTrees, cleanFilters, dateOnly, lifecycleStatus };

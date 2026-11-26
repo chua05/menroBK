@@ -473,3 +473,52 @@ test("permanent-sample trees: one marker per Tree ID at its registered GPS with 
     for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
   }
 });
+
+// Full Planting Sites Map: the same approved permanent-sample trees as the analytics map, plus Pending Review trees kept apart.
+test("map trees: approved markers at registered GPS, Visit 2 updates them, pending stays provisional, drafts and returns never shown", async () => {
+  const { getMapTrees } = require("../src/services/analytics.service");
+  const saved = Object.fromEntries(Object.entries(data).map(([name, rows]) => [name, [...rows]]));
+  for (const rows of Object.values(data)) rows.length = 0;
+  data.sites.push({ id: "z8", siteName: "Zone 8 Green Site - Testing Site 02", barangay: "Zone VIII Poblacion", status: "active" },
+    { id: "bc", siteName: "Bical Site", barangay: "Bical", status: "active" });
+  data.plantingReports.push({ id: "r30", reportNumber: "RPT-2026-030", siteId: "z8" }, { id: "r31", reportNumber: "RPT-2026-031", siteId: "bc" });
+  const units = Array.from({ length: 10 }, (_, i) => ({ permanentId: `RPT-2026-030-T${String(i + 1).padStart(3, "0")}`, species: i < 7 ? "Kalamansi" : "Narra",
+    latitude: 12.6662 + i * 0.00002, longitude: 123.8806 + i * 0.00001 }));
+  const cohort = (id, siteId, reportId, sampleUnits) => ({ id, source: { siteId, plantingReportId: reportId }, baselineVersion: 1,
+    baseline: { approvalStatus: "APPROVED", sampleUnits }, samplingPlan: { status: "APPROVED", version: 1 } });
+  data.verifiedPlantingCohorts.push(cohort("c30", "z8", "r30", units),
+    cohort("c31", "bc", "r31", [{ permanentId: "B-T001", species: "Pili", latitude: 12.7, longitude: 123.9 }, { permanentId: "B-T002", species: "Pili", latitude: null, longitude: null }]));
+  const visit = (id, cohortId, siteId, visitNumber, date, status, conditions, ids) => ({ id, cohortId, siteId, visitNumber, status, visitDate: date, dateMonitored: date,
+    baselineVersion: 1, samplingPlanVersion: 1, sampleAssessments: conditions.map((condition, i) => ({ sampleId: ids[i], condition, heightCentimeters: 30 + i, diameterCentimeters: 0.6 })) });
+  const ids = units.map((unit) => unit.permanentId);
+  const visit1 = ["Healthy", "Healthy", "Healthy", "Healthy", "Healthy", "Healthy", "Damaged", "Damaged", "Damaged", "Dead"];
+  data.sampleMonitoringVisits.push(visit("v1", "c30", "z8", 1, "2026-11-20", "APPROVED", visit1, ids),
+    visit("d1", "c30", "z8", 2, "2026-11-25", "DRAFT", Array(10).fill("Dead"), ids),
+    visit("p1", "c31", "bc", 1, "2026-11-24", "PENDING_ADMIN_APPROVAL", ["Healthy", "Healthy"], ["B-T001", "B-T002"]),
+    visit("x1", "c31", "bc", 1, "2026-11-23", "RETURNED", ["Dead", "Dead"], ["B-T001", "B-T002"]));
+  try {
+    let result = await getMapTrees();
+    assert.equal(result.trees.length, 10, "RPT-2026-030 Visit 1: ten approved markers");
+    assert.deepEqual(result.trees.map((tree) => [tree.latitude, tree.longitude]), units.map((unit) => [unit.latitude, unit.longitude]), "stored positions, never moved");
+    const count = (trees, condition) => trees.filter((tree) => tree.condition === condition).length;
+    assert.deepEqual(["Healthy", "Damaged", "Dead"].map((condition) => count(result.trees, condition)), [6, 3, 1]);
+    assert.ok(result.trees.every((tree) => tree.reviewStatus === "Approved" && tree.reportNumber === "RPT-2026-030" && tree.barangay === "Zone VIII Poblacion" && tree.pendingReview === null));
+    assert.equal(result.trees[0].siteName, "Zone 8 Green Site - Testing Site 02");
+    assert.ok(!JSON.stringify(result).includes("Dead\",\"visitNumber\":2"), "a draft never shows as a visit");
+    assert.deepEqual(result.pendingTrees.map((tree) => [tree.treeId, tree.condition, tree.reviewStatus, tree.visitNumber]), [["B-T001", "Healthy", "Pending Review", 1]],
+      "pending Visit 1 is provisional; the returned visit and a tree without GPS are not drawn");
+    assert.equal(result.locationUnavailable, 1);
+    assert.equal(result.summary.approvedTrees, 10); assert.equal(result.summary.pendingTrees, 1);
+
+    // Visit 2 approved: same Tree IDs, new conditions; a pending Visit 3 does not override the approved condition.
+    data.sampleMonitoringVisits.splice(1, 1, visit("v2", "c30", "z8", 2, "2026-12-20", "APPROVED", ["Dead", ...visit1.slice(1)], ids),
+      visit("p3", "c30", "z8", 3, "2027-01-20", "PENDING_ADMIN_APPROVAL", Array(10).fill("Damaged"), ids));
+    result = await getMapTrees();
+    assert.equal(new Set(result.trees.map((tree) => tree.treeId)).size, 10, "no Tree ID duplicated across visits");
+    assert.equal(result.trees[0].condition, "Dead"); assert.equal(result.trees[0].visitNumber, 2);
+    assert.deepEqual(result.trees[0].pendingReview, { visitNumber: 3, condition: "Damaged", dateMonitored: "2027-01-20" }, "pending update is noted, not applied");
+    assert.ok(result.pendingTrees.every((tree) => !ids.includes(tree.treeId)), "an approved tree never gets a second provisional marker");
+  } finally {
+    for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
+  }
+});
