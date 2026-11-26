@@ -2,7 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const data = {
-  seedlingInventory: [], seedlingRequests: [],
+  seedlingInventory: [], seedlingRequests: [], sampleMonitoringVisits: [], verifiedPlantingCohorts: [],
   distributions: [{ id: "dist-1", status: "Released", plantingSiteId: "site-1", releasedAt: "2026-05-10", totalQuantityReleased: 80,
     items: [{ species: "Narra", releasedQuantity: 50 }, { species: "Molave", releasedQuantity: 30 }] }],
   events: [{ id: "event-1", plantingSiteId: "site-1", barangay: "Bical" }],
@@ -379,6 +379,48 @@ test("survival trend: weighted by counts, damaged survive, early and partial exc
     assert.equal(result.summary.overallSurvivalRate, 76.36);
     assert.deepEqual(result.monitoringConditions.map((item) => item.count), [72, 12, 26]);
     assert.deepEqual(result.barangaySurvival.map((item) => [item.barangay, item.monitored, item.rate]), [["Bical", 110, 76.36]]);
+  } finally {
+    for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
+  }
+});
+
+test("permanent-sample analytics: approved visits only, latest per cohort, completeness, filters, kept apart from official survival", async () => {
+  const saved = Object.fromEntries(Object.entries(data).map(([name, rows]) => [name, [...rows]]));
+  for (const rows of Object.values(data)) rows.length = 0;
+  data.sites.push({ id: "s1", siteName: "Zone 8 Site", barangay: "ZoneVIIIPoblacion", status: "active" }, { id: "s2", siteName: "Bical Site", barangay: "Bical", status: "active" });
+  data.plantingReports.push({ id: "r1", reportNumber: "RPT-1", siteId: "s1" }, { id: "r2", reportNumber: "RPT-2", siteId: "s2" });
+  const units = (prefix, species) => species.map((name, i) => ({ permanentId: `${prefix}-T00${i + 1}`, species: name }));
+  const cohort = (id, siteId, reportId, sampleUnits) => ({ id, source: { siteId, plantingReportId: reportId }, baselineVersion: 1,
+    baseline: { approvalStatus: "APPROVED", sampleUnits }, samplingPlan: { status: "APPROVED", version: 1 } });
+  data.verifiedPlantingCohorts.push(cohort("c1", "s1", "r1", units("A", ["Pili", "Pili", "Narra"])), cohort("c2", "s2", "r2", units("B", ["Pili", "Pili"])));
+  const visit = (id, cohortId, siteId, visitNumber, dateMonitored, status, conditions) => ({ id, cohortId, siteId, visitNumber, status, visitDate: dateMonitored, dateMonitored,
+    baselineVersion: 1, samplingPlanVersion: 1, sampleAssessments: conditions.map((condition, i) => ({ sampleId: `${cohortId === "c1" ? "A" : "B"}-T00${i + 1}`, condition })) });
+  data.sampleMonitoringVisits.push(
+    visit("v1", "c1", "s1", 1, "2026-09-10", "APPROVED", ["Healthy", "Healthy", "Healthy"]),
+    visit("v2", "c1", "s1", 2, "2026-10-10", "APPROVED", ["Healthy", "Damaged", "Dead"]),
+    visit("v3", "c1", "s1", 3, "2026-11-10", "PENDING_ADMIN_APPROVAL", ["Dead", "Dead", "Dead"]),
+    visit("v4", "c1", "s1", 3, "2026-11-12", "RETURNED", ["Dead", "Dead", "Dead"]),
+    visit("w1", "c2", "s2", 1, "2026-10-20", "APPROVED", ["Healthy", "Needs Rechecking"]));
+  // An official whole-cohort observation stays in its own metrics.
+  data.monitoringRecords.push({ id: "m1", plantingReportId: "r1", siteId: "s1", barangay: "ZoneVIIIPoblacion", quantityPlanted: 10,
+    history: [{ monitoredDate: "2026-10-01", healthyCount: 5, damagedCount: 0, deadCount: 5, reviewStatus: "Approved" }] });
+  try {
+    const all = await getDashboard({ dateFrom: "2026-09-01", dateTo: "2026-11-30" }), sample = all.permanentSample;
+    assert.equal(all.summary.overallSurvivalRate, 50, "official whole-cohort survival is unchanged by sample visits");
+    assert.deepEqual(sample.summary, { survivalRate: 66.67, totalSampleTrees: 5, monitoredCohorts: 2, cohortsAwaitingRechecking: 1, approvedVisits: 3, latestApprovedMonitoringDate: "2026-10-20" },
+      "c1 latest is Visit 2 (2 of 3 survive); c2 awaits rechecking, so it has no rate; pending and returned visits never count");
+    assert.deepEqual(sample.conditions.map((row) => row.count), [2, 1, 1, 1]);
+    assert.deepEqual(sample.trend.filter((row) => row.visits).map((row) => [row.period, row.rate, row.checked, row.visits]),
+      [["Sep 2026", 100, 3, 1], ["Oct 2026", 66.67, 3, 2]], "an incomplete visit is counted as a visit but has no rate");
+    assert.deepEqual(sample.cohorts.map((row) => [row.reportNumber, row.visitNumber, row.survivalRate]), [["RPT-2", 1, null], ["RPT-1", 2, 66.67]]);
+    const bical = (await getDashboard({ barangay: "Bical" })).permanentSample;
+    assert.deepEqual([bical.summary.totalSampleTrees, bical.summary.survivalRate], [2, null]);
+    const narra = (await getDashboard({ species: "Narra" })).permanentSample;
+    assert.deepEqual([narra.summary.totalSampleTrees, narra.summary.survivalRate, narra.conditions.map((row) => row.count)], [1, 0, [0, 0, 1, 0]], "species is taken per sample tree");
+    const september = (await getDashboard({ dateFrom: "2026-09-01", dateTo: "2026-09-30" })).permanentSample;
+    assert.deepEqual([september.summary.survivalRate, september.summary.approvedVisits], [100, 1]);
+    const none = (await getDashboard({ dateFrom: "2025-01-01", dateTo: "2025-12-31" })).permanentSample;
+    assert.deepEqual([none.summary.survivalRate, none.summary.totalSampleTrees, none.cohorts], [null, 0, []]);
   } finally {
     for (const [name, rows] of Object.entries(saved)) { data[name].length = 0; data[name].push(...rows); }
   }
