@@ -21,10 +21,14 @@ async function createUserProfile(user, options = {}) {
     ? prefetchedProfile
     : doc.exists ? { ...doc.data(), uid: doc.id } : null;
   const now = new Date();
+  // firstLogin (reported, never stored): this request created the profile, or a registered account has not signed in
+  // yet (lastLoginAt is null). A profile without a recorded lastLoginAt counts as returning.
   if (!existingProfile) {
+    let created = false;
     await db.runTransaction(async (transaction) => {
       const current = await transaction.get(ref);
       if (current.exists) return;
+      created = true;
       const userNumber = await nextRecordNumber(transaction, {
         prefix: "USR",
         counterKey: "users",
@@ -52,14 +56,18 @@ async function createUserProfile(user, options = {}) {
         lastLoginAt: now,
       });
     });
-    return withCompleteness((await ref.get()).data());
+    return { ...withCompleteness((await ref.get()).data()), firstLogin: created };
   } else {
+    const firstLogin = Object.hasOwn(existingProfile, "lastLoginAt") && existingProfile.lastLoginAt === null;
     await ref.update({ lastLoginAt: now, updatedAt: now });
-    return withCompleteness({
-      ...existingProfile,
-      lastLoginAt: now,
-      updatedAt: now,
-    });
+    return {
+      ...withCompleteness({
+        ...existingProfile,
+        lastLoginAt: now,
+        updatedAt: now,
+      }),
+      firstLogin,
+    };
   }
 }
 
