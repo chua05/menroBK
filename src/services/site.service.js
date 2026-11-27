@@ -417,7 +417,7 @@ const getAllSites = async () => {
   const documents = await Promise.all(
     snapshot.docs.map((doc) => ensureReadableSiteId(doc))
   );
-  return documents
+  return withVerifiedPlanted(documents
     .map((doc) => formatSiteDocument(doc))
     .filter(
       (site) =>
@@ -425,8 +425,25 @@ const getAllSites = async () => {
           .trim()
           .toLowerCase() !== "archived" &&
         isCurrentMunicipalitySite(site)
-    );
+    ));
 };
+
+// Adds the verified planted quantity (analytics "Verified Trees Planted" rules) that the maps colour sites by. The stored
+// `planted` field is never updated by the planting workflow, so it cannot drive a site's colour. The existing utilization
+// fields are left as they are: seedling-request validation reads them and its rules are not changed here. If the totals
+// cannot be read, the sites are returned as stored rather than failing the list.
+async function withVerifiedPlanted(sites) {
+  let totals;
+  try {
+    totals = await require("./analytics.service").getVerifiedPlantedBySite();
+  } catch (error) {
+    console.error("Unable to compute verified planted totals for sites:", error);
+    return sites;
+  }
+  return sites.map((site) => {
+    return { ...site, verifiedPlanted: totals.get(site.id) || 0 };
+  });
+}
 
 // --------------------------------
 // GET ARCHIVED SITES
@@ -461,7 +478,7 @@ const getSiteById = async (siteId) => {
     throw new Error("Site not found.");
   }
 
-  return formatSiteDocument(await ensureReadableSiteId(doc));
+  return (await withVerifiedPlanted([formatSiteDocument(await ensureReadableSiteId(doc))]))[0];
 };
 
 const participantSafeSite = (site) => {
@@ -480,6 +497,7 @@ const participantSafeSite = (site) => {
     "maximumCapacity",
     "targetTrees",
     "planted",
+    "verifiedPlanted",
     "latitude",
     "longitude",
     "polygon",

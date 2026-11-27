@@ -156,9 +156,9 @@ async function loadCollections(names = COLLECTIONS) {
     snapshots[index].docs.map((doc) => ({ id: doc.id, ...doc.data() }))]));
 }
 
-async function getDashboard(rawFilters = {}) {
-  const filters = cleanFilters(rawFilters);
-  const records = await loadCollections();
+// Every planting row with where and when it was planted and whether it counts as verified (accounted). Shared by the dashboard
+// and by site utilization, so a site's planted quantity is the same everywhere.
+function buildPlantingActivities(records) {
   const siteById = new Map(records.sites.map((site) => [site.id, site]));
   const eventById = new Map(records.events.map((event) => [event.id, event]));
   const reportById = new Map(records.plantingReports.map((report) => [report.id, report]));
@@ -207,6 +207,25 @@ async function getDashboard(rawFilters = {}) {
           (report.staffApprovalRequired !== true && report.reportingProgress === "Completed") });
     }
   }
+  return { plantingActivities, siteById, eventById, reportById, contributionsByReport, reportContext };
+}
+
+// Verified planted quantity per site id (all dates): the analytics "Verified Trees Planted" rules.
+async function getVerifiedPlantedBySite() {
+  const records = await loadCollections(["sites", "events", "plantingReports", "plantingContributions"]);
+  return verifiedPlantedBySite(buildPlantingActivities(records).plantingActivities);
+}
+
+function verifiedPlantedBySite(plantingActivities) {
+  const totals = new Map();
+  for (const item of plantingActivities) if (item.accounted === true && item.siteId) totals.set(item.siteId, (totals.get(item.siteId) || 0) + item.quantity);
+  return totals;
+}
+
+async function getDashboard(rawFilters = {}) {
+  const filters = cleanFilters(rawFilters);
+  const records = await loadCollections();
+  const { plantingActivities, siteById, eventById, reportById, contributionsByReport, reportContext } = buildPlantingActivities(records);
   const filteredRecordedPlanting = plantingActivities.filter((item) => matches(item, filters));
   const filteredPlanting = filteredRecordedPlanting.filter((item) => item.accounted === true);
 
@@ -411,6 +430,8 @@ async function getDashboard(rawFilters = {}) {
       ? null : (ended - started) / 3_600_000;
   })].filter((value) => value !== null);
 
+  // Utilization uses every verified planting at the site, whatever date range the dashboard is filtered to.
+  const verifiedPlantedAllTime = verifiedPlantedBySite(plantingActivities);
   const siteMap = activeSites.map((site) => {
     const sitePlanting = filteredPlanting.filter((item) => item.siteId === site.id);
     const siteMonitoring = latestMonitoring.filter((entry) => entry.siteId === site.id);
@@ -433,6 +454,7 @@ async function getDashboard(rawFilters = {}) {
     coverageRadiusMeters: number(site.coverageRadiusMeters),
     maximumCapacity: number(site.maximumCapacity),
     planted,
+    verifiedPlanted: verifiedPlantedAllTime.get(site.id) || 0,
     treeCondition,
     survivalRate: monitored > 0 ? Number(((surviving / monitored) * 100).toFixed(2)) : null,
     status: site.status || "active",
@@ -697,4 +719,4 @@ async function getMapTrees() {
   return { trees, pendingTrees, locationUnavailable, summary: { approvedTrees: trees.length, pendingTrees: pendingTrees.length } };
 }
 
-module.exports = { getDashboard, getMapTrees, cleanFilters, dateOnly, lifecycleStatus };
+module.exports = { getDashboard, getMapTrees, getVerifiedPlantedBySite, verifiedPlantedBySite, buildPlantingActivities, cleanFilters, dateOnly, lifecycleStatus };
