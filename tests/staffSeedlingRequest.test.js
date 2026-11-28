@@ -529,3 +529,40 @@ test("citizen and encoder remain unable to process an assisted request after a r
   assert.doesNotThrow(() => assertIndependentRequestAction(historic, "independent-officer"));
   assert.equal(JSON.stringify(historic), before);
 });
+
+async function releaseFrom(inventoryId, quantity) {
+  const body = payload(); body.items = [{ inventoryId, quantity }];
+  const request = await submit("staff", body);
+  const approved = await http(`/seedling-requests/${request.id}/approve`, "admin", "PATCH", { expectedVersion: 0 });
+  assert.equal(approved.status, 200, JSON.stringify(approved));
+  const released = await http(`/seedling-requests/${request.id}/release`, "officer", "PATCH", { expectedVersion: approved.data.requestVersion, availableReleaseDate: "2099-01-01", items: [{ inventoryId, releasedQuantity: quantity }] });
+  assert.equal(released.status, 200, JSON.stringify(released));
+  return memory.records("seedlingInventory").get(inventoryId);
+}
+
+test("release persists calculated stock status: exactly 30% is Limited, 0 is Out of Stock, legacy baseline is Needs Review", async () => {
+  const base = { species: "Cedar", initialQuantity: 100, totalReceivedQuantity: 100, reservedQuantity: 0, distributedQuantity: 0 };
+  memory.records("seedlingInventory").set("cedar", { ...base, currentQuantity: 32, availableQuantity: 32, status: "Available", stockStatus: "Available" });
+  const above = await releaseFrom("cedar", 1);
+  assert.equal(above.currentQuantity, 31); assert.equal(above.stockStatus, "Available");
+  const limited = await releaseFrom("cedar", 1);
+  assert.equal(limited.currentQuantity, 30); assert.equal(limited.stockStatus, "Limited"); assert.equal(limited.status, "Limited");
+  const out = await releaseFrom("cedar", 30);
+  assert.equal(out.currentQuantity, 0); assert.equal(out.stockStatus, "Out of Stock"); assert.equal(out.status, "Out of Stock");
+  memory.records("seedlingInventory").set("legacy", { species: "Legacy", initialQuantity: 100, replenishmentCycle: 1, currentQuantity: 10, availableQuantity: 10, reservedQuantity: 0, distributedQuantity: 0, status: "Available", stockStatus: "Available" });
+  const review = await releaseFrom("legacy", 2);
+  assert.equal(review.currentQuantity, 8); assert.equal(review.stockStatus, "Needs Review");
+});
+
+test("release from a reconciling legacy batch (no stored total) persists the same status a read calculates", async () => {
+  memory.records("seedlingInventory").set("legacy-ok", { species: "Molave", initialQuantity: 100, currentQuantity: 100, availableQuantity: 100,
+    reservedQuantity: 0, distributedQuantity: 0, status: "Available", stockStatus: "Available" });
+  const first = await releaseFrom("legacy-ok", 20);
+  assert.equal(first.currentQuantity, 80); assert.equal(first.distributedQuantity, 20);
+  assert.equal(first.stockStatus, "Available"); assert.equal(first.status, "Available");
+  const second = await releaseFrom("legacy-ok", 50);
+  assert.equal(second.currentQuantity, 30); assert.equal(second.distributedQuantity, 70);
+  assert.equal(second.stockStatus, "Limited"); assert.equal(second.status, "Limited");
+  assert.equal(second.initialQuantity, 100, "historical quantities are untouched");
+  assert.equal(second.totalReceivedQuantity, undefined, "no total is invented for a legacy batch");
+});

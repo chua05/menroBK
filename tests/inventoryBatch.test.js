@@ -101,7 +101,7 @@ test("create derives scientific name, preserves initial/current quantities, and 
   assert.match(created.body.data.batchReference, /^BAT-\d{4}-\d{3}$/);
 });
 
-test("zero stock is forced out of stock while positive Available and Limited are accepted", async () => {
+test("zero stock is forced out of stock and positive stock is calculated, not client-chosen", async () => {
   const zero = await create(validPayload({ initialQuantity: 0, stockStatus: "Available" }));
   assert.equal(zero.code, 201);
   assert.equal(zero.body.data.stockStatus, "Out of Stock");
@@ -109,7 +109,7 @@ test("zero stock is forced out of stock while positive Available and Limited are
   const available = await create(validPayload({ initialQuantity: 5, stockStatus: "Available" }));
   const limited = await create(validPayload({ initialQuantity: 5, stockStatus: "Limited" }));
   assert.equal(available.body.data.stockStatus, "Available");
-  assert.equal(limited.body.data.stockStatus, "Limited");
+  assert.equal(limited.body.data.stockStatus, "Available");
 });
 
 test("concurrent creates receive distinct transaction-backed batch references", async () => {
@@ -126,4 +126,86 @@ test("stock adjustment changes current quantity without rewriting initial quanti
   assert.equal(adjusted.initialQuantity, 100);
   assert.equal(adjusted.currentQuantity, 125);
   assert.equal(adjusted.batchReference, created.batchReference);
+});
+
+test("client-sent stockStatus is ignored on create; status is calculated", async () => {
+  const created = await create(validPayload({ initialQuantity: 100, stockStatus: "Limited" }));
+  assert.equal(created.code, 201);
+  assert.equal(created.body.data.stockStatus, "Available");
+  assert.equal(created.body.data.status, "Available");
+  assert.equal(created.body.data.totalReceivedQuantity, 100);
+  const bogus = await create(validPayload({ initialQuantity: 100, stockStatus: "Nonsense" }));
+  assert.equal(bogus.code, 201);
+});
+
+test("restock on baseline-known record updates total and status", async () => {
+  const created = await inventoryService.createInventory({ ...validPayload(), createdBy: "staff-1" });
+  records.get("seedlingInventory").set(created.id, { ...records.get("seedlingInventory").get(created.id), currentQuantity: 10, availableQuantity: 10, status: "Limited", stockStatus: "Limited" });
+  const adjusted = await inventoryService.addInventoryStock(created.id, 100, "staff-1");
+  assert.equal(adjusted.totalReceivedQuantity, 200);
+  assert.equal(adjusted.currentQuantity, 110);
+  assert.equal(adjusted.stockStatus, "Available");
+});
+
+test("restock on legacy restocked record leaves total missing and shows Needs Review", async () => {
+  table("seedlingInventory").set("legacy-1", {
+    species: "Narra", initialQuantity: 100, currentQuantity: 5, availableQuantity: 5,
+    replenishmentCycle: 1, isDeleted: false, status: "Limited", stockStatus: "Limited",
+  });
+  const adjusted = await inventoryService.addInventoryStock("legacy-1", 10, "staff-1");
+  assert.equal(adjusted.totalReceivedQuantity, null);
+  assert.equal(adjusted.stockStatus, "Needs Review");
+  const read = await inventoryService.getInventoryById("legacy-1");
+  assert.equal(read.totalReceivedQuantity, null);
+  assert.equal(read.stockStatus, "Needs Review");
+  assert.ok(read.stockBaselineIssue);
+  const list = await inventoryService.getAllInventory({ status: "Needs Review" });
+  assert.ok(list.some((item) => item.id === "legacy-1"));
+});
+
+test("update ignores client stockStatus", async () => {
+  const created = await inventoryService.createInventory({ ...validPayload(), createdBy: "staff-1" });
+  const res = response();
+  await inventoryController.updateInventory({ params: { id: created.id }, body: { stockStatus: "Limited", description: "x" }, user: { uid: "s" } }, res);
+  assert.equal(res.result.code, 200);
+  assert.equal(res.result.body.data.stockStatus, "Available");
+  const only = response();
+  await inventoryController.updateInventory({ params: { id: created.id }, body: { stockStatus: "Limited" }, user: { uid: "s" } }, only);
+  assert.equal(only.result.code, 200);
+  assert.equal(only.result.body.data.stockStatus, "Available");
+});
+
+test("restock of a batch created empty gets a known baseline", async () => {
+  const created = await create(validPayload({ initialQuantity: 0 }));
+  const adjusted = await inventoryService.addInventoryStock(created.body.data.id, 10, "staff-1");
+  assert.equal(adjusted.totalReceivedQuantity, 10);
+  assert.equal(adjusted.stockStatus, "Available");
+});
+
+test("restock never invents a baseline for null/empty initialQuantity or non-empty batches with 0 initial", async () => {
+  const cases = [
+    ["null-init", { initialQuantity: null, currentQuantity: 50, availableQuantity: 50 }],
+    ["blank-init", { initialQuantity: "", currentQuantity: 50, availableQuantity: 50 }],
+    ["nonempty-zero-init", { initialQuantity: 0, currentQuantity: 50, availableQuantity: 50 }],
+    ["zero-init-distributed", { initialQuantity: 0, currentQuantity: 0, availableQuantity: 0, distributedQuantity: 4 }],
+    ["zero-init-reserved", { initialQuantity: 0, currentQuantity: 0, availableQuantity: 0, reservedQuantity: 4 }],
+  ];
+  for (const [id, fields] of cases) {
+    table("seedlingInventory").set(id, { species: "Narra", isDeleted: false, ...fields });
+    const adjusted = await inventoryService.addInventoryStock(id, 10, "staff-1");
+    assert.equal(adjusted.totalReceivedQuantity, null, id);
+    assert.equal(adjusted.stockStatus, "Needs Review", id);
+    assert.equal(table("seedlingInventory").get(id).totalReceivedQuantity, undefined, id);
+  }
+});
+
+test("restock of an unprovable pre-counter legacy batch never persists a total", async () => {
+  table("seedlingInventory").set("pre-counter", { species: "Narra", isDeleted: false, initialQuantity: 100, currentQuantity: 50, availableQuantity: 50, distributedQuantity: 250 });
+  const adjusted = await inventoryService.addInventoryStock("pre-counter", 10, "staff-1");
+  assert.equal(adjusted.stockStatus, "Needs Review");
+  assert.equal(table("seedlingInventory").get("pre-counter").totalReceivedQuantity, undefined);
+  table("seedlingInventory").set("proven", { species: "Narra", isDeleted: false, initialQuantity: 100, currentQuantity: 30, availableQuantity: 30, distributedQuantity: 70 });
+  const ok = await inventoryService.addInventoryStock("proven", 10, "staff-1");
+  assert.equal(ok.totalReceivedQuantity, 110);
+  assert.equal(ok.stockStatus, "Available");
 });

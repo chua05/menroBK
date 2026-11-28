@@ -1704,3 +1704,46 @@ test("POST /planting-reports answers 403 for another participant's release and i
   assert.equal(res.result.code, 403, JSON.stringify(res.result.body));
   assert.equal(res.result.body.message, "You can report only your own released seedlings.");
 });
+
+test("release snapshots batch details on each distribution item and deducts each batch once", async () => {
+  seedApproved("request-batches", "EVT-BATCHES", 100);
+  table("seedlingInventory").set("kamias-batch", {
+    species: "Kamias", availableQuantity: 100, currentQuantity: 100, reservedQuantity: 0, distributedQuantity: 0, lowStockThreshold: 20,
+    batchReference: "BAT-2026-001", inventoryNumber: "INV-2026-001", sourceType: "Purchase", sourceSpecification: "Nursery A", dateReceived: "2026-10-12",
+  });
+  table("seedlingInventory").set("mango", {
+    species: "Mango", availableQuantity: 50, currentQuantity: 50, reservedQuantity: 0, distributedQuantity: 0, lowStockThreshold: 20,
+    batchReference: "BAT-2026-002", inventoryNumber: "INV-2026-002", sourceType: "Donation", sourceSpecification: "DENR", dateReceived: "2026-11-01",
+  });
+  table("seedlingRequests").set("request-batches", {
+    ...table("seedlingRequests").get("request-batches"),
+    items: [{ inventoryId: "kamias-batch", species: "Kamias", quantity: 100 }, { inventoryId: "mango", species: "Mango", quantity: 20 }],
+  });
+  await requestService.releaseSeedlingRequest("request-batches", "staff-1", {
+    items: [{ inventoryId: "kamias-batch", releasedQuantity: 100 }, { inventoryId: "mango", releasedQuantity: 20 }],
+  });
+  const distribution = table("distributions").get("request-batches");
+  assert.equal(distribution.items.length, 2);
+  assert.deepEqual(
+    distribution.batchAllocations.map((row) => [row.inventoryId, row.itemIndex, row.batchReference, row.inventoryNumber, row.sourceType, row.sourceSpecification, row.dateReceived]),
+    [["kamias-batch", 0, "BAT-2026-001", "INV-2026-001", "Purchase", "Nursery A", "2026-10-12"],
+     ["mango", 1, "BAT-2026-002", "INV-2026-002", "Donation", "DENR", "2026-11-01"]]);
+  for (const item of distribution.items) assert.equal("batchReference" in item || "sourceSpecification" in item, false);
+  const request = table("seedlingRequests").get("request-batches");
+  assert.equal(JSON.stringify(request.releasedItems).includes("batchReference"), false);
+  assert.equal("batchAllocations" in request, false);
+  assert.equal(distribution.totalQuantityReleased, 120);
+  assert.equal(table("seedlingInventory").get("kamias-batch").currentQuantity, 0);
+  assert.equal(table("seedlingInventory").get("mango").currentQuantity, 30);
+});
+
+test("release snapshot normalises a legacy Timestamp dateReceived to a Manila date", async () => {
+  seedApproved("request-ts-date", "EVT-TS-DATE", 100);
+  table("seedlingInventory").set("calamansi", {
+    ...table("seedlingInventory").get("calamansi"),
+    dateReceived: { toDate: () => new Date("2026-03-04T18:00:00Z") },
+  });
+  table("seedlingInventory").set("calamansi", { ...table("seedlingInventory").get("calamansi"), availableQuantity: 400, currentQuantity: 400 });
+  await requestService.releaseSeedlingRequest("request-ts-date", "staff-1", { items: [{ inventoryId: "calamansi", releasedQuantity: 100 }] });
+  assert.equal(table("distributions").get("request-ts-date").batchAllocations[0].dateReceived, "2026-03-05");
+});

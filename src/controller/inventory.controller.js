@@ -8,7 +8,6 @@ const { SAPLING_SPECIES, findSaplingSpecies } = require("../data/saplingSpecies"
 const ALLOWED_CATEGORIES = Object.freeze([
   "Native Tree", "Fruit Tree", "Hardwood", "Mangrove", "Ornamental", "Other",
 ]);
-const ALLOWED_STOCK_STATUSES = Object.freeze(["Available", "Limited", "Out of Stock"]);
 const ALLOWED_SOURCE_TYPES = Object.freeze([
   "MENRO Propagation", "DENR / PENRO", "Provincial Government",
   "Other Government Office", "Donation", "Wildling Collection",
@@ -51,13 +50,6 @@ function otherSpecification(choice, specification, label) {
   return choice === "Other" ? value : "";
 }
 
-function normalizeStockStatus(value, quantity) {
-  if (quantity === 0) return "Out of Stock";
-  const status = requiredChoice(value, ALLOWED_STOCK_STATUSES, "stock status");
-  if (status === "Out of Stock") throw new Error("Positive inventory must be Available or Limited.");
-  return status;
-}
-
 const getSpeciesMaster = (req, res) =>
   res.status(200).json({ success: true, data: SAPLING_SPECIES });
 
@@ -71,7 +63,6 @@ const addInventory = async (req, res) => {
     const category = requiredChoice(req.body?.category, ALLOWED_CATEGORIES, "category / type");
     const categorySpecification = otherSpecification(category, req.body?.categorySpecification, "Category / type specification");
     const initialQuantity = parseWholeNumber(req.body?.initialQuantity ?? req.body?.quantity, "Initial quantity");
-    const stockStatus = normalizeStockStatus(req.body?.stockStatus ?? req.body?.status, initialQuantity);
     const sourceType = requiredChoice(req.body?.sourceType, ALLOWED_SOURCE_TYPES, "source type");
     const sourceSpecification = otherSpecification(sourceType, req.body?.sourceSpecification, "Source specification");
     const storageLocation = requiredChoice(req.body?.storageLocation, ALLOWED_STORAGE_LOCATIONS, "nursery / storage location");
@@ -82,7 +73,7 @@ const addInventory = async (req, res) => {
     const inventory = await createInventory({
       species: species.treeName,
       scientificName: species.scientificName,
-      category, categorySpecification, initialQuantity, stockStatus,
+      category, categorySpecification, initialQuantity,
       sourceType, sourceSpecification,
       dateReceived: validateDateReceived(req.body?.dateReceived),
       storageLocation, storageLocationSpecification, description,
@@ -118,10 +109,6 @@ const updateInventory = async (req, res) => {
       return res.status(400).json({ success: false, message: "Species, batch reference, and historical initial quantity cannot be changed during ordinary editing." });
     }
     const updateData = {};
-    if (req.body?.stockStatus !== undefined) {
-      const current = await getInventoryById(req.params.id);
-      updateData.stockStatus = normalizeStockStatus(req.body.stockStatus, Number(current.currentQuantity ?? current.availableQuantity ?? 0));
-    }
     if (req.body?.sourceType !== undefined) {
       updateData.sourceType = requiredChoice(req.body.sourceType, ALLOWED_SOURCE_TYPES, "source type");
       updateData.sourceSpecification = otherSpecification(updateData.sourceType, req.body.sourceSpecification, "Source specification");
@@ -134,7 +121,8 @@ const updateInventory = async (req, res) => {
       updateData.description = clean(req.body.description);
       if (updateData.description.length > 500) throw new Error("Description must not exceed 500 characters.");
     }
-    if (Object.keys(updateData).length === 0) throw new Error("No editable inventory fields provided.");
+    const statusOnly = req.body?.stockStatus !== undefined || req.body?.status !== undefined;
+    if (Object.keys(updateData).length === 0 && !statusOnly) throw new Error("No editable inventory fields provided.");
     const inventory = await updateInventoryById(req.params.id, updateData, req.user.uid);
     return res.status(200).json({ success: true, message: "Seedling record updated successfully.", data: inventory });
   } catch (error) {

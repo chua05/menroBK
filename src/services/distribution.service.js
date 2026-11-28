@@ -3,6 +3,7 @@ const {
 } = require("../config/firebase");
 
 const { isDistributionOwner, loadDistributionRequest } = require("../utils/distributionOwnership.util");
+const { batchDateText } = require("../utils/batchDate.util");
 const { hasReportableBalance } = require("../utils/plantingBalance.util");
 
 const COLLECTION =
@@ -14,6 +15,18 @@ const distributionCollection =
 // ========================================
 // HELPER — NORMALIZE REQUEST ITEMS
 // ========================================
+
+const ALLOCATION_KEYS = ["batchReference", "inventoryNumber", "sourceType", "sourceSpecification", "dateReceived"];
+
+// Staff-only release-time batch snapshot. Empty strings are kept so "snapshotted empty" differs from "not snapshotted".
+const normalizeBatchAllocations = (value) =>
+  Array.isArray(value)
+    ? value.map((entry) => ({
+        inventoryId: String(entry?.inventoryId || ""),
+        itemIndex: Number.isInteger(entry?.itemIndex) ? entry.itemIndex : -1,
+        ...Object.fromEntries(ALLOCATION_KEYS.map((key) => [key, String(entry?.[key] ?? "")])),
+      }))
+    : [];
 
 const normalizeRequestItems = (
   requestData
@@ -163,6 +176,8 @@ const createDistributionRecordInTransaction = (
     // Canonical multi-item structure.
     items,
 
+    batchAllocations: normalizeBatchAllocations(requestData.batchAllocations),
+
     totalQuantityReleased,
 
     purpose:
@@ -215,6 +230,74 @@ const createDistributionRecordInTransaction = (
 
     ...distributionData,
   };
+};
+
+// ========================================
+// READ-TIME ENRICHMENT (admin/staff reads only, no writes)
+// ========================================
+
+const readDocs = async (refs) => {
+  if (refs.length === 0) return [];
+  if (typeof db.getAll === "function") return db.getAll(...refs);
+  return Promise.all(refs.map((docRef) => docRef.get()));
+};
+
+const enrichDistributions = async (distributions) => {
+  const inventoryIds = new Set();
+  const userIds = new Set();
+  for (const distribution of distributions) {
+    for (const item of Array.isArray(distribution.items) ? distribution.items : []) {
+      if (item && typeof item.inventoryId === "string" && item.inventoryId) inventoryIds.add(item.inventoryId);
+    }
+    if (typeof distribution.releasedBy === "string" && distribution.releasedBy) userIds.add(distribution.releasedBy);
+  }
+  const inventoryList = [...inventoryIds];
+  const userList = [...userIds];
+  const docs = await readDocs([
+    ...inventoryList.map((id) => db.collection("seedlingInventory").doc(id)),
+    ...userList.map((id) => db.collection("users").doc(id)),
+  ]);
+  const inventoryById = new Map(inventoryList.map((id, index) => [id, docs[index]]));
+  const userById = new Map(userList.map((id, index) => [id, docs[inventoryList.length + index]]));
+
+  const fieldsFrom = (source) =>
+    Object.fromEntries(ALLOCATION_KEYS.map((key) => [key, key === "dateReceived" ? batchDateText(source?.[key]) : String(source?.[key] ?? "")]));
+
+  return distributions.map((distribution) => {
+    const userDoc = userById.get(distribution.releasedBy);
+    const user = userDoc && userDoc.exists ? userDoc.data() || {} : {};
+    const releasedByName = String(user.fullName || user.name || user.displayName || "");
+    const snapshots = Array.isArray(distribution.batchAllocations) ? distribution.batchAllocations : [];
+    const items = Array.isArray(distribution.items)
+      ? distribution.items.map((item, index) => {
+          const inventoryId = item?.inventoryId || "";
+          const inventoryDoc = inventoryById.get(item?.inventoryId);
+          const live = inventoryDoc && inventoryDoc.exists ? inventoryDoc.data() || {} : null;
+          const snapshot = snapshots.find((entry) => entry && entry.itemIndex === index && entry.inventoryId === inventoryId);
+          // All-or-nothing: never merge release-time and current fields.
+          let basis = "unavailable";
+          let fields = fieldsFrom({});
+          if (snapshot) {
+            basis = "release";
+            fields = fieldsFrom(snapshot);
+          } else if (live) {
+            basis = "current-record";
+            fields = fieldsFrom(live);
+          }
+          return {
+            ...item,
+            allocation: {
+              inventoryId,
+              ...fields,
+              basis,
+              liveRecordFound: Boolean(live),
+              recordFound: basis !== "unavailable",
+            },
+          };
+        })
+      : distribution.items;
+    return { ...distribution, items, releasedByName };
+  });
 };
 
 // ========================================
@@ -293,7 +376,7 @@ const getAllDistributions =
         );
     }
 
-    return distributions;
+    return enrichDistributions(distributions);
   };
 
 // ========================================
@@ -313,12 +396,16 @@ const getDistributionById =
       );
     }
 
-    return {
-      id:
-        doc.id,
+    const [enriched] = await enrichDistributions([
+      {
+        id:
+          doc.id,
 
-      ...doc.data(),
-    };
+        ...doc.data(),
+      },
+    ]);
+
+    return enriched;
   };
 
 // ========================================

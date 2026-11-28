@@ -8,6 +8,7 @@ const {
   "firebase-admin/firestore"
 );
 const { nextRecordNumber } = require("../utils/recordNumber.util");
+const { calculateStockStatus, stockStatusForRecord, resolveReceivedBaseline } = require("../utils/stockStatus.util");
 const {
   createLowStockNotificationsInTransaction,
   createOutOfStockNotificationsInTransaction,
@@ -24,9 +25,20 @@ const inventoryCollection =
 // AUTOMATIC STATUS
 // ========================================
 
-const calculateInventoryStatus = (currentQuantity, preferredStatus = "Available") => {
-  if (Number(currentQuantity || 0) <= 0) return "Out of Stock";
-  return preferredStatus === "Limited" ? "Limited" : "Available";
+const calculateInventoryStatus = (currentQuantity, totalReceived) =>
+  calculateStockStatus(currentQuantity, totalReceived);
+
+// Read-time decoration: computed status and baseline, never persisted from here.
+const withComputedStock = (item) => {
+  const computed = stockStatusForRecord(item);
+  return {
+    ...item,
+    status: computed.status,
+    stockStatus: computed.status,
+    totalReceivedQuantity: computed.totalReceivedQuantity,
+    remainingStockPercent: computed.remainingPercent,
+    stockBaselineIssue: computed.baselineIssue,
+  };
 };
 
 // ========================================
@@ -58,6 +70,9 @@ const createInventory = async (
 
     initialQuantity,
 
+    // Total ever received for this batch; increased on every restock.
+    totalReceivedQuantity: initialQuantity,
+
     currentQuantity: initialQuantity,
 
     // Compatibility aliases for existing request, analytics, and release code.
@@ -88,8 +103,9 @@ const createInventory = async (
         data.description || ""
       ).trim(),
 
-    stockStatus: calculateInventoryStatus(initialQuantity, data.stockStatus),
-    status: calculateInventoryStatus(initialQuantity, data.stockStatus),
+    // Client-sent status is ignored; status is always calculated.
+    stockStatus: calculateInventoryStatus(initialQuantity, initialQuantity),
+    status: calculateInventoryStatus(initialQuantity, initialQuantity),
 
     isDeleted: false,
 
@@ -149,7 +165,8 @@ const getAllInventory = async (
       .filter(
         (item) =>
           item.isDeleted !== true
-      );
+      )
+      .map(withComputedStock);
 
   if (status) {
     inventory =
@@ -240,8 +257,10 @@ const getAvailableInventoryItems =
 
         batchReference: item.batchReference || "",
 
-        status:
-          item.status || "",
+        ...(() => {
+          const { status } = stockStatusForRecord(item);
+          return { status, stockStatus: status };
+        })(),
       }))
       .sort((a, b) =>
         String(a.species)
@@ -271,10 +290,10 @@ const getInventoryById =
       );
     }
 
-    return {
+    return withComputedStock({
       id: doc.id,
       ...doc.data(),
-    };
+    });
   };
 
 // ========================================
@@ -312,13 +331,12 @@ const updateInventoryById =
 
         const updates = {};
 
-        if (updateData.stockStatus !== undefined) {
-          const currentQuantity = Number(
-            currentData.currentQuantity ?? currentData.availableQuantity ?? 0
-          );
-          const status = calculateInventoryStatus(currentQuantity, updateData.stockStatus);
-          updates.stockStatus = status;
-          updates.status = status;
+        // Any client-sent stockStatus is ignored; status is recalculated
+        // from stored quantities on every write.
+        {
+          const recalculated = stockStatusForRecord(currentData).status;
+          updates.stockStatus = recalculated;
+          updates.status = recalculated;
         }
 
         for (const field of [
@@ -489,11 +507,14 @@ const updateInventoryById =
           updates.currentQuantity =
             newAvailableQuantity;
 
-          updates.status =
-            calculateInventoryStatus(
-              newAvailableQuantity,
-              effectiveThreshold
-            );
+          {
+            const quantityStatus = stockStatusForRecord({
+              ...currentData,
+              currentQuantity: newAvailableQuantity,
+            }).status;
+            updates.status = quantityStatus;
+            updates.stockStatus = quantityStatus;
+          }
           updates.lowStockAlertActive = newAvailableQuantity <= effectiveThreshold;
 
           if (currentAvailableQuantity > previousThreshold &&
@@ -527,11 +548,9 @@ const updateInventoryById =
           // If only the threshold changed,
           // recalculate status using the
           // current available stock.
-          updates.status =
-            calculateInventoryStatus(
-              currentAvailableQuantity,
-              effectiveThreshold
-            );
+          const thresholdStatus = stockStatusForRecord(currentData).status;
+          updates.status = thresholdStatus;
+          updates.stockStatus = thresholdStatus;
           const newlyLow = currentAvailableQuantity > previousThreshold &&
             currentAvailableQuantity <= effectiveThreshold;
           updates.lowStockAlertActive = currentAvailableQuantity <= effectiveThreshold;
@@ -566,10 +585,10 @@ const updateInventoryById =
     const updatedDoc =
       await docRef.get();
 
-    return {
+    return withComputedStock({
       id: updatedDoc.id,
       ...updatedDoc.data(),
-    };
+    });
   };
 
 // ========================================
@@ -615,11 +634,20 @@ const addInventoryStock =
           currentAvailable +
           quantityToAdd;
 
+        // A batch created empty and never restocked has a known baseline of 0.
+        const neverReceivedAny =
+          typeof currentData.initialQuantity === "number" &&
+          Number.isInteger(currentData.initialQuantity) &&
+          currentData.initialQuantity === 0 &&
+          !(Number(currentData.replenishmentCycle) > 0) &&
+          (currentData.totalReceivedQuantity === undefined || currentData.totalReceivedQuantity === 0) &&
+          currentAvailable === 0 &&
+          Number(currentData.distributedQuantity || 0) === 0 &&
+          Number(currentData.reservedQuantity || 0) === 0;
+        const baseline = neverReceivedAny ? 0 : resolveReceivedBaseline(currentData);
+        const newTotalReceived = baseline === null ? null : baseline + quantityToAdd;
         const newStatus =
-          calculateInventoryStatus(
-            newAvailableQuantity,
-            currentData.stockStatus || currentData.status
-          );
+          calculateInventoryStatus(newAvailableQuantity, newTotalReceived);
 
         const replenishmentCycle = Number(currentData.replenishmentCycle || 0) + 1;
         const now = Timestamp.now();
@@ -648,6 +676,8 @@ const addInventoryStock =
             stockStatus:
               newStatus,
 
+            ...(newTotalReceived === null ? {} : { totalReceivedQuantity: newTotalReceived }),
+
             replenishmentCycle,
 
             lowStockAlertActive: newAvailableQuantity <= Number(currentData.lowStockThreshold ?? 20),
@@ -664,10 +694,10 @@ const addInventoryStock =
     const updatedDoc =
       await docRef.get();
 
-    return {
+    return withComputedStock({
       id: updatedDoc.id,
       ...updatedDoc.data(),
-    };
+    });
   };
 
 // ========================================
@@ -752,7 +782,7 @@ const restoreInventoryById = async (id, restoredBy) => {
 
 const getArchivedInventory = async () => {
   const snapshot = await inventoryCollection.where("isDeleted", "==", true).get();
-  return snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }))
+  return snapshot.docs.map((doc) => withComputedStock({ id: doc.id, ...doc.data() }))
     .sort((a, b) => String(a.species || "").localeCompare(String(b.species || "")));
 };
 

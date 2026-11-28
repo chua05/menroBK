@@ -13,11 +13,8 @@ const {
   "firebase-admin/firestore"
 );
 
-const {
-  calculateInventoryStatus,
-} = require(
-  "./inventory.service"
-);
+const { stockStatusForRecord } = require("../utils/stockStatus.util");
+const { batchDateText } = require("../utils/batchDate.util");
 
 const siteService = require("./site.service");
 
@@ -2457,6 +2454,16 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       releaseType: entered.releasedQuantity === Number(requested.quantity) ? "Complete" : "Partial",
       shortReleaseReason: entered.shortReleaseReason,
     }));
+    // Staff-only release-time batch snapshot; stored on the distribution document only, never on request/event items.
+    const batchAllocations = inventoryRows.map(({ requested, stock }, itemIndex) => ({
+      inventoryId: requested.inventoryId,
+      itemIndex,
+      batchReference: cleanString(stock.batchReference),
+      inventoryNumber: cleanString(stock.inventoryNumber),
+      sourceType: cleanString(stock.sourceType),
+      sourceSpecification: cleanString(stock.sourceSpecification),
+      dateReceived: batchDateText(stock.dateReceived),
+    }));
     const totalQuantityReleased = releaseItems.reduce((sum, item) => sum + item.releasedQuantity, 0);
     const reportingPolicy = purposePolicy.releasePolicy(request.approvedPurposePolicy, totalQuantityReleased);
     await parentForEventInTransaction(transaction, request.eventId, {
@@ -2478,13 +2485,18 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
       const outOfStockCycle = becameOutOfStock
         ? Number(stock.outOfStockCycle || 0) + 1
         : Number(stock.outOfStockCycle || 0);
-      transaction.update(ref, {
+      const quantities = {
         availableQuantity: newAvailable,
         currentQuantity: newAvailable,
         reservedQuantity: isLegacyReserved ? reserved - Number(requested.quantity) : reserved,
         distributedQuantity: Number(stock.distributedQuantity || 0) + released,
-        status: calculateInventoryStatus(newAvailable, stock.stockStatus || stock.status),
-        stockStatus: calculateInventoryStatus(newAvailable, stock.stockStatus || stock.status),
+      };
+      // Status comes from the quantities being saved, so a legacy batch's baseline check sees the new distributed count.
+      const releasedStatus = stockStatusForRecord({ ...stock, ...quantities }).status;
+      transaction.update(ref, {
+        ...quantities,
+        status: releasedStatus,
+        stockStatus: releasedStatus,
         lowStockAlertActive: newAvailable <= lowStockThreshold,
         lowStockCycle,
         outOfStockCycle,
@@ -2521,7 +2533,7 @@ const releaseSeedlingRequest = async (id, releasedBy, releaseData) => {
 
     createDistributionRecordInTransaction(transaction, {
       requestId: id,
-      requestData: { ...request, items: releaseItems },
+      requestData: { ...request, items: releaseItems, batchAllocations },
       releasedBy,
       releasedAt: now,
     });
